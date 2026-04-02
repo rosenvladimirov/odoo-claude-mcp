@@ -238,12 +238,82 @@ odoo-claude-mcp/
 │   ├── settings.json           # Claude Code settings
 │   └── .mcp.json               # MCP server endpoint (internal Docker network)
 │
-└── odoo-rpc-mcp/               # MCP server service
-    ├── Dockerfile              # Python 3.13-slim, non-root user
-    ├── server.py               # 18 MCP tools (CRUD + fiscal positions)
-    ├── requirements.txt        # mcp >= 1.0.0, uvicorn
-    └── odoo_connect_cli.py     # CLI connection manager with SSH support
+├── odoo-rpc-mcp/               # MCP server service
+│   ├── Dockerfile              # Python 3.13-slim, non-root user
+│   ├── server.py               # 18 MCP tools (CRUD + fiscal positions)
+│   ├── requirements.txt        # mcp >= 1.0.0, uvicorn
+│   └── odoo_connect_cli.py     # CLI connection manager with SSH support
+│
+└── tools/                      # Standalone desktop & CLI utilities
+    ├── odoo_connect.py         # GTK4 GUI connection manager (GNOME)
+    ├── odoo_module_analyzer.py # Odoo module → Claude memory file generator
+    └── glb_viewer.py           # GTK4 + OpenGL 3D GLB model viewer
 ```
+
+## Desktop & CLI Tools
+
+The `tools/` directory contains standalone utilities that complement the MCP server. These run on the **host machine** (not inside Docker).
+
+### Odoo Connection Manager (GUI)
+
+GTK4/libadwaita desktop app for managing Odoo connections — GNOME Settings style with sidebar navigation.
+
+```bash
+# Requirements: GTK4, libadwaita
+pip install PyGObject
+python tools/odoo_connect.py
+```
+
+Features:
+- Add, edit, delete Odoo connections with a visual interface
+- Test connections (XML-RPC authentication)
+- SSH configuration per connection (host, user, port, auth method)
+- Manage `~/odoo-claude-connections/connections.json` — shared with the MCP server
+
+Set `ODOO_CONNECTIONS_DIR` to override the default path.
+
+### Odoo Module Analyzer
+
+Analyzes an Odoo module's source code and generates a Claude-compatible memory file with XML-RPC operation examples.
+
+```bash
+# Requirements
+pip install anthropic
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# Analyze a single module
+python tools/odoo_module_analyzer.py /path/to/my_module
+
+# Analyze all modules in a repo
+python tools/odoo_module_analyzer.py /path/to/repo --all-modules
+
+# Output to custom directory
+python tools/odoo_module_analyzer.py /path/to/module --output ./memory/
+
+# Dry run — see which files would be sent
+python tools/odoo_module_analyzer.py /path/to/module --dry-run
+```
+
+Generates a markdown file with:
+- Module description and key models
+- Ready-to-copy XML-RPC operations (`search_read`, `create`, `write`, custom methods)
+- Quick command triggers
+- Dependencies and limitations
+
+### GLB 3D Viewer
+
+GTK4 + OpenGL viewer for `.glb` (glTF 2.0 binary) 3D model files — useful for inspecting product design assets.
+
+```bash
+# Requirements: GTK4, libadwaita, PyOpenGL, numpy, pygltflib
+pip install PyGObject PyOpenGL numpy pygltflib
+python tools/glb_viewer.py model.glb
+```
+
+Features:
+- Mouse rotation and zoom
+- Auto-color palette for meshes without materials
+- Supports positions, normals, and indices
 
 ## How It Works
 
