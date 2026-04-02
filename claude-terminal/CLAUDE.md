@@ -13,15 +13,35 @@ Only work with THIS Odoo connection. Do NOT connect to other instances.
 - **HTTP**: `http://odoo-rpc-mcp:8084/mcp`
 - **Health**: `http://odoo-rpc-mcp:8084/health`
 
-## MCP Tools (20)
+## MCP Tools (21)
 
 ### Connection: `odoo_connect`, `odoo_disconnect`, `odoo_connections`
 ### Introspection: `odoo_list_models`, `odoo_fields_get`
 ### CRUD: `odoo_search`, `odoo_read`, `odoo_search_read`, `odoo_search_count`, `odoo_create`, `odoo_write`, `odoo_unlink`
 ### Advanced: `odoo_execute`, `odoo_report`, `odoo_version`
+### View Refresh: `odoo_refresh`
 ### Fiscal Position: `odoo_fp_list`, `odoo_fp_details`, `odoo_fp_configure`, `odoo_fp_remove_action`, `odoo_fp_types`
 
 All tools accept `connection` parameter (default: "default").
+
+## IMPORTANT: Always refresh after mutations
+
+After creating, updating, or deleting records, ALWAYS call `odoo_refresh` with the
+model name so the user's Odoo browser tab auto-reloads:
+
+```
+odoo_create(model="sale.order", values={...})
+→ odoo_refresh(model="sale.order")
+
+odoo_write(model="res.partner", ids=[42], values={...})
+→ odoo_refresh(model="res.partner", res_id=42)
+
+odoo_execute(model="sale.order", method="action_confirm", args=[[42]])
+→ odoo_refresh(model="sale.order", res_id=42)
+```
+
+This sends a bus notification to the user's browser. The list/form/kanban view
+reloads automatically without page refresh.
 
 ---
 

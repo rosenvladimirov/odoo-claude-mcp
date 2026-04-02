@@ -572,6 +572,31 @@ TOOLS = [
             },
         },
     ),
+    # ── View Refresh (push notification to Odoo browser tab) ──
+    Tool(
+        name="odoo_refresh",
+        description=(
+            "Send a refresh notification to the user's Odoo browser tab. "
+            "Call this after creating, updating, or deleting records so the "
+            "user's list/form/kanban view reloads automatically. "
+            "Requires l10n_bg_claude_terminal module installed on the Odoo instance."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {
+                    "type": "string",
+                    "description": "Model name to refresh (e.g. 'sale.order'). Empty = refresh any view.",
+                },
+                "res_id": {
+                    "type": "integer",
+                    "description": "Specific record ID (0 = refresh all records in the view).",
+                    "default": 0,
+                },
+            },
+        },
+    ),
     # ── Fiscal Position Configuration (l10n_bg_tax_admin) ──
     Tool(
         name="odoo_fp_list",
@@ -830,6 +855,18 @@ def _execute_tool(name: str, args: dict) -> Any:
             "content_base64": result.get("result", ""),
             "state": result.get("state", False),
         }
+
+    # ── View Refresh ──
+    elif name == "odoo_refresh":
+        payload = {
+            "model": args.get("model", ""),
+            "res_id": args.get("res_id", 0),
+        }
+        conn.execute_kw(
+            "res.users", "notify_claude_refresh",
+            [payload],
+        )
+        return {"status": "refresh_sent", **payload}
 
     # ── Fiscal Position Configuration ──
     elif name == "odoo_fp_list":
