@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "odoo-rpc": {
+      "type": "http",
+      "url": "http://odoo-rpc-mcp:8084/mcp"
+    }
+  }
+}

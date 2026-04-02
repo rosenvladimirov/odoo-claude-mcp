@@ -1,0 +1,10 @@
+# Environment (contains local paths and credentials)
+.env
+
+# Connections data (contains API keys)
+_workspace/
+*.pyc
+__pycache__/
+node_modules/
+.DS_Store
+.idea/

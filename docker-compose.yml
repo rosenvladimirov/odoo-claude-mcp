@@ -1,0 +1,68 @@
+# Claude Code terminal + Odoo RPC MCP
+#
+# Usage:
+#   cp .env.example .env && nano .env
+#   docker compose up -d --build
+#   Open http://localhost:8080
+
+services:
+  # ─── Claude Code web terminal (ttyd + Claude CLI) ─────────
+  claude-terminal:
+    build:
+      context: ./claude-terminal
+      dockerfile: Dockerfile
+    container_name: claude-terminal
+    restart: unless-stopped
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - CLAUDE_THEME=${CLAUDE_THEME:-light}
+      - ODOO_API_KEY=${ODOO_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${TERMINAL_PORT:-8080}:8080"
+    volumes:
+      # Host Claude config (API key, memory, sessions)
+      - ${HOME}/.claude:/home/claude/.claude
+      # Container-specific settings
+      - ./claude-terminal/settings.json:/home/claude/.claude/settings.json:ro
+      # MCP server configuration (odoo-rpc SSE)
+      - ./claude-terminal/.mcp.json:/home/claude/.mcp.json:ro
+      # MCP tools documentation (auto-loaded by Claude Code)
+      - ./claude-terminal/CLAUDE.md:/home/claude/CLAUDE.md:ro
+      # Claude main config file (login state, preferences)
+      - ${HOME}/.claude.json:/home/claude/.claude.json
+      # Host project workspace
+      - ${WORKSPACE_PATH:-${HOME}/Проекти}:/workspace
+      # Shared Odoo connections (API keys, saved locally)
+      - ${HOME}/odoo-claude-connections:/data
+    tty: true
+    stdin_open: true
+    labels:
+      - "com.blconsulting.service=claude-terminal"
+
+  # ─── Odoo RPC MCP (XML-RPC / JSON-RPC) ───────────────────
+  odoo-rpc-mcp:
+    build:
+      context: ./odoo-rpc-mcp
+      dockerfile: Dockerfile
+    container_name: mcp-odoo-rpc
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - MCP_PORT=8084
+      - MCP_HOST=0.0.0.0
+      - SINGLE_CONNECTION=true
+      - ODOO_URL=${ODOO_URL:-}
+      - ODOO_DB=${ODOO_DB:-}
+      - ODOO_USERNAME=${ODOO_USERNAME:-}
+      - ODOO_PASSWORD=${ODOO_PASSWORD:-}
+      - ODOO_API_KEY=${ODOO_API_KEY:-}
+      - ODOO_PROTOCOL=${ODOO_PROTOCOL:-xmlrpc}
+    ports:
+      - "${ODOO_MCP_PORT:-8084}:8084"
+    volumes:
+      - ${HOME}/odoo-claude-connections:/data
+    labels:
+      - "com.blconsulting.service=mcp-odoo-rpc"

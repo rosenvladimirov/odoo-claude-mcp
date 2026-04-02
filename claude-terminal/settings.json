@@ -1,0 +1,7 @@
+{
+  "syntaxHighlightingDisabled": false,
+  "effortLevel": "high",
+  "enabledPlugins": {
+    "github@claude-plugins-official": true
+  }
+}
