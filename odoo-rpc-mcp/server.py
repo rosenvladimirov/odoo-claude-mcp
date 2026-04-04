@@ -1374,7 +1374,7 @@ async def health_endpoint(request):
 
 
 def create_app():
-    global manager, google_mgr
+    global manager, google_mgr, telegram_mgr
 
     manager = ConnectionManager(CONNECTIONS_FILE)
     logger.info(f"Loaded {len(manager.connections)} connection(s): {list(manager.connections.keys())}")
