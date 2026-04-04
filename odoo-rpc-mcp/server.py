@@ -18,7 +18,9 @@ import json
 import logging
 import os
 import signal
+import sqlite3
 import sys
+import uuid
 import xmlrpc.client
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +39,7 @@ from telegram_service import TelegramServiceManager
 MCP_PORT = int(os.environ.get("MCP_PORT", "8084"))
 MCP_HOST = os.environ.get("MCP_HOST", "0.0.0.0")
 CONNECTIONS_FILE = Path(os.environ.get("CONNECTIONS_FILE", "/data/connections.json"))
+SESSIONS_DB = Path(os.environ.get("SESSIONS_DB", "/data/sessions.db"))
 # Single-connection mode: hide disconnect, skip file loading, force alias "default"
 SINGLE_CONNECTION = os.environ.get("SINGLE_CONNECTION", "").lower() in ("1", "true", "yes")
 
@@ -242,6 +245,149 @@ class OdooConnection:
 
 
 # ─── Connection Manager ────────────────────────────────────
+class SessionManager:
+    """
+    Tracks active Claude terminal sessions.
+
+    Each Claude terminal window registers itself on startup with its
+    opened Odoo context (model, res_id, view_type).  When MCP tools
+    modify data, the session registry is used to notify the correct
+    user/window via bus notifications so the UI can refresh live.
+
+    Stored in SQLite so multiple concurrent Claude windows can each
+    have their own entry.
+    """
+
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+        self._init_db()
+
+    def _init_db(self):
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id TEXT PRIMARY KEY,
+                    connection_alias TEXT,
+                    odoo_url TEXT,
+                    odoo_db TEXT,
+                    odoo_username TEXT,
+                    model TEXT,
+                    res_id INTEGER DEFAULT 0,
+                    view_type TEXT,
+                    terminal_url TEXT,
+                    created_at TEXT,
+                    last_activity TEXT
+                )
+                """
+            )
+            conn.commit()
+
+    def register(
+        self,
+        connection_alias: str = "default",
+        odoo_url: str = "",
+        odoo_db: str = "",
+        odoo_username: str = "",
+        model: str = "",
+        res_id: int = 0,
+        view_type: str = "",
+        terminal_url: str = "",
+    ) -> str:
+        session_id = str(uuid.uuid4())
+        now = datetime.now().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO sessions
+                (session_id, connection_alias, odoo_url, odoo_db, odoo_username,
+                 model, res_id, view_type, terminal_url, created_at, last_activity)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id, connection_alias, odoo_url, odoo_db, odoo_username,
+                    model, int(res_id or 0), view_type, terminal_url, now, now,
+                ),
+            )
+            conn.commit()
+        logger.info(
+            f"Session registered: {session_id} — {odoo_url} {model}({res_id})"
+        )
+        return session_id
+
+    def update_context(self, session_id: str, model: str = None, res_id: int = None, view_type: str = None):
+        now = datetime.now().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute("SELECT model, res_id, view_type FROM sessions WHERE session_id = ?", (session_id,))
+            row = cur.fetchone()
+            if not row:
+                return False
+            new_model = model if model is not None else row[0]
+            new_res_id = int(res_id) if res_id is not None else row[1]
+            new_view_type = view_type if view_type is not None else row[2]
+            conn.execute(
+                "UPDATE sessions SET model = ?, res_id = ?, view_type = ?, last_activity = ? WHERE session_id = ?",
+                (new_model, new_res_id, new_view_type, now, session_id),
+            )
+            conn.commit()
+        return True
+
+    def touch(self, session_id: str):
+        now = datetime.now().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE sessions SET last_activity = ? WHERE session_id = ?",
+                (now, session_id),
+            )
+            conn.commit()
+
+    def get(self, session_id: str) -> dict | None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def find_by_connection(self, connection_alias: str) -> list[dict]:
+        """Return all sessions using a given connection alias, most recent first."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM sessions WHERE connection_alias = ? ORDER BY last_activity DESC",
+                (connection_alias,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_all(self) -> list[dict]:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM sessions ORDER BY last_activity DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete(self, session_id: str) -> bool:
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                "DELETE FROM sessions WHERE session_id = ?", (session_id,)
+            )
+            conn.commit()
+        return cur.rowcount > 0
+
+    def cleanup_stale(self, max_age_hours: int = 24) -> int:
+        """Remove sessions with no activity for max_age_hours."""
+        cutoff = datetime.now().timestamp() - (max_age_hours * 3600)
+        cutoff_iso = datetime.fromtimestamp(cutoff).isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                "DELETE FROM sessions WHERE last_activity < ?", (cutoff_iso,)
+            )
+            conn.commit()
+        return cur.rowcount
+
+
 class ConnectionManager:
     """Manages multiple Odoo connections."""
 
@@ -334,6 +480,7 @@ class ConnectionManager:
 
 # ─── MCP Server ─────────────────────────────────────────────
 manager: ConnectionManager | None = None
+session_mgr: SessionManager | None = None
 google_mgr: GoogleServiceManager | None = None
 telegram_mgr: TelegramServiceManager | None = None
 mcp_server = Server("odoo-rpc-mcp")
@@ -343,6 +490,44 @@ def _mgr() -> ConnectionManager:
     if manager is None:
         raise Exception("Connection manager not initialized")
     return manager
+
+
+def _notify_live_refresh(conn: OdooConnection, kind: str, model: str, res_ids: list, values: dict = None) -> None:
+    """
+    Send a live-refresh bus notification to Odoo so the user's open
+    form/list view reflects Claude's changes immediately.
+
+    kind: "field" (field-level refresh in form) or "list" (new row in list)
+    """
+    if session_mgr is None:
+        return
+    sessions = session_mgr.find_by_connection(conn.alias)
+    if not sessions:
+        return
+    payload = {
+        "kind": kind,
+        "model": model,
+        "res_ids": res_ids if isinstance(res_ids, list) else [res_ids],
+        "values": values or {},
+        "sessions": [
+            {
+                "session_id": s["session_id"],
+                "model": s["model"],
+                "res_id": s["res_id"],
+                "view_type": s["view_type"],
+            }
+            for s in sessions
+        ],
+    }
+    try:
+        method = (
+            "notify_claude_refresh_field"
+            if kind == "field"
+            else "notify_claude_refresh_list"
+        )
+        conn.execute_kw("res.users", method, [payload])
+    except Exception as e:
+        logger.warning(f"Live refresh notify failed ({kind}): {e}")
 
 
 def _conn(args: dict) -> OdooConnection:
@@ -1070,10 +1255,14 @@ def _execute_tool(name: str, args: dict) -> Any:
         for v in vals:
             result = conn.execute_kw(args["model"], "create", [v])
             ids.append(result)
+        # Live refresh: notify list views that a new row appeared
+        _notify_live_refresh(conn, "list", args["model"], ids, vals[0] if vals else {})
         return {"created_ids": ids}
 
     elif name == "odoo_write":
         result = conn.execute_kw(args["model"], "write", [args["ids"], args["values"]])
+        # Live refresh: notify form views to update specific fields
+        _notify_live_refresh(conn, "field", args["model"], args["ids"], args["values"])
         return {"success": result, "ids": args["ids"]}
 
     elif name == "odoo_unlink":
@@ -1374,10 +1563,16 @@ async def health_endpoint(request):
 
 
 def create_app():
-    global manager, google_mgr, telegram_mgr
+    global manager, google_mgr, telegram_mgr, session_mgr
 
     manager = ConnectionManager(CONNECTIONS_FILE)
     logger.info(f"Loaded {len(manager.connections)} connection(s): {list(manager.connections.keys())}")
+
+    session_mgr = SessionManager(SESSIONS_DB)
+    stale = session_mgr.cleanup_stale()
+    if stale:
+        logger.info(f"Cleaned up {stale} stale session(s)")
+    logger.info(f"Session manager ready at {SESSIONS_DB}")
 
     google_mgr = GoogleServiceManager()
     if google_mgr.is_authenticated:
@@ -1432,6 +1627,61 @@ def create_app():
                 "aliases": list(manager.connections.keys()) if manager else [],
                 "timestamp": datetime.now().isoformat(),
             })
+            await response(scope, receive, send)
+        elif path == "/api/session/register" and scope["type"] == "http" and scope.get("method") == "POST":
+            from starlette.requests import Request
+            from starlette.responses import JSONResponse
+            request = Request(scope, receive)
+            try:
+                body = await request.json()
+                sid = session_mgr.register(
+                    connection_alias=body.get("connection_alias", "default"),
+                    odoo_url=body.get("odoo_url", ""),
+                    odoo_db=body.get("odoo_db", ""),
+                    odoo_username=body.get("odoo_username", ""),
+                    model=body.get("model", ""),
+                    res_id=int(body.get("res_id", 0) or 0),
+                    view_type=body.get("view_type", ""),
+                    terminal_url=body.get("terminal_url", ""),
+                )
+                response = JSONResponse({"status": "registered", "session_id": sid})
+            except Exception as e:
+                response = JSONResponse({"error": str(e)}, status_code=400)
+            await response(scope, receive, send)
+        elif path == "/api/session/list" and scope["type"] == "http" and scope.get("method") == "GET":
+            from starlette.responses import JSONResponse
+            try:
+                response = JSONResponse({"sessions": session_mgr.list_all()})
+            except Exception as e:
+                response = JSONResponse({"error": str(e)}, status_code=400)
+            await response(scope, receive, send)
+        elif path == "/api/session/update" and scope["type"] == "http" and scope.get("method") == "POST":
+            from starlette.requests import Request
+            from starlette.responses import JSONResponse
+            request = Request(scope, receive)
+            try:
+                body = await request.json()
+                sid = body.get("session_id")
+                ok = session_mgr.update_context(
+                    sid,
+                    model=body.get("model"),
+                    res_id=int(body["res_id"]) if "res_id" in body else None,
+                    view_type=body.get("view_type"),
+                )
+                response = JSONResponse({"status": "ok" if ok else "not_found"})
+            except Exception as e:
+                response = JSONResponse({"error": str(e)}, status_code=400)
+            await response(scope, receive, send)
+        elif path == "/api/session/delete" and scope["type"] == "http" and scope.get("method") == "POST":
+            from starlette.requests import Request
+            from starlette.responses import JSONResponse
+            request = Request(scope, receive)
+            try:
+                body = await request.json()
+                ok = session_mgr.delete(body.get("session_id", ""))
+                response = JSONResponse({"status": "deleted" if ok else "not_found"})
+            except Exception as e:
+                response = JSONResponse({"error": str(e)}, status_code=400)
             await response(scope, receive, send)
         elif path == "/api/connect" and scope["type"] == "http" and scope.get("method") == "POST":
             from starlette.requests import Request
