@@ -62,6 +62,9 @@ services:
       - ODOO_PROTOCOL=${ODOO_PROTOCOL:-xmlrpc}
       - GOOGLE_CREDENTIALS_FILE=/data/google_credentials.json
       - GOOGLE_TOKEN_FILE=/data/google_token.json
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID:-}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH:-}
+      - TELEGRAM_SESSION_PATH=/data/telegram_session
     ports:
       - "${ODOO_MCP_PORT:-8084}:8084"
     volumes:

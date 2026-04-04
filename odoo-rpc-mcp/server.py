@@ -31,6 +31,7 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.types import TextContent, Tool
 
 from google_service import GoogleServiceManager
+from telegram_service import TelegramServiceManager
 
 # ─── Configuration ──────────────────────────────────────────
 MCP_PORT = int(os.environ.get("MCP_PORT", "8084"))
@@ -334,6 +335,7 @@ class ConnectionManager:
 # ─── MCP Server ─────────────────────────────────────────────
 manager: ConnectionManager | None = None
 google_mgr: GoogleServiceManager | None = None
+telegram_mgr: TelegramServiceManager | None = None
 mcp_server = Server("odoo-rpc-mcp")
 
 
@@ -868,6 +870,89 @@ TOOLS = [
             "required": ["event_id"],
         },
     ),
+    # ── Telegram ──
+    Tool(
+        name="telegram_configure",
+        description="Set Telegram API credentials (api_id and api_hash from my.telegram.org).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "api_id": {"type": "string", "description": "API ID from my.telegram.org"},
+                "api_hash": {"type": "string", "description": "API Hash from my.telegram.org"},
+            },
+            "required": ["api_id", "api_hash"],
+        },
+    ),
+    Tool(
+        name="telegram_auth",
+        description=(
+            "Authenticate with Telegram. Two-step process: "
+            "1) Call with phone → code is sent to Telegram. "
+            "2) Call with phone + code → authenticated. "
+            "If 2FA enabled, provide password too."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "phone": {"type": "string", "description": "Phone number with country code (e.g. +359886100204)"},
+                "code": {"type": "string", "description": "Verification code from Telegram (step 2)", "default": ""},
+                "password": {"type": "string", "description": "2FA password if enabled", "default": ""},
+            },
+            "required": ["phone"],
+        },
+    ),
+    Tool(
+        name="telegram_auth_status",
+        description="Check Telegram authentication status.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="telegram_get_dialogs",
+        description="List recent Telegram chats (users, groups, channels).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 20},
+            },
+        },
+    ),
+    Tool(
+        name="telegram_search_contacts",
+        description="Search Telegram contacts by name or username.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query (name or username)"},
+            },
+            "required": ["query"],
+        },
+    ),
+    Tool(
+        name="telegram_get_messages",
+        description="Read messages from a Telegram chat. Chat can be @username, phone, or numeric ID.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "chat": {"type": "string", "description": "Chat identifier (@username, +phone, or numeric ID)"},
+                "limit": {"type": "integer", "default": 10},
+                "search": {"type": "string", "description": "Search text in messages", "default": ""},
+            },
+            "required": ["chat"],
+        },
+    ),
+    Tool(
+        name="telegram_send_message",
+        description="Send a Telegram message. Chat can be @username, phone, or numeric ID.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "chat": {"type": "string", "description": "Chat identifier (@username, +phone, or numeric ID)"},
+                "message": {"type": "string", "description": "Message text"},
+                "reply_to": {"type": "integer", "description": "Message ID to reply to", "default": 0},
+            },
+            "required": ["chat", "message"],
+        },
+    ),
 ]
 
 
@@ -1221,6 +1306,52 @@ def _execute_tool(name: str, args: dict) -> Any:
             calendar_id=args.get("calendar_id", "primary"),
         )
 
+    # ── Telegram ──
+    elif name == "telegram_configure":
+        if telegram_mgr is None:
+            return {"error": "Telegram service not initialized"}
+        return telegram_mgr.configure(args["api_id"], args["api_hash"])
+
+    elif name == "telegram_auth":
+        if telegram_mgr is None:
+            return {"error": "Telegram service not initialized"}
+        code = args.get("code", "")
+        if code:
+            return telegram_mgr.auth_verify(
+                phone=args["phone"], code=code,
+                password=args.get("password", ""),
+            )
+        return telegram_mgr.auth_send_code(args["phone"])
+
+    elif name == "telegram_auth_status":
+        if telegram_mgr is None:
+            return {"status": "not_initialized"}
+        return telegram_mgr.auth_status()
+
+    elif name == "telegram_get_dialogs":
+        return telegram_mgr.get_dialogs(limit=args.get("limit", 20))
+
+    elif name == "telegram_search_contacts":
+        return telegram_mgr.search_contacts(args["query"])
+
+    elif name == "telegram_get_messages":
+        chat = args["chat"]
+        if chat.lstrip("-").isdigit():
+            chat = int(chat)
+        return telegram_mgr.get_messages(
+            chat=chat, limit=args.get("limit", 10),
+            search=args.get("search", ""),
+        )
+
+    elif name == "telegram_send_message":
+        chat = args["chat"]
+        if chat.lstrip("-").isdigit():
+            chat = int(chat)
+        return telegram_mgr.send_message(
+            chat=chat, message=args["message"],
+            reply_to=args.get("reply_to", 0),
+        )
+
     return {"error": f"Unknown tool: {name}"}
 
 
@@ -1253,6 +1384,12 @@ def create_app():
         logger.info("Google services: authenticated")
     else:
         logger.info("Google services: not authenticated (call google_auth to connect)")
+
+    telegram_mgr = TelegramServiceManager()
+    if telegram_mgr.is_authenticated:
+        logger.info("Telegram: authenticated")
+    else:
+        logger.info("Telegram: not authenticated (call telegram_configure + telegram_auth)")
 
     # --- SSE transport (legacy, /sse + /messages/) ---
     sse_transport = SseServerTransport("/messages/")

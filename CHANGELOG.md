@@ -5,6 +5,24 @@ All notable changes to the Odoo RPC MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-04-04
+
+### Added
+- **Telegram integration**: Personal account messaging via Telethon client API
+  - `telegram_configure` — Set API credentials (api_id + api_hash from my.telegram.org)
+  - `telegram_auth` — Two-step phone + code authentication, 2FA support
+  - `telegram_auth_status` — Check authentication status
+  - `telegram_get_dialogs` — List recent chats (users, groups, channels)
+  - `telegram_search_contacts` — Search contacts by name/username
+  - `telegram_get_messages` — Read messages from any chat with text search
+  - `telegram_send_message` — Send messages and replies
+- New file `telegram_service.py` — TelegramServiceManager with session persistence
+- Telethon dependency added to requirements.txt
+- Docker environment variables: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION_PATH`
+
+### Changed
+- Total MCP tools: 30 → 38
+
 ## [1.1.0] - 2026-04-04
 
 ### Added
