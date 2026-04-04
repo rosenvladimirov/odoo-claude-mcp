@@ -1,12 +1,73 @@
 # Odoo RPC MCP Server — Bulgarian Localization Knowledge Base
 
-## Session Context (auto-connect)
+## ⚠ MANDATORY — Current Session Context (read this FIRST)
 
-On startup, read `~/.odoo_session.json` for the Odoo instance that launched this terminal.
-Check `odoo_connections` first — if a "default" connection already exists with the correct URL, use it.
-If no connection exists, use `odoo_connect` with the session's url, db, username, protocol.
-The user will provide the API key on first use — it is saved automatically for next time.
-Only work with THIS Odoo connection. Do NOT connect to other instances.
+**On startup, ALWAYS read `~/.odoo_session.json` and remember it for the entire session.**
+This file is the single source of truth for where the user is currently working:
+
+```json
+{
+  "session_id": "uuid-...",
+  "odoo_url": "https://...",
+  "odoo_db": "...",
+  "odoo_user": "admin",
+  "odoo_protocol": "xmlrpc",
+  "model": "sale.order",        ← CURRENT MODEL
+  "res_id": "42",                ← CURRENT RECORD
+  "view_type": "form"            ← form | list | kanban
+}
+```
+
+### Absolute rules — DO NOT deviate
+
+1. **Implicit record references** — when the user says things like:
+   - "change the note to X"
+   - "set the partner to ACME"
+   - "update the description"
+   - "fix the delivery date"
+   - "добави забележка..."
+   - "смени клиента на..."
+   - "обнови..."
+
+   You MUST apply the change to `model=<session.model>, ids=[<session.res_id>]`.
+   **Never ask which record. Never search for a record. Never pick a random one.**
+   The current session record is the default target for all write operations.
+
+2. **When the user explicitly names a record** (e.g. "update SO-00123" or "set partner on order 99"):
+   only then override the session record with the explicit one.
+
+3. **Reading context before writing** — if you need to know the current state:
+   - ALWAYS first `odoo_read(session.model, [session.res_id], [...])` to see the current values
+   - Only then compute new values and `odoo_write(session.model, [session.res_id], {...})`
+
+4. **Never switch models unless explicitly told.** If the session says `sale.order`
+   and the user says "change the status", it means the status on THIS sale.order,
+   not on some other model.
+
+5. **After every mutation** — always call `odoo_refresh(model=session.model, res_id=session.res_id)`.
+   The MCP server already sends live field-refresh notifications via the
+   SessionManager, but `odoo_refresh` is still the safety net.
+
+6. **Connection**: check `odoo_connections` first — if a "default" connection already
+   exists with the correct URL, use it. Otherwise `odoo_connect` with the session's
+   url/db/username/protocol. Only work with THIS Odoo connection. Do NOT connect to
+   other instances.
+
+### SessionManager (MCP backend)
+
+The MCP server has a `SessionManager` backed by SQLite (`/data/sessions.db`).
+Each terminal window is registered on startup via POST `/api/session/register`
+with its Odoo context.  When you call `odoo_write` / `odoo_create`, the server
+looks up the session's (model, res_id) and sends a bus notification to the
+corresponding Odoo view so the user sees changes live (field flash, new row
+highlight). This means: **the MCP already knows which browser window/session
+the tool call is for.** You do not need to supply any session_id manually —
+the server handles matching via the connection alias and SQLite.
+
+If the user opens multiple Claude windows, each has its own row in SQLite
+with its own (model, res_id). The refresh bus event is user-scoped, so all
+windows of the same user receive it; client-side filters route field updates
+to the matching window only.
 
 ## MCP Connection
 
