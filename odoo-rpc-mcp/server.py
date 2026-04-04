@@ -30,6 +30,8 @@ from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.types import TextContent, Tool
 
+from google_service import GoogleServiceManager
+
 # ─── Configuration ──────────────────────────────────────────
 MCP_PORT = int(os.environ.get("MCP_PORT", "8084"))
 MCP_HOST = os.environ.get("MCP_HOST", "0.0.0.0")
@@ -331,6 +333,7 @@ class ConnectionManager:
 
 # ─── MCP Server ─────────────────────────────────────────────
 manager: ConnectionManager | None = None
+google_mgr: GoogleServiceManager | None = None
 mcp_server = Server("odoo-rpc-mcp")
 
 
@@ -706,6 +709,165 @@ TOOLS = [
             },
         },
     ),
+    # ── Google Services ──
+    Tool(
+        name="google_auth",
+        description=(
+            "Authenticate with Google OAuth2 for Gmail and Calendar access. "
+            "Requires credentials.json from Google Cloud Console (Desktop app type). "
+            "First call opens browser for consent. Token is saved for reuse."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "credentials_file": {
+                    "type": "string",
+                    "description": "Path to Google OAuth credentials.json (default: /data/google_credentials.json)",
+                    "default": "",
+                },
+            },
+        },
+    ),
+    Tool(
+        name="google_auth_status",
+        description="Check Google authentication status.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    # ── Gmail ──
+    Tool(
+        name="google_gmail_search",
+        description=(
+            "Search Gmail messages. Uses Gmail search syntax "
+            "(e.g. 'from:user@example.com', 'subject:invoice', 'after:2026/01/01', 'is:unread')."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Gmail search query"},
+                "max_results": {"type": "integer", "default": 10},
+                "label_ids": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Filter by label IDs (e.g. ['INBOX', 'UNREAD'])",
+                },
+            },
+            "required": ["query"],
+        },
+    ),
+    Tool(
+        name="google_gmail_read",
+        description="Read a specific Gmail message by ID. Returns full body, headers, and labels.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string", "description": "Gmail message ID"},
+            },
+            "required": ["message_id"],
+        },
+    ),
+    Tool(
+        name="google_gmail_send",
+        description="Send an email or reply to an existing message.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "to": {"type": "string", "description": "Recipient email(s), comma-separated"},
+                "subject": {"type": "string"},
+                "body": {"type": "string", "description": "Email body (plain text or HTML)"},
+                "cc": {"type": "string", "default": ""},
+                "bcc": {"type": "string", "default": ""},
+                "html": {"type": "boolean", "description": "Send as HTML", "default": False},
+                "reply_to_message_id": {
+                    "type": "string",
+                    "description": "Message ID to reply to (keeps thread)",
+                    "default": "",
+                },
+            },
+            "required": ["to", "subject", "body"],
+        },
+    ),
+    Tool(
+        name="google_gmail_labels",
+        description="List all Gmail labels (folders).",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    # ── Google Calendar ──
+    Tool(
+        name="google_calendar_list",
+        description="List all available Google calendars.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="google_calendar_events",
+        description="List upcoming calendar events. Supports time range and text search.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "calendar_id": {"type": "string", "default": "primary"},
+                "time_min": {
+                    "type": "string",
+                    "description": "Start time ISO 8601 (default: now). E.g. '2026-04-01T00:00:00+03:00'",
+                },
+                "time_max": {
+                    "type": "string",
+                    "description": "End time ISO 8601. E.g. '2026-04-30T23:59:59+03:00'",
+                },
+                "max_results": {"type": "integer", "default": 10},
+                "query": {"type": "string", "description": "Text search in events", "default": ""},
+            },
+        },
+    ),
+    Tool(
+        name="google_calendar_create_event",
+        description="Create a new calendar event.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string", "description": "Event title"},
+                "start": {"type": "string", "description": "Start time ISO 8601 (e.g. '2026-04-05T10:00:00')"},
+                "end": {"type": "string", "description": "End time ISO 8601 (e.g. '2026-04-05T11:00:00')"},
+                "calendar_id": {"type": "string", "default": "primary"},
+                "description": {"type": "string", "default": ""},
+                "location": {"type": "string", "default": ""},
+                "attendees": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "List of attendee emails",
+                },
+                "timezone": {"type": "string", "default": "Europe/Sofia"},
+            },
+            "required": ["summary", "start", "end"],
+        },
+    ),
+    Tool(
+        name="google_calendar_update_event",
+        description="Update an existing calendar event. Only provided fields are changed.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string"},
+                "calendar_id": {"type": "string", "default": "primary"},
+                "summary": {"type": "string"},
+                "description": {"type": "string"},
+                "location": {"type": "string"},
+                "start": {"type": "string", "description": "New start time ISO 8601"},
+                "end": {"type": "string", "description": "New end time ISO 8601"},
+                "attendees": {"type": "array", "items": {"type": "string"}},
+                "timezone": {"type": "string", "default": "Europe/Sofia"},
+            },
+            "required": ["event_id"],
+        },
+    ),
+    Tool(
+        name="google_calendar_delete_event",
+        description="Delete a calendar event.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string"},
+                "calendar_id": {"type": "string", "default": "primary"},
+            },
+            "required": ["event_id"],
+        },
+    ),
 ]
 
 
@@ -984,6 +1146,81 @@ def _execute_tool(name: str, args: dict) -> Any:
             "note": "Use live=true to fetch current values from Odoo",
         }
 
+    # ── Google Services ──
+    elif name == "google_auth":
+        if google_mgr is None:
+            return {"error": "Google service not initialized"}
+        return google_mgr.authenticate(args.get("credentials_file", ""))
+
+    elif name == "google_auth_status":
+        if google_mgr is None:
+            return {"status": "not_initialized"}
+        return {
+            "status": "authenticated" if google_mgr.is_authenticated else "not_authenticated",
+            "email": google_mgr._get_email() if google_mgr.is_authenticated else None,
+        }
+
+    elif name == "google_gmail_search":
+        return google_mgr.gmail_search(
+            query=args["query"],
+            max_results=args.get("max_results", 10),
+            label_ids=args.get("label_ids"),
+        )
+
+    elif name == "google_gmail_read":
+        return google_mgr.gmail_read(args["message_id"])
+
+    elif name == "google_gmail_send":
+        return google_mgr.gmail_send(
+            to=args["to"],
+            subject=args["subject"],
+            body=args["body"],
+            cc=args.get("cc", ""),
+            bcc=args.get("bcc", ""),
+            html=args.get("html", False),
+            reply_to_message_id=args.get("reply_to_message_id", ""),
+        )
+
+    elif name == "google_gmail_labels":
+        return google_mgr.gmail_labels()
+
+    elif name == "google_calendar_list":
+        return google_mgr.calendar_list()
+
+    elif name == "google_calendar_events":
+        return google_mgr.calendar_events(
+            calendar_id=args.get("calendar_id", "primary"),
+            time_min=args.get("time_min", ""),
+            time_max=args.get("time_max", ""),
+            max_results=args.get("max_results", 10),
+            query=args.get("query", ""),
+        )
+
+    elif name == "google_calendar_create_event":
+        return google_mgr.calendar_create_event(
+            summary=args["summary"],
+            start=args["start"],
+            end=args["end"],
+            calendar_id=args.get("calendar_id", "primary"),
+            description=args.get("description", ""),
+            location=args.get("location", ""),
+            attendees=args.get("attendees"),
+            timezone_str=args.get("timezone", "Europe/Sofia"),
+        )
+
+    elif name == "google_calendar_update_event":
+        event_id = args.pop("event_id")
+        calendar_id = args.pop("calendar_id", "primary")
+        return google_mgr.calendar_update_event(
+            event_id=event_id, calendar_id=calendar_id, **args,
+        )
+
+    elif name == "google_calendar_delete_event":
+        return google_mgr.calendar_delete_event(
+            event_id=args["event_id"],
+            calendar_id=args.get("calendar_id", "primary"),
+        )
+
     return {"error": f"Unknown tool: {name}"}
 
 
@@ -1006,10 +1243,16 @@ async def health_endpoint(request):
 
 
 def create_app():
-    global manager
+    global manager, google_mgr
 
     manager = ConnectionManager(CONNECTIONS_FILE)
     logger.info(f"Loaded {len(manager.connections)} connection(s): {list(manager.connections.keys())}")
+
+    google_mgr = GoogleServiceManager()
+    if google_mgr.is_authenticated:
+        logger.info("Google services: authenticated")
+    else:
+        logger.info("Google services: not authenticated (call google_auth to connect)")
 
     # --- SSE transport (legacy, /sse + /messages/) ---
     sse_transport = SseServerTransport("/messages/")

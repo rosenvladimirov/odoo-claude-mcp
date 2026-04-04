@@ -13,6 +13,7 @@ COPY --chmod=644 requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY --chmod=644 server.py .
+COPY --chmod=644 google_service.py .
 
 RUN useradd -m -s /bin/bash mcp && \
     mkdir -p /data && chown mcp:mcp /data
