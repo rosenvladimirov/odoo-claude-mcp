@@ -59,15 +59,28 @@ class TelegramServiceManager:
 
     def _init_client(self):
         try:
-            from telethon.sync import TelegramClient
+            import asyncio
+            from telethon import TelegramClient
+
+            # Ensure we have an event loop for this thread
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_closed():
+                    raise RuntimeError
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+            self._loop = loop
             self._client = TelegramClient(
                 TELEGRAM_SESSION_PATH,
                 int(self._api_id),
                 self._api_hash,
+                loop=loop,
             )
-            self._client.connect()
-            if self._client.is_user_authorized():
-                me = self._client.get_me()
+            loop.run_until_complete(self._client.connect())
+            if loop.run_until_complete(self._client.is_user_authorized()):
+                me = loop.run_until_complete(self._client.get_me())
                 logger.info(
                     f"Telegram: authenticated as {me.first_name} "
                     f"(@{me.username or 'no username'})"
@@ -78,13 +91,21 @@ class TelegramServiceManager:
             logger.warning(f"Telegram client init failed: {e}")
             self._client = None
 
+    def _run(self, coro):
+        """Run an async coroutine synchronously."""
+        return self._loop.run_until_complete(coro)
+
     @property
     def is_authenticated(self) -> bool:
-        return (
-            self._client is not None
-            and self._client.is_connected()
-            and self._client.is_user_authorized()
-        )
+        if self._client is None:
+            return False
+        try:
+            return (
+                self._run(self._client.is_connected())
+                and self._run(self._client.is_user_authorized())
+            )
+        except Exception:
+            return False
 
     def configure(self, api_id: str, api_hash: str) -> dict:
         """Set API credentials and initialize client."""
@@ -100,12 +121,12 @@ class TelegramServiceManager:
             return {"status": "error", "message": "Not configured. Call telegram_configure first."}
 
         try:
-            result = self._client.send_code_request(phone)
+            result = self._run(self._client.send_code_request(phone))
             self._phone_code_hash = result.phone_code_hash
             return {
                 "status": "code_sent",
                 "phone": phone,
-                "message": "Verification code sent to Telegram. Call telegram_auth_verify with the code.",
+                "message": "Verification code sent to Telegram. Call telegram_auth with phone + code.",
             }
         except Exception as e:
             return {"status": "error", "message": str(e)}
@@ -116,12 +137,12 @@ class TelegramServiceManager:
             return {"status": "error", "message": "Not configured."}
 
         try:
-            self._client.sign_in(
+            self._run(self._client.sign_in(
                 phone=phone,
                 code=code,
                 phone_code_hash=self._phone_code_hash,
-            )
-            me = self._client.get_me()
+            ))
+            me = self._run(self._client.get_me())
             return {
                 "status": "authenticated",
                 "user": me.first_name,
@@ -133,8 +154,8 @@ class TelegramServiceManager:
             if "Two-steps verification" in err or "password" in err.lower():
                 if password:
                     try:
-                        self._client.sign_in(password=password)
-                        me = self._client.get_me()
+                        self._run(self._client.sign_in(password=password))
+                        me = self._run(self._client.get_me())
                         return {
                             "status": "authenticated",
                             "user": me.first_name,
@@ -154,7 +175,7 @@ class TelegramServiceManager:
             return {"status": "not_configured"}
         if not self.is_authenticated:
             return {"status": "not_authenticated"}
-        me = self._client.get_me()
+        me = self._run(self._client.get_me())
         return {
             "status": "authenticated",
             "user": me.first_name,
@@ -167,7 +188,7 @@ class TelegramServiceManager:
         if not self.is_authenticated:
             raise Exception("Not authenticated. Call telegram_auth first.")
 
-        dialogs = self._client.get_dialogs(limit=limit)
+        dialogs = self._run(self._client.get_dialogs(limit=limit))
         return [
             {
                 "id": d.id,
@@ -189,7 +210,7 @@ class TelegramServiceManager:
             raise Exception("Not authenticated.")
 
         from telethon.tl.functions.contacts import SearchRequest
-        result = self._client(SearchRequest(q=query, limit=10))
+        result = self._run(self._client(SearchRequest(q=query, limit=10)))
         output = []
         for user in result.users:
             output.append({
@@ -213,7 +234,7 @@ class TelegramServiceManager:
         if search:
             kwargs["search"] = search
 
-        messages = self._client.get_messages(entity, **kwargs)
+        messages = self._run(self._client.get_messages(entity, **kwargs))
         return [
             {
                 "id": m.id,
@@ -235,7 +256,7 @@ class TelegramServiceManager:
         if reply_to:
             kwargs["reply_to"] = reply_to
 
-        sent = self._client.send_message(entity, message, **kwargs)
+        sent = self._run(self._client.send_message(entity, message, **kwargs))
         return {
             "status": "sent",
             "id": sent.id,
@@ -246,12 +267,12 @@ class TelegramServiceManager:
     def _resolve_entity(self, chat: str | int):
         """Resolve a chat by username, phone, or ID."""
         if isinstance(chat, int) or (isinstance(chat, str) and chat.lstrip("-").isdigit()):
-            return self._client.get_entity(int(chat))
+            return self._run(self._client.get_entity(int(chat)))
         if chat.startswith("+"):
-            return self._client.get_entity(chat)
+            return self._run(self._client.get_entity(chat))
         if not chat.startswith("@"):
             chat = f"@{chat}"
-        return self._client.get_entity(chat)
+        return self._run(self._client.get_entity(chat))
 
     def _sender_name(self, message) -> str:
         sender = message.sender
