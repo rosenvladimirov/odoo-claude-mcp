@@ -100,10 +100,10 @@ class TelegramServiceManager:
         if self._client is None:
             return False
         try:
-            return (
-                self._run(self._client.is_connected())
-                and self._run(self._client.is_user_authorized())
-            )
+            connected = self._client.is_connected()
+            if not connected:
+                self._run(self._client.connect())
+            return self._run(self._client.is_user_authorized())
         except Exception:
             return False
 
