@@ -1138,6 +1138,20 @@ TOOLS = [
             "required": ["chat", "message"],
         },
     ),
+    # ── Connection Manager GUI ──
+    Tool(
+        name="open_connection_manager",
+        description=(
+            "Open the Connection Manager GUI (desktop app). "
+            "Launches GTK4 version on Linux, Qt6 on Windows/macOS. "
+            "Use this when the user wants to visually manage connections, "
+            "configure Portainer/GitHub, manage SSH keys, or see active sessions."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {},
+        },
+    ),
 ]
 
 
@@ -1162,6 +1176,89 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     except Exception as e:
         logger.error(f"Tool {name} error: {e}")
         return [TextContent(type="text", text=f"Error: {e}")]
+
+
+def _open_connection_manager() -> dict:
+    """Launch the Connection Manager GUI or return command for host execution."""
+    import platform
+    import subprocess
+
+    in_docker = Path("/.dockerenv").exists()
+    system = platform.system()
+
+    # Paths to try (host-side)
+    gtk4_paths = [
+        "~/Проекти/odoo/odoo-18.0/claude.ai/tools/odoo_connect.py",
+        "~/odoo-claude-mcp/tools/odoo_connect.py",
+    ]
+    qt6_paths = [
+        "~/Проекти/odoo/odoo-mcp/tools/odoo_connect_qt.py",
+        "~/odoo-claude-mcp/tools/odoo_connect_qt.py",
+    ]
+
+    if in_docker:
+        # Running inside Docker — can't launch GUI directly.
+        # Return the command for Claude Code to execute on the host via Bash tool.
+        if system == "Linux":
+            return {
+                "action": "run_on_host",
+                "message": "MCP server is inside Docker. Please run this command on the host:",
+                "commands": {
+                    "linux_gtk4": f"python3 {gtk4_paths[0]}",
+                    "linux_qt6": f"python3 {qt6_paths[0]}",
+                    "windows": f"python {qt6_paths[1]}",
+                    "macos": f"python3 {qt6_paths[1]}",
+                },
+                "recommended": f"python3 {gtk4_paths[0]}",
+            }
+        return {
+            "action": "run_on_host",
+            "message": "MCP server is inside Docker. Run on the host:",
+            "recommended": f"python3 {qt6_paths[0]}",
+        }
+
+    # Running on host — launch directly
+    script = None
+    gui_type = None
+
+    if system == "Linux":
+        for p in gtk4_paths:
+            expanded = Path(p).expanduser()
+            if expanded.exists():
+                script, gui_type = str(expanded), "GTK4"
+                break
+        if not script:
+            for p in qt6_paths:
+                expanded = Path(p).expanduser()
+                if expanded.exists():
+                    script, gui_type = str(expanded), "Qt6"
+                    break
+    else:
+        for p in qt6_paths:
+            expanded = Path(p).expanduser()
+            if expanded.exists():
+                script, gui_type = str(expanded), "Qt6"
+                break
+
+    if not script:
+        return {"error": "Connection Manager GUI not found",
+                "hint": "Install: pip install PySide6 (Qt6) or PyGObject (GTK4)"}
+
+    env = os.environ.copy()
+    if system == "Linux" and gui_type == "Qt6":
+        env["QT_QPA_PLATFORMTHEME"] = "gtk3"
+
+    try:
+        subprocess.Popen(
+            [sys.executable, script],
+            env=env,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return {"status": "launched", "gui": gui_type, "script": script}
+    except Exception as e:
+        return {"error": f"Failed to launch: {e}", "script": script}
 
 
 def _execute_tool(name: str, args: dict) -> Any:
@@ -1194,6 +1291,9 @@ def _execute_tool(name: str, args: dict) -> Any:
 
     elif name == "odoo_connections":
         return {"connections": m.list_all()}
+
+    elif name == "open_connection_manager":
+        return _open_connection_manager()
 
     # ── All other tools need a connection ──
     conn = _conn(args)
