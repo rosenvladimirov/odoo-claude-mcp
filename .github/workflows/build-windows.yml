@@ -1,0 +1,49 @@
+name: Build Windows Installer
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install PySide6 pyinstaller
+
+      - name: Build exe
+        run: |
+          pyinstaller --onefile --noconsole --name OdooConnect ^
+            --hidden-import PySide6.QtCore ^
+            --hidden-import PySide6.QtGui ^
+            --hidden-import PySide6.QtWidgets ^
+            tools/odoo_connect_qt.py
+
+      - name: Build installer (NSIS)
+        uses: joncloud/makensis-action@v4
+        with:
+          script-file: packaging/windows/installer.nsi
+
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: OdooConnect-windows
+          path: |
+            dist/OdooConnect.exe
+            packaging/windows/OdooConnectSetup.exe
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/OdooConnect.exe
+            packaging/windows/OdooConnectSetup.exe
