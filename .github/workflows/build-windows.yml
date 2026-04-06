@@ -20,11 +20,12 @@ jobs:
           pip install PySide6 pyinstaller
 
       - name: Build exe
+        shell: bash
         run: |
-          pyinstaller --onefile --noconsole --name OdooConnect ^
-            --hidden-import PySide6.QtCore ^
-            --hidden-import PySide6.QtGui ^
-            --hidden-import PySide6.QtWidgets ^
+          pyinstaller --onefile --noconsole --name OdooConnect \
+            --hidden-import PySide6.QtCore \
+            --hidden-import PySide6.QtGui \
+            --hidden-import PySide6.QtWidgets \
             tools/odoo_connect_qt.py
 
       - name: Build installer (NSIS)
