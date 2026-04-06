@@ -28,10 +28,14 @@ jobs:
             --hidden-import PySide6.QtWidgets \
             tools/odoo_connect_qt.py
 
+      - name: Install NSIS
+        shell: bash
+        run: choco install nsis -y
+
       - name: Build installer (NSIS)
-        uses: joncloud/makensis-action@v4
-        with:
-          script-file: packaging/windows/installer.nsi
+        shell: bash
+        run: |
+          "/c/Program Files (x86)/NSIS/makensis.exe" packaging/windows/installer.nsi
 
       - name: Upload exe
         uses: actions/upload-artifact@v4
@@ -39,7 +43,7 @@ jobs:
           name: OdooConnect-windows
           path: |
             dist/OdooConnect.exe
-            packaging/windows/OdooConnectSetup.exe
+            packaging/windows/*.exe
 
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
