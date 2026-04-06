@@ -1152,6 +1152,67 @@ TOOLS = [
             "properties": {},
         },
     ),
+    # ── SSH Remote Execution ──
+    Tool(
+        name="ssh_execute",
+        description=(
+            "Execute a command on a remote server via SSH. "
+            "Uses SSH config from connections.json (connection's ssh section). "
+            "Provide either a connection alias (to use saved SSH config) or explicit host/user."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Shell command to execute remotely"},
+                "connection": {"type": "string", "description": "Connection alias (uses its SSH config)", "default": ""},
+                "host": {"type": "string", "description": "SSH host (if not using connection alias)", "default": ""},
+                "user": {"type": "string", "description": "SSH user (if not using connection alias)", "default": ""},
+                "port": {"type": "integer", "description": "SSH port", "default": 22},
+                "timeout": {"type": "integer", "description": "Command timeout in seconds", "default": 30},
+            },
+            "required": ["command"],
+        },
+    ),
+    Tool(
+        name="git_remote",
+        description=(
+            "Run git commands on a remote server via SSH. "
+            "Shortcut for common git operations (pull, status, log, branch, diff) "
+            "on remote repositories. Provide the connection alias and repo path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "description": "Connection alias (uses its SSH config)"},
+                "repo_path": {"type": "string", "description": "Path to git repo on remote server (e.g. /opt/odoo/odoo-19.0)"},
+                "operation": {
+                    "type": "string",
+                    "description": "Git operation to perform",
+                    "enum": ["status", "pull", "log", "branch", "diff", "remote", "fetch", "stash", "custom"],
+                },
+                "args": {"type": "string", "description": "Additional git arguments (e.g. '--oneline -10' for log, branch name for checkout)", "default": ""},
+                "custom_command": {"type": "string", "description": "Full git command (only when operation=custom)", "default": ""},
+            },
+            "required": ["connection", "repo_path", "operation"],
+        },
+    ),
+    Tool(
+        name="github_api",
+        description=(
+            "Call GitHub REST API directly. Uses the GitHub token from local_profile.json. "
+            "For operations not covered by the GitHub MCP server, or when it's not running."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "endpoint": {"type": "string", "description": "API endpoint (e.g. /user/repos, /repos/owner/repo/issues)"},
+                "method": {"type": "string", "description": "HTTP method", "enum": ["GET", "POST", "PATCH", "PUT", "DELETE"], "default": "GET"},
+                "body": {"type": "object", "description": "Request body (for POST/PATCH/PUT)", "default": {}},
+                "params": {"type": "object", "description": "Query parameters", "default": {}},
+            },
+            "required": ["endpoint"],
+        },
+    ),
 ]
 
 
@@ -1261,6 +1322,115 @@ def _open_connection_manager() -> dict:
         return {"error": f"Failed to launch: {e}", "script": script}
 
 
+def _ssh_execute(host: str, user: str, command: str, port: int = 22,
+                  key_filename: str = None, timeout: int = 30) -> dict:
+    """Execute a command on remote server via SSH using paramiko."""
+    import paramiko
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        connect_kwargs = {"hostname": host, "username": user, "port": port, "timeout": 10}
+        if key_filename:
+            connect_kwargs["key_filename"] = key_filename
+        else:
+            # Try SSH agent
+            connect_kwargs["allow_agent"] = True
+            connect_kwargs["look_for_keys"] = True
+
+        client.connect(**connect_kwargs)
+        stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+        exit_code = stdout.channel.recv_exit_status()
+        out = stdout.read().decode("utf-8", errors="replace")
+        err = stderr.read().decode("utf-8", errors="replace")
+        return {
+            "status": "ok",
+            "exit_code": exit_code,
+            "stdout": out.strip(),
+            "stderr": err.strip(),
+            "host": f"{user}@{host}:{port}",
+            "command": command,
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e), "host": f"{user}@{host}:{port}"}
+    finally:
+        client.close()
+
+
+def _get_ssh_config(connection_alias: str) -> dict:
+    """Get SSH config from connections.json for a given alias."""
+    try:
+        conns_file = CONNECTIONS_FILE
+        if not conns_file.exists():
+            # Try claude.ai project path
+            alt = Path.home() / "Проекти" / "odoo" / "odoo-18.0" / "claude.ai" / ".odoo_connections" / "connections.json"
+            if alt.exists():
+                conns_file = alt
+        if conns_file.exists():
+            with open(conns_file, "r") as f:
+                conns = json.load(f)
+            if isinstance(conns, dict) and connection_alias in conns:
+                return conns[connection_alias].get("ssh", {})
+    except Exception:
+        pass
+    return {}
+
+
+def _github_api_call(endpoint: str, method: str = "GET",
+                     body: dict = None, params: dict = None) -> dict:
+    """Call GitHub REST API using token from local_profile.json."""
+    import urllib.request
+    import urllib.parse
+
+    # Find token
+    token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "")
+    if not token:
+        for profile_path in [
+            Path.home() / "Проекти" / "odoo" / "odoo-18.0" / "claude.ai" / ".odoo_connections" / "local_profile.json",
+            CONNECTIONS_FILE.parent / "local_profile.json",
+        ]:
+            if profile_path.exists():
+                try:
+                    with open(profile_path) as f:
+                        token = json.load(f).get("github_token", "")
+                    if token:
+                        break
+                except Exception:
+                    pass
+
+    if not token:
+        return {"error": "No GitHub token found. Set in local_profile.json or GITHUB_PERSONAL_ACCESS_TOKEN env."}
+
+    url = f"https://api.github.com{endpoint}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    data = None
+    if body and method in ("POST", "PATCH", "PUT"):
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            response_body = resp.read().decode()
+            if response_body:
+                return json.loads(response_body)
+            return {"status": resp.status}
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode()
+        try:
+            return {"error": json.loads(err_body), "status": e.code}
+        except Exception:
+            return {"error": err_body, "status": e.code}
+
+
 def _execute_tool(name: str, args: dict) -> Any:
     m = _mgr()
 
@@ -1294,6 +1464,77 @@ def _execute_tool(name: str, args: dict) -> Any:
 
     elif name == "open_connection_manager":
         return _open_connection_manager()
+
+    elif name == "ssh_execute":
+        command = args["command"]
+        timeout = args.get("timeout", 30)
+        conn_alias = args.get("connection", "")
+        host = args.get("host", "")
+        user = args.get("user", "")
+        port = args.get("port", 22)
+        key_file = None
+
+        if conn_alias:
+            ssh_cfg = _get_ssh_config(conn_alias)
+            if not ssh_cfg:
+                return {"error": f"No SSH config for connection '{conn_alias}'"}
+            host = ssh_cfg.get("host", host)
+            user = ssh_cfg.get("user", user)
+            port = ssh_cfg.get("port", port)
+            if ssh_cfg.get("identity_file"):
+                key_file = ssh_cfg["identity_file"]
+
+        if not host or not user:
+            return {"error": "SSH host and user required (provide connection alias or explicit host/user)"}
+
+        logger.info(f"SSH exec: {user}@{host}:{port} $ {command}")
+        return _ssh_execute(host, user, command, port, key_file, timeout)
+
+    elif name == "git_remote":
+        conn_alias = args["connection"]
+        repo_path = args["repo_path"]
+        operation = args["operation"]
+        extra_args = args.get("args", "")
+
+        ssh_cfg = _get_ssh_config(conn_alias)
+        if not ssh_cfg:
+            return {"error": f"No SSH config for connection '{conn_alias}'"}
+
+        host = ssh_cfg.get("host", "")
+        user = ssh_cfg.get("user", "")
+        port = ssh_cfg.get("port", 22)
+        key_file = ssh_cfg.get("identity_file") or None
+
+        if not host or not user:
+            return {"error": f"SSH config incomplete for '{conn_alias}'"}
+
+        git_commands = {
+            "status": "git status",
+            "pull": "git pull",
+            "log": f"git log --oneline {extra_args or '-20'}",
+            "branch": f"git branch {extra_args}",
+            "diff": f"git diff {extra_args}",
+            "remote": "git remote -v",
+            "fetch": "git fetch --all",
+            "stash": f"git stash {extra_args}",
+            "custom": extra_args or args.get("custom_command", ""),
+        }
+
+        git_cmd = git_commands.get(operation, "")
+        if not git_cmd:
+            return {"error": f"Unknown operation: {operation}"}
+
+        full_cmd = f"cd {repo_path} && {git_cmd}"
+        logger.info(f"Git remote: {user}@{host} $ {full_cmd}")
+        return _ssh_execute(host, user, full_cmd, port, key_file, 30)
+
+    elif name == "github_api":
+        return _github_api_call(
+            endpoint=args["endpoint"],
+            method=args.get("method", "GET"),
+            body=args.get("body"),
+            params=args.get("params"),
+        )
 
     # ── All other tools need a connection ──
     conn = _conn(args)
