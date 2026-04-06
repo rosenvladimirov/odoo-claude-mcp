@@ -1,189 +1,128 @@
 # odoo-claude-mcp
 
-Docker-based bridge between [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) and [Odoo](https://www.odoo.com/) via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/).
-
-Opens a web terminal running Claude Code with full Odoo RPC access — search, read, create, update, delete records, call methods, generate reports, and configure fiscal positions — all through natural language.
+Docker-based MCP server stack for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — integrates Odoo, Portainer (Docker management), and GitHub into a unified AI workflow via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/).
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Browser                                                        │
-│  ┌───────────────────────────┐   ┌───────────────────────────┐  │
-│  │  Odoo 18 (your instance)  │   │  Claude Terminal (:8080)  │  │
-│  │                           │   │  xterm.js + Claude Code   │  │
-│  │  [AI] button in chatter ──┼──►│                           │  │
-│  │  or list view             │   │  claude> "show me all     │  │
-│  │                           │   │   unpaid invoices..."     │  │
-│  └───────────────────────────┘   └─────────────┬─────────────┘  │
-└────────────────────────────────────────────────┼────────────────┘
-                                                 │ MCP (HTTP)
-                                    ┌────────────▼────────────┐
-                                    │  odoo-rpc-mcp (:8084)   │
-                                    │  18 tools · XML/JSON-RPC│
-                                    │  Multi-connection       │
-                                    └────────────┬────────────┘
-                                                 │ RPC
-                                    ┌────────────▼────────────┐
-                                    │  Odoo Instance (:8069)  │
-                                    │  Any version 8+         │
-                                    └─────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│  Claude Code CLI / Web Terminal                                    │
+│  "show unpaid invoices" · "restart staging" · "list my repos"     │
+└────────┬──────────────────┬──────────────────┬─────────────────────┘
+         │ MCP (HTTP)       │ MCP (SSE)        │ MCP (HTTP)
+┌────────▼────────┐ ┌───────▼────────┐ ┌───────▼────────┐
+│ odoo-rpc-mcp    │ │ portainer-mcp  │ │ github-mcp     │
+│ :8084           │ │ :8085          │ │ :8086          │
+│ ~40 tools       │ │ 38 tools       │ │ 20 tools       │
+│ Odoo + Gmail +  │ │ Docker/K8s via │ │ Repos, Issues, │
+│ Calendar +      │ │ Portainer API  │ │ PRs, Branches, │
+│ Telegram        │ │                │ │ Code Search    │
+└────────┬────────┘ └───────┬────────┘ └───────┬────────┘
+         │ XML/JSON-RPC     │ REST API         │ GitHub API
+    ┌────▼────┐      ┌──────▼──────┐     ┌─────▼─────┐
+    │  Odoo   │      │  Portainer  │     │  GitHub   │
+    │  8-19+  │      │  CE/EE      │     │  .com     │
+    └─────────┘      └─────────────┘     └───────────┘
 ```
 
-**Two Docker services:**
+## Services
 
-| Service | Port | Description |
-|---------|------|-------------|
-| `claude-terminal` | 8080 | [ttyd](https://github.com/tsl0922/ttyd) web terminal running Claude Code CLI |
-| `odoo-rpc-mcp` | 8084 | MCP server exposing Odoo RPC operations as 18 tools |
+| Service | Port | Transport | Description |
+|---------|------|-----------|-------------|
+| `claude-terminal` | 8080 | — | Web terminal (ttyd + Claude Code CLI) |
+| `odoo-rpc-mcp` | 8084 | HTTP | Odoo RPC + Gmail + Calendar + Telegram |
+| `portainer-mcp` | 8085 | SSE | Docker/K8s management via Portainer |
+| `github-mcp` | 8086 | HTTP | GitHub repo management (official server) |
 
 ## Quick Start
 
-### 1. Clone and configure
+### Linux / macOS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rosenvladimirov/odoo-claude-mcp/main/install.sh | bash
+```
+
+Or manually:
 
 ```bash
 git clone https://github.com/rosenvladimirov/odoo-claude-mcp.git
 cd odoo-claude-mcp
 cp .env.example .env
-```
-
-Edit `.env`:
-
-```bash
-# Required: your Anthropic API key
-ANTHROPIC_API_KEY=sk-ant-...
-
-# Optional: pre-configure an Odoo connection
-ODOO_URL=https://your-odoo.com
-ODOO_DB=your_database
-ODOO_USERNAME=admin
-ODOO_API_KEY=your_odoo_api_key
-ODOO_PROTOCOL=xmlrpc        # xmlrpc (Odoo 8+) or jsonrpc (Odoo 14+)
-```
-
-### 2. Start
-
-```bash
+# Edit .env — set ANTHROPIC_API_KEY at minimum
 docker compose up -d --build
 ```
 
-### 3. Open the terminal
+### Windows (PowerShell)
 
-Navigate to **http://localhost:8080** — Claude Code CLI is ready.
-
-### 4. Connect to Odoo
-
-If you configured `ODOO_*` variables in `.env`, the connection is automatic. Otherwise, ask Claude:
-
-```
-Connect to my Odoo at https://my-odoo.com, database "production",
-user "admin", API key "abc123"
+```powershell
+git clone https://github.com/rosenvladimirov/odoo-claude-mcp.git
+cd odoo-claude-mcp
+copy .env.example .env
+# Edit .env — set ANTHROPIC_API_KEY at minimum
+docker compose up -d --build
 ```
 
-Claude calls `odoo_connect` and establishes the connection. Credentials are saved in `~/odoo-claude-connections/connections.json` for future sessions.
+Or run the installer:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+### Prerequisites (all platforms)
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Windows, macOS, Linux)
+- [Git](https://git-scm.com/downloads)
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) — `npm install -g @anthropic-ai/claude-code`
+- [Anthropic API Key](https://console.anthropic.com)
+
+### Register MCP Servers
+
+After starting the services, register them with Claude Code:
+
+```bash
+# Core — Odoo RPC (always)
+claude mcp add -t http -s user odoo-rpc http://localhost:8084/mcp
+
+# Optional — Portainer (Docker management)
+claude mcp add -t sse -s user portainer http://localhost:8085/sse
+
+# Optional — GitHub (repo management, requires PAT)
+claude mcp add -t http -s user github-mcp http://localhost:8086/mcp \
+  -H "Authorization: Bearer ghp_YOUR_TOKEN"
+```
+
+Verify:
+
+```bash
+claude mcp list
+```
 
 ## MCP Tools
 
-### Connection Management
+### Odoo RPC (~40 tools)
 
-| Tool | Description |
-|------|-------------|
-| `odoo_connect` | Add or update a named connection |
-| `odoo_disconnect` | Remove a connection |
-| `odoo_connections` | List all active connections |
+**CRUD:** `odoo_search`, `odoo_read`, `odoo_search_read`, `odoo_create`, `odoo_write`, `odoo_unlink`, `odoo_execute`, `odoo_report`
+**Introspection:** `odoo_version`, `odoo_list_models`, `odoo_fields_get`
+**Connections:** `odoo_connect`, `odoo_connections`, `odoo_refresh`
+**Fiscal Positions:** `odoo_fp_list`, `odoo_fp_details`, `odoo_fp_configure`, `odoo_fp_remove_action`, `odoo_fp_types`
+**Google Gmail:** `google_gmail_search`, `google_gmail_read`, `google_gmail_send`, `google_gmail_labels`
+**Google Calendar:** `google_calendar_list`, `google_calendar_events`, `google_calendar_create_event`, `google_calendar_update_event`, `google_calendar_delete_event`
+**Telegram:** `telegram_send_message`, `telegram_get_messages`, `telegram_search_contacts`, `telegram_get_dialogs`
 
-### Introspection
+### Portainer (38 tools)
 
-| Tool | Description |
-|------|-------------|
-| `odoo_version` | Get Odoo server version |
-| `odoo_list_models` | Search available models by pattern |
-| `odoo_fields_get` | Get field definitions for a model |
+**Environments:** `listEnvironments`, `updateEnvironmentTags`, `updateEnvironmentTeamAccesses`
+**Stacks:** `listLocalStacks`, `createLocalStack`, `updateLocalStack`, `startLocalStack`, `stopLocalStack`, `deleteLocalStack`, `getLocalStackFile`
+**Docker Proxy:** `dockerProxy` — full Docker Engine API (containers, images, volumes, networks)
+**Kubernetes:** `kubernetesProxy`, `getKubernetesResourceStripped`
+**Management:** Access groups, environment groups, tags, teams, users, settings
 
-### CRUD Operations
+### GitHub (20 tools)
 
-| Tool | Description |
-|------|-------------|
-| `odoo_search` | Search records by domain |
-| `odoo_read` | Read records by IDs |
-| `odoo_search_read` | Combined search + read |
-| `odoo_search_count` | Count matching records |
-| `odoo_create` | Create one or more records |
-| `odoo_write` | Update existing records |
-| `odoo_unlink` | Delete records |
-
-### Advanced
-
-| Tool | Description |
-|------|-------------|
-| `odoo_execute` | Call any model method (`action_confirm`, `button_validate`, etc.) |
-| `odoo_report` | Generate PDF reports (returns base64) |
-
-### Fiscal Position Configuration (Bulgarian Localization)
-
-Specialized tools for configuring fiscal positions with tax action maps, designed for the `l10n_bg_tax_admin` module.
-
-| Tool | Description |
-|------|-------------|
-| `odoo_fp_list` | List fiscal positions with mapping counts |
-| `odoo_fp_details` | Full FP config with all tax action entries |
-| `odoo_fp_configure` | Add/update a tax action map entry |
-| `odoo_fp_remove_action` | Delete a tax action map entry |
-| `odoo_fp_types` | Reference data: move types, document types, VAT types |
-
-## Usage Examples
-
-Once connected, talk to Claude in natural language:
-
-```
-Show me all unpaid customer invoices from this month
-
-Create a new partner "ACME Corp" with VAT number BG123456789
-
-Confirm sales order SO-0042
-
-What products are running low on stock?
-
-Generate a PDF for invoice INV/2026/0001
-
-List all fiscal positions and their tax mappings
-```
-
-## Multi-Connection Support
-
-Manage multiple Odoo instances by alias:
-
-```
-Connect to production: https://prod.example.com, db "prod", user "admin", key "xxx"
-Connect to staging: https://staging.example.com, db "staging", user "admin", key "yyy"
-
-Show me the partner count on production vs staging
-```
-
-Each connection is stored by name in `connections.json` and persists across sessions.
-
-### CLI Connection Manager
-
-The `odoo_connect_cli.py` tool provides command-line management:
-
-```bash
-python odoo_connect_cli.py list
-python odoo_connect_cli.py add production --url https://prod.example.com --db prod --user admin --api-key xxx --test
-python odoo_connect_cli.py test production
-python odoo_connect_cli.py delete staging --yes
-python odoo_connect_cli.py export backup.json
-```
-
-## Odoo Integration (Optional)
-
-The companion Odoo module **`l10n_bg_claude_terminal`** adds an AI button directly in Odoo:
-
-- **Chatter**: Toggle button opens a terminal panel below the form
-- **List View**: AI button in the control panel opens a modal terminal
-
-The module passes session context (URL, database, user, current model/record) to the terminal, so Claude knows which record you're looking at.
-
-> The Odoo module is maintained separately in [rosenvladimirov/l10n-bulgaria](https://github.com/rosenvladimirov/l10n-bulgaria).
+**Search:** `search_repositories`, `search_code`, `search_issues`, `search_pull_requests`, `search_users`
+**Repos:** `list_branches`, `list_tags`, `list_commits`, `list_releases`, `get_file_contents`
+**Issues & PRs:** `list_issues`, `issue_read`, `list_pull_requests`, `pull_request_read`
+**Other:** `get_me`, `get_commit`, `get_label`, `get_tag`, `get_latest_release`, `get_release_by_tag`
 
 ## Configuration
 
@@ -191,180 +130,113 @@ The module passes session context (URL, database, user, current model/record) to
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ANTHROPIC_API_KEY` | | Anthropic API key for Claude Code |
+| **Core** | | |
+| `ANTHROPIC_API_KEY` | | Anthropic API key (required) |
 | `TERMINAL_PORT` | `8080` | Web terminal port |
+| **Odoo** | | |
+| `ODOO_URL` | | Odoo server URL |
+| `ODOO_DB` | | Database name |
+| `ODOO_USERNAME` | | Login user |
+| `ODOO_PASSWORD` | | Password (or use API key) |
+| `ODOO_API_KEY` | | Odoo API key (preferred) |
+| `ODOO_PROTOCOL` | `xmlrpc` | `xmlrpc` (Odoo 8+) or `jsonrpc` (14+) |
 | `ODOO_MCP_PORT` | `8084` | MCP server port |
-| `ODOO_URL` | | Pre-configured Odoo URL |
-| `ODOO_DB` | | Pre-configured database name |
-| `ODOO_USERNAME` | | Pre-configured username |
-| `ODOO_PASSWORD` | | Password (or use `ODOO_API_KEY` instead) |
-| `ODOO_API_KEY` | | Odoo API key (preferred over password) |
-| `ODOO_PROTOCOL` | `xmlrpc` | `xmlrpc` (Odoo 8+) or `jsonrpc` (Odoo 14+) |
-| `WORKSPACE_PATH` | `./_workspace` | Host directory mounted at `/workspace` |
-| `CLAUDE_THEME` | `light` | Terminal color theme: `light` or `dark` |
-| `SINGLE_CONNECTION` | `false` | Hide connect/disconnect tools, use only "default" |
+| **Portainer** | | |
+| `PORTAINER_URL` | | Portainer server (e.g. `http://192.168.1.100:9000`) |
+| `PORTAINER_TOKEN` | | API token |
+| `PORTAINER_READ_ONLY` | | Set `true` for safe mode |
+| `PORTAINER_MCP_PORT` | `8085` | MCP port |
+| **GitHub** | | |
+| `GITHUB_TOKEN` | | Personal Access Token |
+| `GITHUB_MCP_PORT` | `8086` | MCP port |
 
-### Docker Volumes
-
-| Host Path | Container Path | Purpose |
-|-----------|---------------|---------|
-| `~/.claude` | `/home/claude/.claude` | Claude Code configuration and memory |
-| `~/.claude.json` | `/home/claude/.claude.json` | Claude login state |
-| `~/odoo-claude-connections` | `/data` | Shared connection credentials |
-| `$WORKSPACE_PATH` | `/workspace` | Project files accessible to Claude |
-
-### Single-Connection Mode
-
-When `ODOO_URL` is set or `SINGLE_CONNECTION=true`, the MCP server:
-
-- Hides `odoo_connect` and `odoo_disconnect` tools
-- Uses only the pre-configured "default" connection
-- Ideal for embedded/iframe deployments where the connection is set by the host application
-
-## File Structure
+### File Structure
 
 ```
 odoo-claude-mcp/
-├── docker-compose.yml          # Service orchestration
+├── docker-compose.yml          # All services
 ├── .env.example                # Configuration template
-├── server.py                   # Standalone MCP server (SSE transport)
-├── Dockerfile                  # Standalone server image
+├── install.sh                  # Linux/macOS installer
+├── install.ps1                 # Windows installer (PowerShell)
 │
-├── claude-terminal/            # Web terminal service
-│   ├── Dockerfile              # Node 22 + ttyd (built from source) + Claude Code CLI
-│   ├── entrypoint.sh           # ttyd launcher with theme configuration
-│   ├── start-session.sh        # Parses URL params → session context → launches claude
-│   ├── CLAUDE.md               # Odoo domain knowledge base for Claude
-│   ├── settings.json           # Claude Code settings
-│   └── .mcp.json               # MCP server endpoint (internal Docker network)
+├── claude-terminal/            # Web terminal
+│   ├── Dockerfile
+│   ├── .mcp.json               # MCP endpoints (internal network)
+│   ├── CLAUDE.md               # Domain knowledge for Claude
+│   └── settings.json
 │
-├── odoo-rpc-mcp/               # MCP server service
-│   ├── Dockerfile              # Python 3.13-slim, non-root user
-│   ├── server.py               # 18 MCP tools (CRUD + fiscal positions)
-│   ├── requirements.txt        # mcp >= 1.0.0, uvicorn
-│   └── odoo_connect_cli.py     # CLI connection manager with SSH support
+├── odoo-rpc-mcp/               # Odoo MCP server
+│   ├── Dockerfile
+│   ├── server.py               # ~40 tools
+│   ├── google_service.py       # Gmail + Calendar
+│   ├── telegram_service.py     # Telegram integration
+│   └── requirements.txt
 │
-└── tools/                      # Standalone desktop & CLI utilities
-    ├── odoo_connect.py         # GTK4 GUI connection manager (GNOME)
-    ├── odoo_module_analyzer.py # Odoo module → Claude memory file generator
-    └── glb_viewer.py           # GTK4 + OpenGL 3D GLB model viewer
+├── portainer-mcp/              # Portainer MCP wrapper
+│   └── Dockerfile              # portainer-mcp binary + supergateway
+│
+├── github-mcp/                 # GitHub MCP (build reference)
+│   └── Dockerfile              # Multi-stage build (optional)
+│
+└── tools/                      # Desktop utilities (Linux)
+    ├── odoo_connect.py         # GTK4 connection manager GUI
+    ├── odoo_module_analyzer.py # Module → Claude memory generator
+    └── glb_viewer.py           # 3D GLB model viewer
 ```
 
-## Desktop & CLI Tools
+## Desktop Tools (Linux only)
 
-The `tools/` directory contains standalone utilities that complement the MCP server. These run on the **host machine** (not inside Docker).
+### Connection Manager GUI
 
-### Odoo Connection Manager (GUI)
-
-GTK4/libadwaita desktop app for managing Odoo connections — GNOME Settings style with sidebar navigation.
+GTK4/libadwaita app with GNOME Settings-style sidebar.
 
 ```bash
-# Requirements: GTK4, libadwaita
 pip install PyGObject
 python tools/odoo_connect.py
 ```
 
-Features:
-- Add, edit, delete Odoo connections with a visual interface
-- Test connections (XML-RPC authentication)
-- SSH configuration per connection (host, user, port, auth method)
-- Manage `~/odoo-claude-connections/connections.json` — shared with the MCP server
+**Sections:**
+- **Personal Profile** — GitHub PAT, SSH key management (generate, list, copy)
+- **Per-connection** — Odoo server, SSH tunnel, Portainer (with test buttons)
 
-Set `ODOO_CONNECTIONS_DIR` to override the default path.
+### Platform Notes
 
-### Odoo Module Analyzer
+| Feature | Linux | macOS | Windows |
+|---------|-------|-------|---------|
+| Docker services | Docker / Docker Desktop | Docker Desktop | Docker Desktop |
+| Claude Code CLI | npm / standalone | npm / standalone | npm |
+| Connection GUI | GTK4 native | — | — |
+| Install script | `install.sh` | `install.sh` | `install.ps1` |
 
-Analyzes an Odoo module's source code and generates a Claude-compatible memory file with XML-RPC operation examples.
+> **macOS / Windows:** Configure connections via `.env` file, CLI (`odoo_connect_cli.py`), or ask Claude directly ("connect to my Odoo at ...").
 
-```bash
-# Requirements
-pip install anthropic
-export ANTHROPIC_API_KEY=sk-ant-...
+## Usage Examples
 
-# Analyze a single module
-python tools/odoo_module_analyzer.py /path/to/my_module
+```
+# Odoo
+Show me all unpaid customer invoices from this month
+Create partner "ACME Corp" with VAT BG123456789
+Confirm sales order SO-0042
 
-# Analyze all modules in a repo
-python tools/odoo_module_analyzer.py /path/to/repo --all-modules
+# Docker (via Portainer)
+List all containers on the server
+Stop the staging stack
+Show me the compose file for the odoo stack
 
-# Output to custom directory
-python tools/odoo_module_analyzer.py /path/to/module --output ./memory/
-
-# Dry run — see which files would be sent
-python tools/odoo_module_analyzer.py /path/to/module --dry-run
+# GitHub
+List my repositories
+Show open issues in l10n-bulgaria
+Search for "fiscal position" in my code
 ```
 
-Generates a markdown file with:
-- Module description and key models
-- Ready-to-copy XML-RPC operations (`search_read`, `create`, `write`, custom methods)
-- Quick command triggers
-- Dependencies and limitations
+## Security
 
-### GLB 3D Viewer
-
-GTK4 + OpenGL viewer for `.glb` (glTF 2.0 binary) 3D model files — useful for inspecting product design assets.
-
-```bash
-# Requirements: GTK4, libadwaita, PyOpenGL, numpy, pygltflib
-pip install PyGObject PyOpenGL numpy pygltflib
-python tools/glb_viewer.py model.glb
-```
-
-Features:
-- Mouse rotation and zoom
-- Auto-color palette for meshes without materials
-- Supports positions, normals, and indices
-
-## How It Works
-
-### Session Flow
-
-1. User opens the terminal (directly or via Odoo AI button)
-2. `start-session.sh` reads URL parameters (Odoo URL, DB, user, model, record ID)
-3. Session context is written to `~/.odoo_session.json`
-4. Claude Code CLI starts with MCP configured to reach `odoo-rpc-mcp`
-5. Claude reads the session context and auto-connects to the Odoo instance
-6. User interacts with Odoo through natural language
-
-### MCP Transport
-
-The MCP server supports both **Streamable HTTP** and **SSE** transports:
-
-- **Container-to-container**: `http://odoo-rpc-mcp:8084/mcp` (Streamable HTTP)
-- **Host access**: `http://localhost:8084/mcp` or `http://localhost:8084/sse` (SSE)
-- **Health check**: `http://localhost:8084/health`
-
-### Credential Storage
-
-Connections are persisted in `~/odoo-claude-connections/connections.json`:
-
-```json
-{
-  "default": {
-    "url": "https://my-odoo.com",
-    "db": "production",
-    "user": "admin",
-    "api_key": "...",
-    "protocol": "xmlrpc"
-  }
-}
-```
-
-This file is shared between both containers via a Docker volume mount.
-
-## Security Notes
-
-- **Do not expose port 8080 to the internet** without authentication. The terminal provides full shell access.
-- Credentials are stored on the host filesystem. Protect `~/odoo-claude-connections/` with appropriate permissions.
-- Both containers run as non-root users (`claude` uid 1000, `mcp`).
-- API keys are preferred over passwords for Odoo authentication.
-- In production, use a reverse proxy with TLS and authentication (nginx + OAuth2, Traefik, etc.).
-
-## Requirements
-
-- Docker and Docker Compose v2+
-- An Anthropic API key ([console.anthropic.com](https://console.anthropic.com))
-- An Odoo instance (version 8+) with XML-RPC or JSON-RPC enabled
+- **Never expose port 8080 to the internet** without authentication
+- `.env` is in `.gitignore` — credentials stay local
+- All containers run as non-root users
+- API keys preferred over passwords
+- Portainer supports read-only mode (`PORTAINER_READ_ONLY=true`)
+- GitHub MCP requires Bearer token in HTTP headers
 
 ## License
 
