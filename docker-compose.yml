@@ -71,3 +71,40 @@ services:
       - ${HOME}/odoo-claude-connections:/data
     labels:
       - "com.blconsulting.service=mcp-odoo-rpc"
+
+  # ─── Portainer MCP (Docker management via Portainer API) ──
+  portainer-mcp:
+    build:
+      context: ./portainer-mcp
+      dockerfile: Dockerfile
+    container_name: mcp-portainer
+    restart: unless-stopped
+    environment:
+      - MCP_PORT=8085
+      - PORTAINER_URL=${PORTAINER_URL:-}
+      - PORTAINER_TOKEN=${PORTAINER_TOKEN:-}
+      - READ_ONLY=${PORTAINER_READ_ONLY:-}
+      - INSECURE_TLS=true
+      - NODE_TLS_REJECT_UNAUTHORIZED=0
+      - SSL_CERT_FILE=/dev/null
+    command: >
+      sh -c "supergateway
+      --stdio 'portainer-mcp -server $${PORTAINER_URL} -token $${PORTAINER_TOKEN} -disable-version-check'
+      --port $${MCP_PORT}"
+    ports:
+      - "${PORTAINER_MCP_PORT:-8085}:8085"
+    labels:
+      - "com.blconsulting.service=mcp-portainer"
+
+  # ─── GitHub MCP (GitHub repo management) ───────────────────
+  github-mcp:
+    image: ghcr.io/github/github-mcp-server:latest
+    container_name: mcp-github
+    restart: unless-stopped
+    environment:
+      - GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_TOKEN:-}
+    command: ["http", "--port", "8086", "--toolsets", "all"]
+    ports:
+      - "${GITHUB_MCP_PORT:-8086}:8086"
+    labels:
+      - "com.blconsulting.service=mcp-github"

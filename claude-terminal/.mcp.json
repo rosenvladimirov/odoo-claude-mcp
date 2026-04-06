@@ -3,6 +3,14 @@
     "odoo-rpc": {
       "type": "http",
       "url": "http://odoo-rpc-mcp:8084/mcp"
+    },
+    "portainer": {
+      "type": "sse",
+      "url": "http://portainer-mcp:8085/sse"
+    },
+    "github": {
+      "type": "http",
+      "url": "http://github-mcp:8086/mcp"
     }
   }
 }
