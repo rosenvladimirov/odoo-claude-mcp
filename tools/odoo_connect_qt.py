@@ -26,16 +26,58 @@ from PySide6.QtWidgets import (
 )
 
 # ── Config paths ─────────────────────────────────────────────────────
-CONFIG_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", ".odoo_connections"
-)
-if not os.path.isdir(CONFIG_DIR):
-    CONFIG_DIR = os.path.join(os.path.expanduser("~"), "odoo-claude-connections")
+# Try project-local first, then claude.ai project, then home fallback
+_candidates = [
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".odoo_connections"),
+    os.path.expanduser("~/Проекти/odoo/odoo-18.0/claude.ai/.odoo_connections"),
+    os.path.join(os.path.expanduser("~"), ".odoo_connections"),
+]
+CONFIG_DIR = next((d for d in _candidates if os.path.isdir(d)),
+                  _candidates[0])
 
 CONFIG_FILE = os.path.join(CONFIG_DIR, "connections.json")
 LOCAL_PROFILE_FILE = os.path.join(CONFIG_DIR, "local_profile.json")
 SSH_CONFIG = os.path.expanduser("~/.ssh/config")
 SSH_DIR = os.path.expanduser("~/.ssh")
+SESSIONS_FILE = os.path.join(CONFIG_DIR, "sessions.json")
+
+
+# ── Session tracking ────────────────────────────────────────────────
+
+def _load_sessions():
+    if os.path.exists(SESSIONS_FILE):
+        try:
+            with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+def _is_pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+def get_sessions():
+    import socket
+    sessions = _load_sessions()
+    hostname = socket.gethostname()
+    cleaned = {}
+    changed = False
+    for name, info in sessions.items():
+        if info.get("host") == hostname:
+            pid = info.get("pid", 0)
+            if pid and not _is_pid_alive(pid):
+                changed = True
+                continue
+        cleaned[name] = info
+    if changed:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(cleaned, f, indent=2, ensure_ascii=False)
+    return cleaned
 
 
 # ── Data helpers ─────────────────────────────────────────────────────
@@ -146,7 +188,6 @@ class OdooConnectWindow(QMainWindow):
         self.setWindowTitle("Odoo Connection Manager")
         self.resize(900, 620)
         self.connections = load_connections()
-
         # Central widget
         central = QWidget()
         self.setCentralWidget(central)
@@ -163,8 +204,8 @@ class OdooConnectWindow(QMainWindow):
         sidebar_layout.setContentsMargins(4, 4, 4, 4)
 
         # Profile button
-        self.btn_profile = QPushButton("\U0001f464  Personal Profile")
-        self.btn_profile.setStyleSheet("text-align: left; padding: 8px; font-weight: bold;")
+        self.btn_profile = QPushButton("  Personal Profile")
+        self.btn_profile.setObjectName("profileBtn")
         self.btn_profile.clicked.connect(self._show_profile)
         sidebar_layout.addWidget(self.btn_profile)
 
@@ -215,6 +256,15 @@ class OdooConnectWindow(QMainWindow):
         page = QWidget()
         form = QVBoxLayout(page)
         form.setContentsMargins(16, 16, 16, 16)
+
+        # Session banner
+        self.session_label = QLabel("")
+        self.session_label.setWordWrap(True)
+        self.session_label.setVisible(False)
+        self.session_label.setStyleSheet(
+            "background-color: #2a6e3f; color: white; padding: 10px 14px; "
+            "border-radius: 8px; font-weight: bold; font-size: 13px;")
+        form.addWidget(self.session_label)
 
         # Server group
         grp_server = QGroupBox("Odoo Server")
@@ -355,8 +405,14 @@ class OdooConnectWindow(QMainWindow):
 
     def _refresh_sidebar(self, select_name=None):
         self.conn_list.clear()
+        sessions = get_sessions()
         for name in self.connections:
-            item = QListWidgetItem(name)
+            session = sessions.get(name)
+            label = name
+            if session:
+                claude_id = session.get("claude_id", "?")
+                label = f"\U0001f7e2 {name}  [{claude_id}]"
+            item = QListWidgetItem(label)
             item.setData(Qt.UserRole, name)
             self.conn_list.addItem(item)
         if select_name:
@@ -390,6 +446,20 @@ class OdooConnectWindow(QMainWindow):
 
     def _load_connection(self, name):
         conn = self.connections[name]
+
+        # Show active session
+        session = get_sessions().get(name)
+        if session:
+            cid = session.get("claude_id", "?")
+            cwd = session.get("cwd", session.get("project", ""))
+            host = session.get("host", "")
+            started = session.get("started", "")[:16]
+            self.session_label.setText(
+                f"\U0001f7e2  {cid}  |  {cwd}  |  {host}  |  {started}")
+            self.session_label.setVisible(True)
+        else:
+            self.session_label.setVisible(False)
+
         self.entry_name.setText(name)
         self.entry_url.setText(conn.get("url", ""))
         self.entry_db.setText(conn.get("db", ""))
@@ -627,10 +697,230 @@ def get_connection(name=None):
     return None
 
 
+DARK_STYLE = """
+/* ── Base ─────────────────────────────────────────── */
+QMainWindow {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+}
+QWidget {
+    background-color: transparent;
+    color: #cdd6f4;
+    font-size: 13px;
+}
+
+/* ── Header bar (menu bar area) ──────────────────── */
+QMainWindow::separator {
+    background: #313244;
+}
+QStatusBar {
+    background-color: #181825;
+    color: #6c7086;
+    border-top: 1px solid #313244;
+    font-size: 12px;
+    padding: 4px 8px;
+}
+
+/* ── Sidebar ─────────────────────────────────────── */
+QSplitter::handle {
+    background-color: #313244;
+    width: 1px;
+}
+
+QListWidget {
+    background-color: #1e1e2e;
+    border: none;
+    border-right: 1px solid #313244;
+    outline: none;
+    font-size: 13px;
+}
+QListWidget::item {
+    padding: 10px 16px;
+    border: none;
+    border-radius: 8px;
+    margin: 2px 6px;
+}
+QListWidget::item:selected {
+    background-color: #45475a;
+    color: #cdd6f4;
+}
+QListWidget::item:hover:!selected {
+    background-color: #313244;
+}
+
+/* ── Cards (GroupBox) ────────────────────────────── */
+QGroupBox {
+    background-color: #313244;
+    border: none;
+    border-radius: 12px;
+    margin-top: 20px;
+    padding: 20px 16px 12px 16px;
+    font-weight: 600;
+    font-size: 14px;
+    color: #cdd6f4;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 16px;
+    top: 4px;
+    padding: 0 8px;
+    color: #89b4fa;
+}
+QGroupBox::indicator {
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+}
+QGroupBox::indicator:unchecked {
+    border: 2px solid #585b70;
+    background: transparent;
+}
+QGroupBox::indicator:checked {
+    border: 2px solid #89b4fa;
+    background: #89b4fa;
+}
+
+/* ── Inputs ──────────────────────────────────────── */
+QLineEdit, QComboBox {
+    background-color: #45475a;
+    border: 2px solid transparent;
+    border-radius: 8px;
+    padding: 8px 12px;
+    color: #cdd6f4;
+    selection-background-color: #89b4fa;
+    selection-color: #1e1e2e;
+    font-size: 13px;
+}
+QLineEdit:focus, QComboBox:focus {
+    border: 2px solid #89b4fa;
+    background-color: #45475a;
+}
+QLineEdit::placeholder {
+    color: #6c7086;
+}
+QComboBox::drop-down {
+    border: none;
+    padding-right: 8px;
+}
+QComboBox QAbstractItemView {
+    background-color: #313244;
+    border: 1px solid #45475a;
+    border-radius: 8px;
+    selection-background-color: #89b4fa;
+    selection-color: #1e1e2e;
+}
+
+QTextEdit {
+    background-color: #45475a;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 12px;
+    color: #a6adc8;
+    font-size: 12px;
+}
+
+/* ── Buttons ─────────────────────────────────────── */
+QPushButton {
+    background-color: #45475a;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 20px;
+    color: #cdd6f4;
+    font-weight: 500;
+    font-size: 13px;
+    min-width: 80px;
+}
+QPushButton:hover {
+    background-color: #585b70;
+}
+QPushButton:pressed {
+    background-color: #89b4fa;
+    color: #1e1e2e;
+}
+QPushButton:default {
+    background-color: #89b4fa;
+    color: #1e1e2e;
+    font-weight: 600;
+}
+QPushButton:default:hover {
+    background-color: #74c7ec;
+}
+
+/* ── Profile button ──────────────────────────────── */
+QPushButton#profileBtn {
+    background-color: #313244;
+    border: none;
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    text-align: left;
+    color: #cdd6f4;
+}
+QPushButton#profileBtn:hover {
+    background-color: #45475a;
+}
+
+/* ── Scroll area ─────────────────────────────────── */
+QScrollArea {
+    border: none;
+    background-color: #1e1e2e;
+}
+QScrollBar:vertical {
+    background: transparent;
+    width: 8px;
+    margin: 0;
+}
+QScrollBar::handle:vertical {
+    background: #45475a;
+    border-radius: 4px;
+    min-height: 30px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #585b70;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
+}
+
+/* ── Checkbox ────────────────────────────────────── */
+QCheckBox {
+    color: #cdd6f4;
+    spacing: 8px;
+    font-size: 13px;
+}
+QCheckBox::indicator {
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    border: 2px solid #585b70;
+    background: transparent;
+}
+QCheckBox::indicator:checked {
+    background: #89b4fa;
+    border: 2px solid #89b4fa;
+}
+
+/* ── Labels ──────────────────────────────────────── */
+QLabel {
+    color: #a6adc8;
+    font-size: 13px;
+}
+
+/* ── Separator ───────────────────────────────────── */
+QFrame[frameShape="4"] {
+    color: #313244;
+    max-height: 1px;
+}
+"""
+
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setApplicationName("Odoo Connection Manager")
-    app.setStyle("Fusion")
+    # Follow system GNOME/GTK theme on Linux (via qt6-gtk-platformtheme)
+    # On Windows/macOS falls back to Fusion
+    pass
     win = OdooConnectWindow()
     win.show()
     sys.exit(app.exec())
