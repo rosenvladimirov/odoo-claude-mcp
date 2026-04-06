@@ -1334,9 +1334,15 @@ def _ssh_execute(host: str, user: str, command: str, port: int = 22,
         if key_filename:
             connect_kwargs["key_filename"] = key_filename
         else:
-            # Try SSH agent
+            # Try SSH agent first, then look for keys in ~/.ssh/
             connect_kwargs["allow_agent"] = True
             connect_kwargs["look_for_keys"] = True
+            # Explicit key paths as fallback (Docker containers have no agent)
+            home_ssh = Path.home() / ".ssh"
+            key_candidates = [home_ssh / k for k in ("id_ed25519", "id_ecdsa", "id_rsa")
+                              if (home_ssh / k).exists()]
+            if key_candidates:
+                connect_kwargs["key_filename"] = [str(k) for k in key_candidates]
 
         client.connect(**connect_kwargs)
         stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
@@ -1359,20 +1365,22 @@ def _ssh_execute(host: str, user: str, command: str, port: int = 22,
 
 def _get_ssh_config(connection_alias: str) -> dict:
     """Get SSH config from connections.json for a given alias."""
-    try:
-        conns_file = CONNECTIONS_FILE
-        if not conns_file.exists():
-            # Try claude.ai project path
-            alt = Path.home() / "Проекти" / "odoo" / "odoo-18.0" / "claude.ai" / ".odoo_connections" / "connections.json"
-            if alt.exists():
-                conns_file = alt
-        if conns_file.exists():
-            with open(conns_file, "r") as f:
-                conns = json.load(f)
-            if isinstance(conns, dict) and connection_alias in conns:
-                return conns[connection_alias].get("ssh", {})
-    except Exception:
-        pass
+    candidates = [
+        Path("/config/connections.json"),      # Docker mount from claude.ai
+        CONNECTIONS_FILE,                       # /data/connections.json
+        Path.home() / "Проекти" / "odoo" / "odoo-18.0" / "claude.ai" / ".odoo_connections" / "connections.json",
+    ]
+    for conns_file in candidates:
+        try:
+            if conns_file.exists():
+                with open(conns_file, "r") as f:
+                    conns = json.load(f)
+                if isinstance(conns, dict) and connection_alias in conns:
+                    ssh = conns[connection_alias].get("ssh", {})
+                    if ssh:
+                        return ssh
+        except Exception:
+            continue
     return {}
 
 
