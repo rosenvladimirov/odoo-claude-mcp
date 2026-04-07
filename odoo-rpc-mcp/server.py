@@ -1169,6 +1169,7 @@ TOOLS = [
                 "user": {"type": "string", "description": "SSH user (if not using connection alias)", "default": ""},
                 "port": {"type": "integer", "description": "SSH port", "default": 22},
                 "timeout": {"type": "integer", "description": "Command timeout in seconds", "default": 30},
+                "forward_agent": {"type": "boolean", "description": "Forward SSH agent to remote (for GitHub auth without storing keys)", "default": False},
             },
             "required": ["command"],
         },
@@ -1192,6 +1193,7 @@ TOOLS = [
                 },
                 "args": {"type": "string", "description": "Additional git arguments (e.g. '--oneline -10' for log, branch name for checkout)", "default": ""},
                 "custom_command": {"type": "string", "description": "Full git command (only when operation=custom)", "default": ""},
+                "forward_agent": {"type": "boolean", "description": "Forward SSH agent for GitHub auth (auto-enabled for pull/fetch/clone)", "default": True},
             },
             "required": ["connection", "repo_path", "operation"],
         },
@@ -1323,9 +1325,16 @@ def _open_connection_manager() -> dict:
 
 
 def _ssh_execute(host: str, user: str, command: str, port: int = 22,
-                  key_filename: str = None, timeout: int = 30) -> dict:
-    """Execute a command on remote server via SSH using paramiko."""
+                  key_filename: str = None, timeout: int = 30,
+                  forward_agent: bool = False) -> dict:
+    """Execute a command on remote server via SSH using paramiko.
+
+    If forward_agent=True, the local SSH agent is forwarded to the remote
+    server so it can authenticate with third parties (e.g. GitHub) using
+    your local keys — without storing any keys on the remote server.
+    """
     import paramiko
+    from paramiko.agent import AgentRequestHandler
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -1334,10 +1343,8 @@ def _ssh_execute(host: str, user: str, command: str, port: int = 22,
         if key_filename:
             connect_kwargs["key_filename"] = key_filename
         else:
-            # Try SSH agent first, then look for keys in ~/.ssh/
             connect_kwargs["allow_agent"] = True
             connect_kwargs["look_for_keys"] = True
-            # Explicit key paths as fallback (Docker containers have no agent)
             home_ssh = Path.home() / ".ssh"
             key_candidates = [home_ssh / k for k in ("id_ed25519", "id_ecdsa", "id_rsa")
                               if (home_ssh / k).exists()]
@@ -1345,10 +1352,36 @@ def _ssh_execute(host: str, user: str, command: str, port: int = 22,
                 connect_kwargs["key_filename"] = [str(k) for k in key_candidates]
 
         client.connect(**connect_kwargs)
-        stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
-        exit_code = stdout.channel.recv_exit_status()
-        out = stdout.read().decode("utf-8", errors="replace")
-        err = stderr.read().decode("utf-8", errors="replace")
+
+        # Open channel with agent forwarding
+        transport = client.get_transport()
+        channel = transport.open_session()
+
+        if forward_agent:
+            AgentRequestHandler(channel)
+
+        channel.exec_command(command)
+
+        # Read output with timeout
+        channel.settimeout(timeout)
+        stdout_data = b""
+        stderr_data = b""
+        while True:
+            if channel.recv_ready():
+                stdout_data += channel.recv(65536)
+            if channel.recv_stderr_ready():
+                stderr_data += channel.recv_stderr(65536)
+            if channel.exit_status_ready():
+                # Drain remaining
+                while channel.recv_ready():
+                    stdout_data += channel.recv(65536)
+                while channel.recv_stderr_ready():
+                    stderr_data += channel.recv_stderr(65536)
+                break
+
+        exit_code = channel.recv_exit_status()
+        out = stdout_data.decode("utf-8", errors="replace")
+        err = stderr_data.decode("utf-8", errors="replace")
         return {
             "status": "ok",
             "exit_code": exit_code,
@@ -1356,6 +1389,7 @@ def _ssh_execute(host: str, user: str, command: str, port: int = 22,
             "stderr": err.strip(),
             "host": f"{user}@{host}:{port}",
             "command": command,
+            "agent_forwarded": forward_agent,
         }
     except Exception as e:
         return {"status": "error", "error": str(e), "host": f"{user}@{host}:{port}"}
@@ -1495,8 +1529,9 @@ def _execute_tool(name: str, args: dict) -> Any:
         if not host or not user:
             return {"error": "SSH host and user required (provide connection alias or explicit host/user)"}
 
-        logger.info(f"SSH exec: {user}@{host}:{port} $ {command}")
-        return _ssh_execute(host, user, command, port, key_file, timeout)
+        fwd = args.get("forward_agent", False)
+        logger.info(f"SSH exec: {user}@{host}:{port} agent={fwd} $ {command}")
+        return _ssh_execute(host, user, command, port, key_file, timeout, forward_agent=fwd)
 
     elif name == "git_remote":
         conn_alias = args["connection"]
@@ -1532,9 +1567,14 @@ def _execute_tool(name: str, args: dict) -> Any:
         if not git_cmd:
             return {"error": f"Unknown operation: {operation}"}
 
+        # Auto-enable agent forwarding for operations that need GitHub auth
+        fwd = args.get("forward_agent", True)
+        needs_remote = operation in ("pull", "fetch", "custom")
+        use_fwd = fwd and needs_remote
+
         full_cmd = f"cd {repo_path} && {git_cmd}"
-        logger.info(f"Git remote: {user}@{host} $ {full_cmd}")
-        return _ssh_execute(host, user, full_cmd, port, key_file, 30)
+        logger.info(f"Git remote: {user}@{host} agent={use_fwd} $ {full_cmd}")
+        return _ssh_execute(host, user, full_cmd, port, key_file, 60, forward_agent=use_fwd)
 
     elif name == "github_api":
         return _github_api_call(
