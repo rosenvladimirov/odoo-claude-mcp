@@ -1992,9 +1992,29 @@ def create_app():
 
     # Raw ASGI app — no Starlette routing (avoids 307 redirects)
     secret_token = os.environ.get("MCP_SECRET_TOKEN", "")
+    oauth_client_id = os.environ.get("MCP_OAUTH_CLIENT_ID", "mcp-client")
+    oauth_client_secret = os.environ.get("MCP_OAUTH_CLIENT_SECRET", secret_token)
     protected_paths = {"/mcp", "/sse", "/messages", "/api/session/register",
                        "/api/session/list", "/api/session/update",
                        "/api/session/delete", "/api/connect"}
+    public_paths = {"/health", "/.well-known/oauth-authorization-server",
+                    "/oauth/token", "/oauth/register"}
+
+    def _check_auth(headers):
+        """Check X-Api-Token or Bearer token. Returns True if valid."""
+        if not secret_token:
+            return True
+        # X-Api-Token header
+        api_token = headers.get(b"x-api-token", b"").decode()
+        if api_token and api_token == secret_token:
+            return True
+        # Bearer token (OAuth 2.0)
+        auth = headers.get(b"authorization", b"").decode()
+        if auth.startswith("Bearer "):
+            bearer = auth[7:]
+            if bearer == secret_token:
+                return True
+        return False
 
     async def app(scope, receive, send):
         if scope["type"] == "lifespan":
@@ -2010,20 +2030,132 @@ def create_app():
 
         path = scope.get("path", "")
 
-        # API token authentication
+        # ── OAuth 2.0 metadata ─────────────────────────────────────
+        if path == "/.well-known/oauth-authorization-server" and scope["type"] == "http":
+            from starlette.responses import JSONResponse
+            host = dict(scope.get("headers", [])).get(b"host", b"localhost").decode()
+            scheme = "https" if "443" in str(scope.get("server", ("", ""))) or host.endswith((".space", ".com", ".net")) else "http"
+            base = f"{scheme}://{host}"
+            response = JSONResponse({
+                "issuer": base,
+                "authorization_endpoint": f"{base}/oauth/authorize",
+                "token_endpoint": f"{base}/oauth/token",
+                "registration_endpoint": f"{base}/oauth/register",
+                "response_types_supported": ["code"],
+                "grant_types_supported": ["authorization_code", "client_credentials"],
+                "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
+                "code_challenge_methods_supported": ["S256"],
+            })
+            await response(scope, receive, send)
+            return
+
+        # ── OAuth token endpoint ───────────────────────────────────
+        if path == "/oauth/token" and scope["type"] == "http":
+            from starlette.requests import Request
+            from starlette.responses import JSONResponse
+            request = Request(scope, receive)
+            try:
+                body = await request.body()
+                from urllib.parse import parse_qs
+                params = parse_qs(body.decode())
+                grant_type = params.get("grant_type", [None])[0]
+                cid = params.get("client_id", [None])[0]
+                csecret = params.get("client_secret", [None])[0]
+
+                # Also check Basic auth header
+                if not cid or not csecret:
+                    import base64
+                    auth_header = dict(scope.get("headers", [])).get(b"authorization", b"").decode()
+                    if auth_header.startswith("Basic "):
+                        decoded = base64.b64decode(auth_header[6:]).decode()
+                        if ":" in decoded:
+                            cid, csecret = decoded.split(":", 1)
+
+                if grant_type == "client_credentials":
+                    if cid == oauth_client_id and csecret == oauth_client_secret:
+                        response = JSONResponse({
+                            "access_token": secret_token,
+                            "token_type": "Bearer",
+                            "expires_in": 86400,
+                        })
+                    else:
+                        response = JSONResponse(
+                            {"error": "invalid_client"}, status_code=401)
+                elif grant_type == "authorization_code":
+                    code = params.get("code", [None])[0]
+                    if code == secret_token:
+                        response = JSONResponse({
+                            "access_token": secret_token,
+                            "token_type": "Bearer",
+                            "expires_in": 86400,
+                        })
+                    else:
+                        response = JSONResponse(
+                            {"error": "invalid_grant"}, status_code=400)
+                else:
+                    response = JSONResponse(
+                        {"error": "unsupported_grant_type"}, status_code=400)
+            except Exception as e:
+                response = JSONResponse(
+                    {"error": "server_error", "error_description": str(e)},
+                    status_code=500)
+            await response(scope, receive, send)
+            return
+
+        # ── OAuth authorize (redirect with code) ───────────────────
+        if path == "/oauth/authorize" and scope["type"] == "http":
+            from starlette.requests import Request
+            from starlette.responses import RedirectResponse, JSONResponse
+            request = Request(scope, receive)
+            redirect_uri = request.query_params.get("redirect_uri", "")
+            state = request.query_params.get("state", "")
+            if redirect_uri:
+                sep = "&" if "?" in redirect_uri else "?"
+                target = f"{redirect_uri}{sep}code={secret_token}"
+                if state:
+                    target += f"&state={state}"
+                response = RedirectResponse(target)
+            else:
+                response = JSONResponse({"error": "missing redirect_uri"}, status_code=400)
+            await response(scope, receive, send)
+            return
+
+        # ── OAuth dynamic client registration ──────────────────────
+        if path == "/oauth/register" and scope["type"] == "http" and scope.get("method") == "POST":
+            from starlette.requests import Request
+            from starlette.responses import JSONResponse
+            request = Request(scope, receive)
+            try:
+                body = await request.json()
+                response = JSONResponse({
+                    "client_id": oauth_client_id,
+                    "client_secret": oauth_client_secret,
+                    "client_name": body.get("client_name", "mcp-client"),
+                    "redirect_uris": body.get("redirect_uris", []),
+                    "grant_types": ["authorization_code", "client_credentials"],
+                    "response_types": ["code"],
+                    "token_endpoint_auth_method": "client_secret_post",
+                }, status_code=201)
+            except Exception:
+                response = JSONResponse({"error": "invalid_request"}, status_code=400)
+            await response(scope, receive, send)
+            return
+
+        # ── Authentication for protected paths ─────────────────────
         if scope["type"] == "http" and secret_token:
             check_path = path.rstrip("/")
-            # Also match /messages/<anything>
             needs_auth = (check_path in protected_paths
                           or check_path.startswith("/messages/"))
-            if needs_auth:
+            is_public = check_path in public_paths
+            if needs_auth and not is_public:
                 headers = dict(scope.get("headers", []))
-                token = headers.get(b"x-api-token", b"").decode()
-                if token != secret_token:
+                if not _check_auth(headers):
                     from starlette.responses import JSONResponse
+                    host = headers.get(b"host", b"localhost").decode()
                     response = JSONResponse(
-                        {"error": "Unauthorized", "hint": "Set X-Api-Token header"},
-                        status_code=401)
+                        {"error": "Unauthorized", "hint": "Use Bearer token or X-Api-Token header"},
+                        status_code=401,
+                        headers={"WWW-Authenticate": f'Bearer resource_metadata="https://{host}/.well-known/oauth-authorization-server"'})
                     await response(scope, receive, send)
                     return
 
