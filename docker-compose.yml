@@ -95,8 +95,8 @@ services:
       sh -c "supergateway
       --stdio 'portainer-mcp -server $${PORTAINER_URL} -token $${PORTAINER_TOKEN} -disable-version-check'
       --port $${MCP_PORT}"
-    ports:
-      - "${PORTAINER_MCP_PORT:-8085}:8085"
+    expose:
+      - "8085"
     labels:
       - "com.blconsulting.service=mcp-portainer"
 
@@ -116,8 +116,8 @@ services:
       - TEAM_ID=${TEAMS_TEAM_ID:-}
       - TEAMS_CHANNEL_ID=${TEAMS_CHANNEL_ID:-}
       - MCP_LOGLEVEL=${TEAMS_LOG_LEVEL:-ERROR}
-    ports:
-      - "${TEAMS_MCP_PORT:-8087}:8087"
+    expose:
+      - "8087"
     labels:
       - "com.blconsulting.service=mcp-teams"
 
@@ -129,7 +129,7 @@ services:
     environment:
       - GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_TOKEN:-}
     command: ["http", "--port", "8086", "--toolsets", "all"]
-    ports:
-      - "${GITHUB_MCP_PORT:-8086}:8086"
+    expose:
+      - "8086"
     labels:
       - "com.blconsulting.service=mcp-github"

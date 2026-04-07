@@ -35,6 +35,95 @@ from mcp.types import TextContent, Tool
 from google_service import GoogleServiceManager
 from telegram_service import TelegramServiceManager
 
+# ─── MCP Proxy (client for sub-services) ────────────────────
+
+PROXY_SERVICES = {
+    "portainer": {"transport": "sse", "url": "http://portainer-mcp:8085/sse"},
+    "github": {"transport": "http", "url": "http://github-mcp:8086/mcp"},
+    "teams": {"transport": "sse", "url": "http://teams-mcp:8087/sse"},
+}
+
+
+def _proxy_call(service: str, tool_name: str, arguments: dict) -> Any:
+    """Forward a tool call to an internal MCP sub-service."""
+    if service not in PROXY_SERVICES:
+        return {"error": f"Unknown service: {service}"}
+    svc = PROXY_SERVICES[service]
+    transport_type = svc["transport"]
+    url = svc["url"]
+
+    async def _do_call():
+        if transport_type == "sse":
+            from mcp.client.sse import sse_client
+            from mcp import ClientSession
+            async with sse_client(url) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(tool_name, arguments)
+                    return result
+        else:
+            from mcp.client.streamable_http import streamablehttp_client
+            from mcp import ClientSession
+            async with streamablehttp_client(url) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(tool_name, arguments)
+                    return result
+
+    loop = asyncio.new_event_loop()
+    try:
+        result = loop.run_until_complete(_do_call())
+        texts = []
+        for item in result.content:
+            if hasattr(item, "text"):
+                texts.append(item.text)
+        combined = "\n".join(texts) if texts else str(result)
+        try:
+            return json.loads(combined)
+        except (json.JSONDecodeError, TypeError):
+            return {"result": combined}
+    except Exception as e:
+        return {"error": f"Proxy {service}/{tool_name}: {str(e)}"}
+    finally:
+        loop.close()
+
+
+def _proxy_list_tools(service: str) -> list[dict]:
+    """List tools available on an internal MCP sub-service."""
+    if service not in PROXY_SERVICES:
+        return []
+    svc = PROXY_SERVICES[service]
+    transport_type = svc["transport"]
+    url = svc["url"]
+
+    async def _do_list():
+        if transport_type == "sse":
+            from mcp.client.sse import sse_client
+            from mcp import ClientSession
+            async with sse_client(url) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.list_tools()
+                    return result.tools
+        else:
+            from mcp.client.streamable_http import streamablehttp_client
+            from mcp import ClientSession
+            async with streamablehttp_client(url) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.list_tools()
+                    return result.tools
+
+    loop = asyncio.new_event_loop()
+    try:
+        tools = loop.run_until_complete(_do_list())
+        return [{"name": t.name, "description": t.description} for t in tools]
+    except Exception as e:
+        return [{"error": str(e)}]
+    finally:
+        loop.close()
+
+
 # ─── Configuration ──────────────────────────────────────────
 MCP_PORT = int(os.environ.get("MCP_PORT", "8084"))
 MCP_HOST = os.environ.get("MCP_HOST", "0.0.0.0")
@@ -1497,6 +1586,52 @@ TOOLS = [
             "required": ["filename"],
         },
     ),
+    # ── Proxy to internal MCP sub-services ──
+    Tool(
+        name="proxy_call",
+        description=(
+            "Forward a tool call to an internal MCP sub-service. "
+            "Available services: 'portainer' (Docker/K8s management, 38 tools), "
+            "'github' (repos/issues/PRs, 20 tools), "
+            "'teams' (MS Teams messaging, 6 tools). "
+            "Use proxy_discover first to see available tools on each service."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "service": {
+                    "type": "string",
+                    "enum": ["portainer", "github", "teams"],
+                    "description": "Target MCP service",
+                },
+                "tool": {"type": "string", "description": "Tool name on the target service"},
+                "arguments": {
+                    "type": "object",
+                    "description": "Tool arguments (as JSON object)",
+                    "default": {},
+                },
+            },
+            "required": ["service", "tool"],
+        },
+    ),
+    Tool(
+        name="proxy_discover",
+        description=(
+            "List available tools on an internal MCP sub-service. "
+            "Call this first to see what tools are available on portainer/github/teams."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "service": {
+                    "type": "string",
+                    "enum": ["portainer", "github", "teams"],
+                    "description": "Target MCP service",
+                },
+            },
+            "required": ["service"],
+        },
+    ),
 ]
 
 
@@ -2088,6 +2223,14 @@ def _execute_tool(name: str, args: dict) -> Any:
             "filename": filename,
             "user": user,
         }
+
+    # ── Proxy to internal sub-services ──
+    elif name == "proxy_call":
+        return _proxy_call(args["service"], args["tool"], args.get("arguments", {}))
+
+    elif name == "proxy_discover":
+        tools = _proxy_list_tools(args["service"])
+        return {"service": args["service"], "tools": tools, "count": len(tools)}
 
     elif name == "open_connection_manager":
         return _open_connection_manager()
