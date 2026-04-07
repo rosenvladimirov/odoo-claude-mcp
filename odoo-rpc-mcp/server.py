@@ -2444,7 +2444,7 @@ def create_app():
   /* ── Hero header with cover image ── */
   .hero {{
     position: relative; width: 100%; min-height: 380px;
-    background: url('{cover}') center/cover no-repeat fixed;
+    background: url('{cover}') center center / 100% auto no-repeat fixed;
     display: flex; align-items: flex-end;
   }}
   .hero-overlay {{
