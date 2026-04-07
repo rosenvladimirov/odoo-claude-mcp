@@ -1991,6 +1991,11 @@ def create_app():
     session_manager = StreamableHTTPSessionManager(app=mcp_server)
 
     # Raw ASGI app — no Starlette routing (avoids 307 redirects)
+    secret_token = os.environ.get("MCP_SECRET_TOKEN", "")
+    protected_paths = {"/mcp", "/sse", "/messages", "/api/session/register",
+                       "/api/session/list", "/api/session/update",
+                       "/api/session/delete", "/api/connect"}
+
     async def app(scope, receive, send):
         if scope["type"] == "lifespan":
             async with session_manager.run():
@@ -2004,6 +2009,23 @@ def create_app():
                         return
 
         path = scope.get("path", "")
+
+        # API token authentication
+        if scope["type"] == "http" and secret_token:
+            check_path = path.rstrip("/")
+            # Also match /messages/<anything>
+            needs_auth = (check_path in protected_paths
+                          or check_path.startswith("/messages/"))
+            if needs_auth:
+                headers = dict(scope.get("headers", []))
+                token = headers.get(b"x-api-token", b"").decode()
+                if token != secret_token:
+                    from starlette.responses import JSONResponse
+                    response = JSONResponse(
+                        {"error": "Unauthorized", "hint": "Set X-Api-Token header"},
+                        status_code=401)
+                    await response(scope, receive, send)
+                    return
 
         if path == "/health" and scope["type"] == "http":
             from starlette.requests import Request
