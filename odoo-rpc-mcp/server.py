@@ -2428,92 +2428,167 @@ def create_app():
         if path in ("/", "") and scope["type"] == "http":
             from starlette.responses import HTMLResponse
             host = dict(scope.get("headers", [])).get(b"host", b"localhost").decode()
+            cover = "https://www.bl-consulting.net/web/image/63493-d3390658/Blog%20Post%20%27Running%20Odoo%2018%20Entirely%20Through%20AI%20%E2%80%94%20A%20Live%20Claude%20Code%20%2B%20MCP%20Demo%27%20cover%20image.webp"
             html = f"""<!DOCTYPE html>
 <html lang="bg">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Odoo RPC MCP Server</title>
+<title>Odoo RPC MCP Server &mdash; BL Consulting</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-         background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-         color: #e0e0e0; min-height: 100vh; display: flex; align-items: center; justify-content: center; }}
-  .container {{ max-width: 720px; padding: 48px; background: rgba(255,255,255,0.05);
-                border-radius: 16px; backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }}
-  h1 {{ font-size: 2em; margin-bottom: 8px; color: #fff; }}
-  .subtitle {{ color: #8b9dc3; margin-bottom: 32px; font-size: 1.1em; }}
-  .badge {{ display: inline-block; background: #28a745; color: #fff; padding: 4px 12px;
-            border-radius: 12px; font-size: 0.85em; margin-bottom: 24px; }}
-  h2 {{ font-size: 1.2em; color: #a0c4ff; margin: 24px 0 12px; }}
-  .endpoint {{ background: rgba(255,255,255,0.08); padding: 12px 16px; border-radius: 8px;
-               margin: 8px 0; font-family: monospace; font-size: 0.95em; }}
-  .endpoint .method {{ color: #ffd166; font-weight: bold; }}
-  .endpoint .path {{ color: #06d6a0; }}
-  .endpoint .desc {{ color: #8b9dc3; font-size: 0.85em; margin-top: 4px; }}
-  .setup {{ background: rgba(6,214,160,0.1); border: 1px solid rgba(6,214,160,0.3);
-            padding: 20px; border-radius: 12px; margin: 24px 0; }}
-  .setup h3 {{ color: #06d6a0; margin-bottom: 12px; }}
-  .setup ol {{ padding-left: 20px; line-height: 2; }}
-  code {{ background: rgba(255,255,255,0.1); padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }}
-  .footer {{ margin-top: 32px; text-align: center; color: #555; font-size: 0.85em; }}
-  a {{ color: #a0c4ff; text-decoration: none; }}
-  a:hover {{ text-decoration: underline; }}
+  body {{ font-family: 'Inter', sans-serif; background: #f8f9fa; color: #21222c; }}
+
+  /* ── Hero header with cover image ── */
+  .hero {{
+    position: relative; width: 100%; min-height: 380px;
+    background: url('{cover}') center/cover no-repeat;
+    display: flex; align-items: flex-end;
+  }}
+  .hero-overlay {{
+    position: absolute; inset: 0;
+    background: linear-gradient(180deg, rgba(113,75,160,0.3) 0%, rgba(113,75,160,0.85) 100%);
+  }}
+  .hero-content {{
+    position: relative; z-index: 1; width: 100%; max-width: 960px;
+    margin: 0 auto; padding: 40px 32px;
+  }}
+  .hero h1 {{ font-size: 2.2em; font-weight: 700; color: #fff; margin-bottom: 8px; }}
+  .hero p {{ color: rgba(255,255,255,0.85); font-size: 1.15em; }}
+  .hero .badge {{
+    display: inline-block; background: #21b6b7; color: #fff; padding: 5px 16px;
+    border-radius: 20px; font-size: 0.85em; font-weight: 600; margin-top: 16px;
+  }}
+
+  /* ── Odoo-style nav bar ── */
+  .navbar {{
+    background: #714ba0; padding: 0 32px; display: flex; align-items: center;
+    height: 46px; max-width: 100%;
+  }}
+  .navbar a {{
+    color: rgba(255,255,255,0.8); text-decoration: none; font-size: 0.9em;
+    font-weight: 500; padding: 12px 16px; transition: color 0.2s;
+  }}
+  .navbar a:hover {{ color: #fff; }}
+  .navbar .brand {{ font-weight: 700; color: #fff; font-size: 1em; margin-right: auto; }}
+
+  /* ── Content area ── */
+  .content {{ max-width: 960px; margin: 0 auto; padding: 40px 32px; }}
+
+  .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin: 24px 0; }}
+  .card {{
+    background: #fff; border-radius: 12px; padding: 24px;
+    border: 1px solid #e9ecef; transition: box-shadow 0.2s;
+  }}
+  .card:hover {{ box-shadow: 0 4px 20px rgba(0,0,0,0.08); }}
+  .card h3 {{ font-size: 1.05em; color: #714ba0; margin-bottom: 8px; }}
+  .card p {{ font-size: 0.9em; color: #555; line-height: 1.6; }}
+  .card code {{ background: #f1f3f5; padding: 2px 8px; border-radius: 4px; font-size: 0.85em; color: #714ba0; }}
+
+  /* ── Endpoint list ── */
+  .endpoints {{ margin: 24px 0; }}
+  .ep {{
+    display: flex; align-items: center; gap: 12px; padding: 14px 20px;
+    background: #fff; border: 1px solid #e9ecef; border-radius: 8px; margin: 8px 0;
+  }}
+  .ep .method {{
+    background: #714ba0; color: #fff; padding: 3px 10px; border-radius: 4px;
+    font-size: 0.8em; font-weight: 600; font-family: monospace; min-width: 52px; text-align: center;
+  }}
+  .ep .method.get {{ background: #21b6b7; }}
+  .ep .path {{ font-family: monospace; font-weight: 600; color: #21222c; }}
+  .ep .desc {{ color: #888; font-size: 0.85em; margin-left: auto; }}
+
+  /* ── Setup box ── */
+  .setup-box {{
+    background: linear-gradient(135deg, #714ba0 0%, #8e6fc1 100%);
+    color: #fff; padding: 32px; border-radius: 16px; margin: 32px 0;
+  }}
+  .setup-box h2 {{ font-size: 1.3em; margin-bottom: 16px; }}
+  .setup-box ol {{ padding-left: 20px; line-height: 2.2; }}
+  .setup-box code {{ background: rgba(255,255,255,0.2); padding: 2px 8px; border-radius: 4px; color: #fff; }}
+
+  /* ── Footer ── */
+  .footer {{
+    text-align: center; padding: 32px; color: #999; font-size: 0.85em;
+    border-top: 1px solid #e9ecef; margin-top: 40px;
+  }}
+  .footer a {{ color: #714ba0; text-decoration: none; }}
+  .footer a:hover {{ text-decoration: underline; }}
+
+  h2 {{ font-size: 1.4em; color: #21222c; margin: 32px 0 16px; font-weight: 600; }}
+  h2 span {{ color: #714ba0; }}
 </style>
 </head>
 <body>
-<div class="container">
-  <h1>Odoo RPC MCP Server</h1>
-  <p class="subtitle">Model Context Protocol server for Odoo ERP</p>
-  <span class="badge">Online</span>
 
-  <h2>Endpoints</h2>
-  <div class="endpoint">
-    <span class="method">POST</span> <span class="path">/mcp</span>
-    <div class="desc">Streamable HTTP transport (MCP protocol)</div>
+<nav class="navbar">
+  <span class="brand">BL Consulting</span>
+  <a href="https://www.bl-consulting.net">Website</a>
+  <a href="https://github.com/rosenvladimirov/odoo-claude-mcp">GitHub</a>
+  <a href="https://{host}/health">Health</a>
+</nav>
+
+<div class="hero">
+  <div class="hero-overlay"></div>
+  <div class="hero-content">
+    <h1>Odoo RPC MCP Server</h1>
+    <p>Model Context Protocol server &mdash; connect Claude AI directly to Odoo 18</p>
+    <span class="badge">&check; Online</span>
   </div>
-  <div class="endpoint">
-    <span class="method">GET</span> <span class="path">/sse</span>
-    <div class="desc">SSE transport (legacy)</div>
-  </div>
-  <div class="endpoint">
-    <span class="method">GET</span> <span class="path">/health</span>
-    <div class="desc">Health check (public)</div>
-  </div>
-  <div class="endpoint">
-    <span class="method">GET</span> <span class="path">/.well-known/oauth-authorization-server</span>
-    <div class="desc">OAuth 2.0 metadata</div>
+</div>
+
+<div class="content">
+
+  <h2><span>&rsaquo;</span> Endpoints</h2>
+  <div class="endpoints">
+    <div class="ep"><span class="method">POST</span><span class="path">/mcp</span><span class="desc">Streamable HTTP (MCP protocol)</span></div>
+    <div class="ep"><span class="method get">GET</span><span class="path">/sse</span><span class="desc">SSE transport (legacy)</span></div>
+    <div class="ep"><span class="method get">GET</span><span class="path">/health</span><span class="desc">Health check (public)</span></div>
+    <div class="ep"><span class="method get">GET</span><span class="path">/.well-known/oauth-authorization-server</span><span class="desc">OAuth 2.0</span></div>
   </div>
 
-  <div class="setup">
-    <h3>Setup in Claude.ai</h3>
+  <div class="setup-box">
+    <h2>Setup in Claude.ai</h2>
     <ol>
-      <li>Go to <strong>Settings &rarr; Connectors &rarr; Add custom connector</strong></li>
+      <li><strong>Settings &rarr; Connectors &rarr; Add custom connector</strong></li>
       <li>URL: <code>https://{host}/mcp</code></li>
       <li>Enter your <strong>OAuth Client ID</strong> and <strong>Client Secret</strong></li>
-      <li>Start a conversation and call <code>identify("your name")</code></li>
+      <li>Start a conversation: <code>identify("your name")</code></li>
     </ol>
   </div>
 
-  <h2>Features</h2>
-  <div class="endpoint">
-    <div class="desc">40+ Odoo tools: CRUD, reports, fiscal positions, search, execute</div>
-  </div>
-  <div class="endpoint">
-    <div class="desc">SSH remote execution &amp; Git operations</div>
-  </div>
-  <div class="endpoint">
-    <div class="desc">Google Calendar, Gmail, Telegram integration</div>
-  </div>
-  <div class="endpoint">
-    <div class="desc">Per-user connections with session isolation</div>
+  <h2><span>&rsaquo;</span> Features</h2>
+  <div class="cards">
+    <div class="card">
+      <h3>Odoo ERP</h3>
+      <p>40+ tools: CRUD operations, reports, fiscal positions, search, execute methods. Full XML-RPC &amp; JSON-RPC support.</p>
+    </div>
+    <div class="card">
+      <h3>Infrastructure</h3>
+      <p>SSH remote execution, Git operations on remote servers. Manage Docker via Portainer integration.</p>
+    </div>
+    <div class="card">
+      <h3>Integrations</h3>
+      <p>Google Calendar &amp; Gmail, Telegram messaging. OAuth 2.0 authentication for secure access.</p>
+    </div>
+    <div class="card">
+      <h3>Multi-user</h3>
+      <p>Per-user connections with session isolation. <code>identify()</code> to load personal settings. Lock management for shared resources.</p>
+    </div>
   </div>
 
-  <div class="footer">
-    <a href="https://github.com/rosenvladimirov/odoo-claude-mcp">GitHub</a> &middot;
-    BL Consulting &middot; Powered by <a href="https://modelcontextprotocol.io">MCP</a>
-  </div>
 </div>
+
+<div class="footer">
+  <a href="https://www.bl-consulting.net">BL Consulting</a> &middot;
+  <a href="https://github.com/rosenvladimirov/odoo-claude-mcp">GitHub</a> &middot;
+  Powered by <a href="https://modelcontextprotocol.io">MCP</a> &amp;
+  <a href="https://www.odoo.com">Odoo</a>
+</div>
+
 </body>
 </html>"""
             response = HTMLResponse(html)
