@@ -592,6 +592,58 @@ def _get_current_user(args: dict) -> str | None:
     return None
 
 
+# ─── Memory storage helpers ─────────────────────────────────
+
+MEMORY_DIR = os.path.join(DATA_DIR, "memory")
+
+
+def _memory_shared_dir() -> str:
+    d = os.path.join(MEMORY_DIR, "shared")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _memory_user_dir(user_name: str) -> str:
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in user_name.lower())
+    d = os.path.join(MEMORY_DIR, "users", safe)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _memory_list_files(directory: str) -> list[dict]:
+    """List .md files in a directory with metadata."""
+    results = []
+    if not os.path.isdir(directory):
+        return results
+    for fname in sorted(os.listdir(directory)):
+        if not fname.endswith(".md"):
+            continue
+        fpath = os.path.join(directory, fname)
+        stat = os.stat(fpath)
+        # Read frontmatter for description
+        description = ""
+        mem_type = ""
+        with open(fpath, "r", encoding="utf-8") as f:
+            content = f.read(2048)
+            if content.startswith("---"):
+                end = content.find("---", 3)
+                if end > 0:
+                    fm = content[3:end]
+                    for line in fm.strip().splitlines():
+                        if line.startswith("description:"):
+                            description = line.split(":", 1)[1].strip()
+                        elif line.startswith("type:"):
+                            mem_type = line.split(":", 1)[1].strip()
+        results.append({
+            "filename": fname,
+            "size": stat.st_size,
+            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            "description": description,
+            "type": mem_type,
+        })
+    return results
+
+
 # ─── Tool Definitions ──────────────────────────────────────
 
 TOOLS = [
@@ -1343,6 +1395,107 @@ TOOLS = [
             "required": ["alias"],
         },
     ),
+    # ── Memory storage ──
+    Tool(
+        name="memory_list",
+        description=(
+            "List memory files. Shows personal files (for current user) and shared files. "
+            "Use scope='personal', 'shared', or 'all' (default)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "scope": {
+                    "type": "string",
+                    "enum": ["all", "personal", "shared"],
+                    "default": "all",
+                    "description": "Which memories to list",
+                },
+            },
+        },
+    ),
+    Tool(
+        name="memory_read",
+        description="Read a memory file by filename. Searches personal first, then shared.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string", "description": "File name (e.g. 'module_l10n_bg.md')"},
+                "scope": {
+                    "type": "string",
+                    "enum": ["personal", "shared"],
+                    "default": "",
+                    "description": "Force scope (default: search personal first, then shared)",
+                },
+            },
+            "required": ["filename"],
+        },
+    ),
+    Tool(
+        name="memory_write",
+        description=(
+            "Write/update a memory file. Saves to personal storage by default. "
+            "Content should be markdown with YAML frontmatter (name, description, type)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string", "description": "File name (e.g. 'module_overview.md')"},
+                "content": {"type": "string", "description": "Full file content (markdown with frontmatter)"},
+                "scope": {
+                    "type": "string",
+                    "enum": ["personal", "shared"],
+                    "default": "personal",
+                    "description": "Where to save: personal (default) or shared",
+                },
+            },
+            "required": ["filename", "content"],
+        },
+    ),
+    Tool(
+        name="memory_delete",
+        description="Delete a memory file from personal or shared storage.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string", "description": "File name to delete"},
+                "scope": {
+                    "type": "string",
+                    "enum": ["personal", "shared"],
+                    "default": "personal",
+                },
+            },
+            "required": ["filename"],
+        },
+    ),
+    Tool(
+        name="memory_share",
+        description=(
+            "Share a personal memory file — copies it to the shared storage "
+            "so colleagues can pull it."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string", "description": "Personal file to share"},
+            },
+            "required": ["filename"],
+        },
+    ),
+    Tool(
+        name="memory_pull",
+        description=(
+            "Pull a shared memory file into your personal storage. "
+            "If it already exists locally, it gets overwritten with the shared version."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string", "description": "Shared file to pull"},
+            },
+            "required": ["filename"],
+        },
+    ),
 ]
 
 
@@ -1763,6 +1916,134 @@ def _execute_tool(name: str, args: dict) -> Any:
         if active.get("alias") == alias:
             _save_user_active(user, {})
         return {"status": "deleted", "alias": alias}
+
+    # ── Memory storage ──
+    elif name == "memory_list":
+        scope = args.get("scope", "all")
+        result = {}
+        user = _get_current_user(args)
+        if scope in ("all", "personal"):
+            if user:
+                result["personal"] = _memory_list_files(_memory_user_dir(user))
+            else:
+                result["personal"] = []
+                result["hint"] = "Call identify(name) to see personal files"
+        if scope in ("all", "shared"):
+            result["shared"] = _memory_list_files(_memory_shared_dir())
+        return result
+
+    elif name == "memory_read":
+        filename = args["filename"]
+        if not filename.endswith(".md"):
+            filename += ".md"
+        # Sanitize
+        filename = os.path.basename(filename)
+        scope = args.get("scope", "")
+        user = _get_current_user(args)
+
+        fpath = None
+        found_scope = None
+        if scope == "personal" and user:
+            fpath = os.path.join(_memory_user_dir(user), filename)
+            found_scope = "personal"
+        elif scope == "shared":
+            fpath = os.path.join(_memory_shared_dir(), filename)
+            found_scope = "shared"
+        else:
+            # Search personal first, then shared
+            if user:
+                p = os.path.join(_memory_user_dir(user), filename)
+                if os.path.isfile(p):
+                    fpath = p
+                    found_scope = "personal"
+            if not fpath:
+                p = os.path.join(_memory_shared_dir(), filename)
+                if os.path.isfile(p):
+                    fpath = p
+                    found_scope = "shared"
+
+        if not fpath or not os.path.isfile(fpath):
+            return {"error": f"File '{filename}' not found"}
+        with open(fpath, "r", encoding="utf-8") as f:
+            content = f.read()
+        return {"filename": filename, "scope": found_scope, "content": content}
+
+    elif name == "memory_write":
+        filename = args["filename"]
+        if not filename.endswith(".md"):
+            filename += ".md"
+        filename = os.path.basename(filename)
+        content = args["content"]
+        scope = args.get("scope", "personal")
+
+        if scope == "shared":
+            directory = _memory_shared_dir()
+        else:
+            user = _get_current_user(args)
+            if not user:
+                return {"error": "Call identify(name) first to write personal files"}
+            directory = _memory_user_dir(user)
+
+        fpath = os.path.join(directory, filename)
+        existed = os.path.isfile(fpath)
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(content)
+        return {
+            "status": "updated" if existed else "created",
+            "filename": filename,
+            "scope": scope,
+            "size": len(content),
+        }
+
+    elif name == "memory_delete":
+        filename = os.path.basename(args["filename"])
+        scope = args.get("scope", "personal")
+        if scope == "shared":
+            fpath = os.path.join(_memory_shared_dir(), filename)
+        else:
+            user = _get_current_user(args)
+            if not user:
+                return {"error": "Call identify(name) first"}
+            fpath = os.path.join(_memory_user_dir(user), filename)
+        if not os.path.isfile(fpath):
+            return {"error": f"File '{filename}' not found in {scope}"}
+        os.remove(fpath)
+        return {"status": "deleted", "filename": filename, "scope": scope}
+
+    elif name == "memory_share":
+        user = _get_current_user(args)
+        if not user:
+            return {"error": "Call identify(name) first"}
+        filename = os.path.basename(args["filename"])
+        src = os.path.join(_memory_user_dir(user), filename)
+        if not os.path.isfile(src):
+            return {"error": f"Personal file '{filename}' not found"}
+        import shutil
+        dst = os.path.join(_memory_shared_dir(), filename)
+        shutil.copy2(src, dst)
+        return {
+            "status": "shared",
+            "filename": filename,
+            "shared_by": user,
+        }
+
+    elif name == "memory_pull":
+        user = _get_current_user(args)
+        if not user:
+            return {"error": "Call identify(name) first"}
+        filename = os.path.basename(args["filename"])
+        src = os.path.join(_memory_shared_dir(), filename)
+        if not os.path.isfile(src):
+            return {"error": f"Shared file '{filename}' not found"}
+        import shutil
+        dst = os.path.join(_memory_user_dir(user), filename)
+        existed = os.path.isfile(dst)
+        shutil.copy2(src, dst)
+        return {
+            "status": "updated" if existed else "pulled",
+            "filename": filename,
+            "user": user,
+        }
 
     elif name == "open_connection_manager":
         return _open_connection_manager()

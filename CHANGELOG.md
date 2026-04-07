@@ -5,6 +5,23 @@ All notable changes to the Odoo RPC MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-04-07
+
+### Added
+- **Memory storage system**: Shared and per-user memory file storage via MCP tools
+  - `memory_list` — List personal and/or shared memory files with metadata
+  - `memory_read` — Read a memory file (searches personal first, then shared)
+  - `memory_write` — Save/update memory files to personal or shared storage
+  - `memory_delete` — Delete memory files
+  - `memory_share` — Copy personal memory to shared storage for colleagues
+  - `memory_pull` — Pull shared memory into personal storage
+- Storage structure: `/data/memory/shared/` (team) + `/data/memory/users/{name}/` (personal)
+- Frontmatter parsing for file descriptions and types in `memory_list`
+
+### Changed
+- Total MCP tools in odoo-rpc-mcp: 49 → 55
+- Total tools across all services: 107 → 113
+
 ## [1.3.0] - 2026-04-07
 
 ### Added

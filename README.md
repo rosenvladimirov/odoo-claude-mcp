@@ -2,7 +2,7 @@
 
 Docker-based MCP server stack for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — integrates **Odoo ERP**, **Docker/Portainer**, **GitHub**, **SSH remote execution**, **Gmail**, **Google Calendar**, and **Telegram** into a unified AI workflow via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/).
 
-> **107 MCP tools** — manage your entire Odoo infrastructure, communicate with your team, and deploy containers using natural language.
+> **113 MCP tools** — manage your entire Odoo infrastructure, communicate with your team, and deploy containers using natural language.
 
 ## Architecture
 
@@ -54,12 +54,12 @@ Docker-based MCP server stack for [Claude Code](https://docs.anthropic.com/en/do
 
 | Service | Port | Transport | Tools | Description |
 |---------|------|-----------|-------|-------------|
-| `odoo-rpc-mcp` | 8084 | HTTP | 49 | Odoo + Gmail + Calendar + Telegram + SSH + Git + Identity |
+| `odoo-rpc-mcp` | 8084 | HTTP | 55 | Odoo + Gmail + Calendar + Telegram + SSH + Git + Identity + Memory |
 | `portainer-mcp` | 8085 | SSE | 38 | Docker/K8s management via Portainer |
 | `github-mcp` | 8086 | HTTP | 20 | GitHub repo management (official server) |
 | `claude-terminal` | 8080 | — | — | Web terminal (ttyd + Claude Code CLI) |
 
-**Total: 107 MCP tools**
+**Total: 113 MCP tools**
 
 ## Quick Start
 
@@ -116,7 +116,7 @@ docker pull vladimirovrosen/odoo-claude-terminal:latest
 
 ## MCP Tools Reference
 
-### Odoo RPC (49 tools)
+### Odoo RPC (55 tools)
 
 | Category | Tools | Description |
 |----------|-------|-------------|
@@ -134,6 +134,7 @@ docker pull vladimirovrosen/odoo-claude-terminal:latest
 | **GitHub API** | `github_api` | Direct GitHub REST API calls |
 | **Identity** | `identify`, `who_am_i` | Per-user session identity management |
 | **User Connections** | `user_connection_add`, `user_connection_list`, `user_connection_activate`, `user_connection_delete` | Per-user personal connection storage |
+| **Memory** | `memory_list`, `memory_read`, `memory_write`, `memory_delete`, `memory_share`, `memory_pull` | Shared memory storage for module docs and knowledge |
 | **GUI** | `open_connection_manager` | Launch desktop Connection Manager |
 
 ### Portainer (38 tools)
@@ -226,7 +227,7 @@ odoo-claude-mcp/
 ├── install.sh                  # Linux/macOS installer
 ├── install.ps1                 # Windows installer (PowerShell)
 │
-├── odoo-rpc-mcp/               # Main MCP server (49 tools)
+├── odoo-rpc-mcp/               # Main MCP server (55 tools)
 │   ├── Dockerfile
 │   ├── server.py               # All tools + landing page + auth
 │   ├── google_service.py       # Gmail + Calendar OAuth2 integration
@@ -322,7 +323,7 @@ Search for contacts named "Ivan"
 
 | Image | Description |
 |-------|-------------|
-| [`vladimirovrosen/odoo-rpc-mcp`](https://hub.docker.com/r/vladimirovrosen/odoo-rpc-mcp) | Main MCP server (49 tools) |
+| [`vladimirovrosen/odoo-rpc-mcp`](https://hub.docker.com/r/vladimirovrosen/odoo-rpc-mcp) | Main MCP server (55 tools) |
 | [`vladimirovrosen/odoo-portainer-mcp`](https://hub.docker.com/r/vladimirovrosen/odoo-portainer-mcp) | Portainer MCP wrapper |
 | [`vladimirovrosen/odoo-claude-terminal`](https://hub.docker.com/r/vladimirovrosen/odoo-claude-terminal) | Web terminal with Claude Code |
 
