@@ -15,6 +15,8 @@ networks:
     driver: bridge
   backend:
     driver: bridge
+  cloudflare-net:
+    external: true
 
 services:
   # ─── Claude Code web terminal (ttyd + Claude CLI) ─────────
@@ -67,6 +69,7 @@ services:
     networks:
       - public
       - backend
+      - cloudflare-net
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
