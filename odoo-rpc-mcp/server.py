@@ -1471,13 +1471,13 @@ TOOLS = [
     Tool(
         name="memory_share",
         description=(
-            "Share a personal memory file — copies it to the shared storage "
-            "so colleagues can pull it."
+            "Share personal memory file(s) — copies to shared storage "
+            "so colleagues can pull. Use filename='*' to share ALL personal files."
         ),
         inputSchema={
             "type": "object",
             "properties": {
-                "filename": {"type": "string", "description": "Personal file to share"},
+                "filename": {"type": "string", "description": "Personal file to share, or '*' for all"},
             },
             "required": ["filename"],
         },
@@ -1485,13 +1485,14 @@ TOOLS = [
     Tool(
         name="memory_pull",
         description=(
-            "Pull a shared memory file into your personal storage. "
-            "If it already exists locally, it gets overwritten with the shared version."
+            "Pull shared memory file(s) into your personal storage. "
+            "Use filename='*' to pull ALL shared files at once. "
+            "If a file already exists locally, it gets overwritten with the shared version."
         ),
         inputSchema={
             "type": "object",
             "properties": {
-                "filename": {"type": "string", "description": "Shared file to pull"},
+                "filename": {"type": "string", "description": "Shared file to pull, or '*' for all"},
             },
             "required": ["filename"],
         },
@@ -2014,12 +2015,31 @@ def _execute_tool(name: str, args: dict) -> Any:
         user = _get_current_user(args)
         if not user:
             return {"error": "Call identify(name) first"}
-        filename = os.path.basename(args["filename"])
-        src = os.path.join(_memory_user_dir(user), filename)
+        import shutil
+        filename = args["filename"].strip()
+        user_dir = _memory_user_dir(user)
+        shared_dir = _memory_shared_dir()
+
+        if filename == "*":
+            files = [f for f in os.listdir(user_dir) if f.endswith(".md")]
+            if not files:
+                return {"status": "empty", "message": "No personal files to share"}
+            shared = []
+            for f in files:
+                shutil.copy2(os.path.join(user_dir, f), os.path.join(shared_dir, f))
+                shared.append(f)
+            return {
+                "status": "shared_all",
+                "shared": shared,
+                "total": len(shared),
+                "shared_by": user,
+            }
+
+        filename = os.path.basename(filename)
+        src = os.path.join(user_dir, filename)
         if not os.path.isfile(src):
             return {"error": f"Personal file '{filename}' not found"}
-        import shutil
-        dst = os.path.join(_memory_shared_dir(), filename)
+        dst = os.path.join(shared_dir, filename)
         shutil.copy2(src, dst)
         return {
             "status": "shared",
@@ -2031,12 +2051,36 @@ def _execute_tool(name: str, args: dict) -> Any:
         user = _get_current_user(args)
         if not user:
             return {"error": "Call identify(name) first"}
-        filename = os.path.basename(args["filename"])
-        src = os.path.join(_memory_shared_dir(), filename)
+        import shutil
+        filename = args["filename"].strip()
+        user_dir = _memory_user_dir(user)
+        shared_dir = _memory_shared_dir()
+
+        if filename == "*":
+            # Pull all shared files
+            files = [f for f in os.listdir(shared_dir) if f.endswith(".md")]
+            if not files:
+                return {"status": "empty", "message": "No shared files to pull"}
+            pulled = []
+            updated = []
+            for f in files:
+                dst = os.path.join(user_dir, f)
+                existed = os.path.isfile(dst)
+                shutil.copy2(os.path.join(shared_dir, f), dst)
+                (updated if existed else pulled).append(f)
+            return {
+                "status": "pulled_all",
+                "pulled": pulled,
+                "updated": updated,
+                "total": len(files),
+                "user": user,
+            }
+
+        filename = os.path.basename(filename)
+        src = os.path.join(shared_dir, filename)
         if not os.path.isfile(src):
             return {"error": f"Shared file '{filename}' not found"}
-        import shutil
-        dst = os.path.join(_memory_user_dir(user), filename)
+        dst = os.path.join(user_dir, filename)
         existed = os.path.isfile(dst)
         shutil.copy2(src, dst)
         return {
