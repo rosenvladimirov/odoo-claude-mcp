@@ -5,6 +5,22 @@ All notable changes to the Odoo RPC MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-04-07
+
+### Added
+- **Per-user identity system**: `identify`, `who_am_i` — each Claude session identifies its user
+- **Per-user connections**: `user_connection_add`, `user_connection_list`, `user_connection_activate`, `user_connection_delete` — personal connection storage per user
+- **OAuth 2.0 authentication** for cloud-hosted MCP (claude.ai remote connectors)
+- **API token authentication** for public-facing deployments (`X-Api-Token` / `?token=`)
+- **SSH agent forwarding** for `git_remote` and `ssh_execute` tools
+- **Landing page** with Odoo-style design, cover image, setup guide, and glassmorphism UI
+
+### Changed
+- Total MCP tools in odoo-rpc-mcp: 38 → 49
+- Total tools across all services: 96 → 107
+- Docker images published to Docker Hub: `vladimirovrosen/odoo-rpc-mcp`, `vladimirovrosen/odoo-portainer-mcp`, `vladimirovrosen/odoo-claude-terminal`
+- README fully rewritten with complete tool reference and authentication docs
+
 ## [1.2.0] - 2026-04-04
 
 ### Added
