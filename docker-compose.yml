@@ -4,6 +4,18 @@
 #   cp .env.example .env && nano .env
 #   docker compose up -d --build
 #   Open http://localhost:8080
+#
+# Networks:
+#   public   — exposed to host/Cloudflare (odoo-rpc-mcp, claude-terminal)
+#   backend  — internal only, no host access (portainer, github, teams)
+#   odoo-rpc-mcp bridges both networks (proxy gateway)
+
+networks:
+  public:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true
 
 services:
   # ─── Claude Code web terminal (ttyd + Claude CLI) ─────────
@@ -13,6 +25,9 @@ services:
       dockerfile: Dockerfile
     container_name: claude-terminal
     restart: unless-stopped
+    networks:
+      - public
+      - backend
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - CLAUDE_THEME=${CLAUDE_THEME:-light}
@@ -42,12 +57,17 @@ services:
       - "com.blconsulting.service=claude-terminal"
 
   # ─── Odoo RPC MCP (XML-RPC / JSON-RPC) ───────────────────
+  # PUBLIC GATEWAY — bridges public + backend networks
+  # Proxies portainer/github/teams via proxy_call/proxy_discover
   odoo-rpc-mcp:
     build:
       context: ./odoo-rpc-mcp
       dockerfile: Dockerfile
     container_name: mcp-odoo-rpc
     restart: unless-stopped
+    networks:
+      - public
+      - backend
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -77,12 +97,15 @@ services:
       - "com.blconsulting.service=mcp-odoo-rpc"
 
   # ─── Portainer MCP (Docker management via Portainer API) ──
+  # BACKEND ONLY — accessible via proxy or claude-terminal
   portainer-mcp:
     build:
       context: ./portainer-mcp
       dockerfile: Dockerfile
     container_name: mcp-portainer
     restart: unless-stopped
+    networks:
+      - backend
     environment:
       - MCP_PORT=8085
       - PORTAINER_URL=${PORTAINER_URL:-}
@@ -95,18 +118,19 @@ services:
       sh -c "supergateway
       --stdio 'portainer-mcp -server $${PORTAINER_URL} -token $${PORTAINER_TOKEN} -disable-version-check'
       --port $${MCP_PORT}"
-    ports:
-      - "127.0.0.1:${PORTAINER_MCP_PORT:-8085}:8085"
     labels:
       - "com.blconsulting.service=mcp-portainer"
 
   # ─── Microsoft Teams MCP (Teams messaging) ─────────────────
+  # BACKEND ONLY — accessible via proxy or claude-terminal
   teams-mcp:
     build:
       context: ./teams-mcp
       dockerfile: Dockerfile
     container_name: mcp-teams
     restart: unless-stopped
+    networks:
+      - backend
     environment:
       - MCP_PORT=8087
       - TEAMS_APP_ID=${TEAMS_APP_ID:-}
@@ -116,20 +140,19 @@ services:
       - TEAM_ID=${TEAMS_TEAM_ID:-}
       - TEAMS_CHANNEL_ID=${TEAMS_CHANNEL_ID:-}
       - MCP_LOGLEVEL=${TEAMS_LOG_LEVEL:-ERROR}
-    ports:
-      - "127.0.0.1:${TEAMS_MCP_PORT:-8087}:8087"
     labels:
       - "com.blconsulting.service=mcp-teams"
 
   # ─── GitHub MCP (GitHub repo management) ───────────────────
+  # BACKEND ONLY — accessible via proxy or claude-terminal
   github-mcp:
     image: ghcr.io/github/github-mcp-server:latest
     container_name: mcp-github
     restart: unless-stopped
+    networks:
+      - backend
     environment:
       - GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_TOKEN:-}
     command: ["http", "--port", "8086", "--toolsets", "all"]
-    ports:
-      - "127.0.0.1:${GITHUB_MCP_PORT:-8086}:8086"
     labels:
       - "com.blconsulting.service=mcp-github"
