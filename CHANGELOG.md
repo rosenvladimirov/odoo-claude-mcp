@@ -5,6 +5,34 @@ All notable changes to the Odoo RPC MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-04-07
+
+### Added
+- **Proxy gateway architecture**: odoo-rpc-mcp acts as single public endpoint, proxying to backend services
+  - Dynamic tool discovery at startup — sub-service tools registered with prefix (`portainer__listStacks`, `github__get_me`)
+  - `proxy_call` — manual proxy forwarding to any backend service
+  - `proxy_discover` — list tools on a specific backend service
+  - `proxy_refresh` — re-discover tools after adding/restarting services
+  - SSE backends proxied via subprocess for supergateway compatibility
+  - HTTP backends proxied via async MCP client
+- **Plugin architecture**: `proxy_services.json` config file for adding new MCP backends
+  - No code changes needed — edit JSON, restart, refresh
+  - Headers support `${ENV_VAR}` expansion
+  - Also configurable via `PROXY_SERVICES_JSON` env var
+- **Dual-network Docker architecture**: `public` + `backend` networks
+  - Backend services (portainer, github, teams) have NO host port mappings
+  - Only odoo-rpc-mcp (8084) and claude-terminal (8080) are publicly accessible
+  - Services communicate by hostname on internal Docker network
+- **Microsoft Teams MCP**: InditexTech server with supergateway wrapper
+  - 6 tools: start_thread, update_thread, read_thread, list_threads, get_member_by_name, list_members
+  - Azure AD OAuth 2.0 authentication
+  - Custom Dockerfile with supergateway on port 8087
+
+### Changed
+- Total tools on single endpoint: 116 (60 native + 39 portainer + 20 github - 3 proxy meta)
+- Architecture: from 4 independent services to gateway + backend plugins
+- README fully rewritten for proxy gateway architecture
+
 ## [1.4.0] - 2026-04-07
 
 ### Added
