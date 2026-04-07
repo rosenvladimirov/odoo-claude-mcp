@@ -14,7 +14,7 @@
     },
     "teams": {
       "type": "sse",
-      "url": "http://teams-mcp:8000/sse"
+      "url": "http://teams-mcp:8087/sse"
     }
   }
 }

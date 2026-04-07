@@ -102,11 +102,13 @@ services:
 
   # ─── Microsoft Teams MCP (Teams messaging) ─────────────────
   teams-mcp:
-    image: ghcr.io/inditextech/mcp-teams-server:latest
+    build:
+      context: ./teams-mcp
+      dockerfile: Dockerfile
     container_name: mcp-teams
     restart: unless-stopped
     environment:
-      - MCP_TRANSPORT=sse
+      - MCP_PORT=8087
       - TEAMS_APP_ID=${TEAMS_APP_ID:-}
       - TEAMS_APP_PASSWORD=${TEAMS_APP_PASSWORD:-}
       - TEAMS_APP_TYPE=${TEAMS_APP_TYPE:-SingleTenant}
@@ -115,7 +117,7 @@ services:
       - TEAMS_CHANNEL_ID=${TEAMS_CHANNEL_ID:-}
       - MCP_LOGLEVEL=${TEAMS_LOG_LEVEL:-ERROR}
     ports:
-      - "${TEAMS_MCP_PORT:-8087}:8000"
+      - "${TEAMS_MCP_PORT:-8087}:8087"
     labels:
       - "com.blconsulting.service=mcp-teams"
 
