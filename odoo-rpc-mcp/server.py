@@ -534,6 +534,64 @@ def _conn(args: dict) -> OdooConnection:
     return _mgr().get(args.get("connection", "default"))
 
 
+# ─── Per-user storage ──────────────────────────────────────
+
+# In-memory: mcp_session_id -> user_name
+_session_users: dict[str, str] = {}
+
+DATA_DIR = os.environ.get("DATA_DIR", "/data")
+
+
+def _user_dir(user_name: str) -> str:
+    """Get/create per-user data directory."""
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in user_name.lower())
+    d = os.path.join(DATA_DIR, "users", safe)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _user_connections_file(user_name: str) -> str:
+    return os.path.join(_user_dir(user_name), "connections.json")
+
+
+def _user_active_file(user_name: str) -> str:
+    return os.path.join(_user_dir(user_name), "active_connection.json")
+
+
+def _load_user_connections(user_name: str) -> dict:
+    fpath = _user_connections_file(user_name)
+    if os.path.exists(fpath):
+        with open(fpath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _save_user_connections(user_name: str, conns: dict):
+    with open(_user_connections_file(user_name), "w", encoding="utf-8") as f:
+        json.dump(conns, f, indent=2, ensure_ascii=False)
+
+
+def _load_user_active(user_name: str) -> dict:
+    fpath = _user_active_file(user_name)
+    if os.path.exists(fpath):
+        with open(fpath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _save_user_active(user_name: str, active: dict):
+    with open(_user_active_file(user_name), "w", encoding="utf-8") as f:
+        json.dump(active, f, indent=2, ensure_ascii=False)
+
+
+def _get_current_user(args: dict) -> str | None:
+    """Try to find current user from session or return None."""
+    # Check all sessions for a match
+    for user in _session_users.values():
+        return user  # Return first known user (single-session typical)
+    return None
+
+
 # ─── Tool Definitions ──────────────────────────────────────
 
 TOOLS = [
@@ -1215,6 +1273,76 @@ TOOLS = [
             "required": ["endpoint"],
         },
     ),
+    # ── User identity & per-user connections ──
+    Tool(
+        name="identify",
+        description=(
+            "Identify yourself to load your personal settings and connections. "
+            "Call this at the start of a session. Returns your saved connections."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Your name (e.g. 'Rosen', 'Ivan')"},
+            },
+            "required": ["name"],
+        },
+    ),
+    Tool(
+        name="who_am_i",
+        description="Show current user identity and active connection.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="user_connection_add",
+        description=(
+            "Add/update a personal Odoo connection (saved per-user). "
+            "Supports Odoo, SSH, and Portainer settings."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "alias": {"type": "string", "description": "Connection name"},
+                "url": {"type": "string", "description": "Odoo URL"},
+                "db": {"type": "string", "description": "Database name"},
+                "user": {"type": "string", "description": "Odoo username"},
+                "api_key": {"type": "string", "description": "API key", "default": ""},
+                "ssh_host": {"type": "string", "default": ""},
+                "ssh_user": {"type": "string", "default": ""},
+                "ssh_port": {"type": "integer", "default": 22},
+                "portainer_url": {"type": "string", "default": ""},
+                "portainer_token": {"type": "string", "default": ""},
+            },
+            "required": ["alias", "url", "db", "user"],
+        },
+    ),
+    Tool(
+        name="user_connection_list",
+        description="List your personal connections.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="user_connection_activate",
+        description="Activate one of your personal connections as the working connection.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "alias": {"type": "string", "description": "Connection name to activate"},
+            },
+            "required": ["alias"],
+        },
+    ),
+    Tool(
+        name="user_connection_delete",
+        description="Delete a personal connection.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "alias": {"type": "string", "description": "Connection name to delete"},
+            },
+            "required": ["alias"],
+        },
+    ),
 ]
 
 
@@ -1503,6 +1631,138 @@ def _execute_tool(name: str, args: dict) -> Any:
 
     elif name == "odoo_connections":
         return {"connections": m.list_all()}
+
+    elif name == "identify":
+        user_name = args["name"]
+        _session_users["current"] = user_name
+        conns = _load_user_connections(user_name)
+        active = _load_user_active(user_name)
+        # Auto-activate if user has an active connection
+        if active and active.get("alias"):
+            alias = active["alias"]
+            if alias in conns:
+                c = conns[alias]
+                try:
+                    conn = m.add(
+                        alias="default",
+                        url=c["url"], db=c["db"],
+                        username=c["user"],
+                        api_key=c.get("api_key", ""),
+                        password=c.get("password", ""),
+                        protocol=c.get("protocol", "xmlrpc"),
+                    )
+                    conn.authenticate()
+                    logger.info(f"User {user_name}: auto-activated connection '{alias}'")
+                except Exception as e:
+                    logger.warning(f"User {user_name}: auto-activate '{alias}' failed: {e}")
+        return {
+            "status": "identified",
+            "user": user_name,
+            "connections": list(conns.keys()),
+            "active": active.get("alias", None),
+            "data_dir": _user_dir(user_name),
+        }
+
+    elif name == "who_am_i":
+        user = _get_current_user(args)
+        if not user:
+            return {"status": "not_identified", "hint": "Call identify(name) first"}
+        active = _load_user_active(user)
+        conns = _load_user_connections(user)
+        return {
+            "user": user,
+            "connections": list(conns.keys()),
+            "active": active.get("alias", None),
+            "active_details": active,
+        }
+
+    elif name == "user_connection_add":
+        user = _get_current_user(args)
+        if not user:
+            return {"error": "Call identify(name) first"}
+        conns = _load_user_connections(user)
+        alias = args["alias"]
+        conn_data = {
+            "url": args["url"],
+            "db": args["db"],
+            "user": args["user"],
+            "api_key": args.get("api_key", ""),
+        }
+        if args.get("ssh_host"):
+            conn_data["ssh"] = {
+                "host": args["ssh_host"],
+                "user": args.get("ssh_user", "root"),
+                "port": args.get("ssh_port", 22),
+            }
+        if args.get("portainer_url"):
+            conn_data["portainer"] = {
+                "url": args["portainer_url"],
+                "token": args.get("portainer_token", ""),
+            }
+        conns[alias] = conn_data
+        _save_user_connections(user, conns)
+        return {"status": "saved", "alias": alias, "user": user}
+
+    elif name == "user_connection_list":
+        user = _get_current_user(args)
+        if not user:
+            return {"error": "Call identify(name) first"}
+        conns = _load_user_connections(user)
+        active = _load_user_active(user)
+        result = []
+        for alias, c in conns.items():
+            entry = {"alias": alias, "url": c.get("url", ""), "db": c.get("db", "")}
+            if alias == active.get("alias"):
+                entry["active"] = True
+            if c.get("ssh"):
+                entry["ssh"] = f"{c['ssh'].get('user', '')}@{c['ssh'].get('host', '')}"
+            if c.get("portainer"):
+                entry["portainer"] = c["portainer"].get("url", "")
+            result.append(entry)
+        return {"user": user, "connections": result}
+
+    elif name == "user_connection_activate":
+        user = _get_current_user(args)
+        if not user:
+            return {"error": "Call identify(name) first"}
+        alias = args["alias"]
+        conns = _load_user_connections(user)
+        if alias not in conns:
+            return {"error": f"Connection '{alias}' not found. Use user_connection_list to see available."}
+        c = conns[alias]
+        _save_user_active(user, {"alias": alias, **c})
+        # Also activate in MCP server
+        try:
+            conn = m.add(
+                alias="default",
+                url=c["url"], db=c["db"],
+                username=c["user"],
+                api_key=c.get("api_key", ""),
+                password=c.get("password", ""),
+                protocol=c.get("protocol", "xmlrpc"),
+            )
+            uid = conn.authenticate()
+            return {"status": "activated", "alias": alias, "uid": uid, "url": c["url"]}
+        except Exception as e:
+            _save_user_active(user, {"alias": alias, **c})
+            return {"status": "activated_no_auth", "alias": alias, "error": str(e),
+                    "hint": "Connection saved but auth failed. Check credentials."}
+
+    elif name == "user_connection_delete":
+        user = _get_current_user(args)
+        if not user:
+            return {"error": "Call identify(name) first"}
+        alias = args["alias"]
+        conns = _load_user_connections(user)
+        if alias not in conns:
+            return {"error": f"Connection '{alias}' not found"}
+        del conns[alias]
+        _save_user_connections(user, conns)
+        # Clear active if this was active
+        active = _load_user_active(user)
+        if active.get("alias") == alias:
+            _save_user_active(user, {})
+        return {"status": "deleted", "alias": alias}
 
     elif name == "open_connection_manager":
         return _open_connection_manager()
@@ -2029,6 +2289,11 @@ def create_app():
                         return
 
         path = scope.get("path", "")
+
+        # ── Debug: log all headers on /mcp requests ────────────────
+        if scope["type"] == "http" and path in ("/mcp", "/oauth/token", "/oauth/authorize", "/oauth/register"):
+            hdrs = {k.decode(): v.decode() for k, v in scope.get("headers", [])}
+            logger.info(f"[AUTH-DEBUG] {scope.get('method', '?')} {path} headers: {json.dumps(hdrs, indent=2)}")
 
         # ── OAuth 2.0 metadata ─────────────────────────────────────
         if path == "/.well-known/oauth-authorization-server" and scope["type"] == "http":
