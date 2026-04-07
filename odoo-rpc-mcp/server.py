@@ -92,31 +92,29 @@ def _get_proxy_services():
     return PROXY_SERVICES
 
 
-def _discover_proxy_tools():
-    """Connect to sub-services and register their tools with prefixed names."""
+def _discover_proxy_tools(only_services: set | None = None):
+    """Connect to sub-services and register their tools with prefixed names.
+    Merges with existing discoveries — never loses previously found tools."""
     global PROXY_TOOLS, PROXY_TOOL_DEFS
     services = _get_proxy_services()
-    discovered = {}
-    tool_defs = []
+    if only_services:
+        services = {k: v for k, v in services.items() if k in only_services}
 
     for svc_name, svc_config in services.items():
         try:
             raw_tools = _proxy_list_tools(svc_name)
             if raw_tools and not any("error" in t for t in raw_tools):
+                # Remove old tools from this service
+                PROXY_TOOLS = {k: v for k, v in PROXY_TOOLS.items() if v["service"] != svc_name}
+                PROXY_TOOL_DEFS = [t for t in PROXY_TOOL_DEFS if not t.name.startswith(f"{svc_name}__")]
+                # Add new
                 for t in raw_tools:
                     prefixed = f"{svc_name}__{t['name']}"
-                    discovered[prefixed] = {
-                        "service": svc_name,
-                        "tool": t["name"],
-                    }
-                    # Build Tool definition
-                    tool_defs.append(Tool(
+                    PROXY_TOOLS[prefixed] = {"service": svc_name, "tool": t["name"]}
+                    PROXY_TOOL_DEFS.append(Tool(
                         name=prefixed,
                         description=f"[{svc_name}] {t.get('description', t['name'])}",
-                        inputSchema=t.get("inputSchema", {
-                            "type": "object",
-                            "properties": {},
-                        }),
+                        inputSchema=t.get("inputSchema", {"type": "object", "properties": {}}),
                     ))
                 logger.info(f"Proxy: discovered {len(raw_tools)} tools from {svc_name}")
             else:
@@ -124,9 +122,134 @@ def _discover_proxy_tools():
         except Exception as e:
             logger.warning(f"Proxy: failed to discover {svc_name}: {e}")
 
-    PROXY_TOOLS = discovered
-    PROXY_TOOL_DEFS = tool_defs
-    logger.info(f"Proxy: total {len(discovered)} proxied tools registered")
+    logger.info(f"Proxy: total {len(PROXY_TOOLS)} proxied tools registered")
+
+
+def _proxy_call_isolated(service: str, tool_name: str, arguments: dict) -> Any:
+    """Run proxy call in an isolated thread with its own event loop."""
+    import concurrent.futures
+    def _run():
+        return asyncio.run(_async_proxy_call_impl(service, tool_name, arguments))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_run).result(timeout=60)
+
+
+async def _async_proxy_call_impl(service: str, tool_name: str, arguments: dict) -> Any:
+    """Actual async implementation — runs in a fresh event loop."""
+    services = _get_proxy_services()
+    if service not in services:
+        return {"error": f"Unknown service: {service}"}
+    svc = services[service]
+    transport_type = svc["transport"]
+    url = svc["url"]
+    headers = svc.get("headers", {})
+
+    try:
+        if transport_type == "sse":
+            from mcp.client.sse import sse_client
+            from mcp import ClientSession
+            async with sse_client(url, headers=headers, timeout=60, sse_read_timeout=120) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(tool_name, arguments)
+        else:
+            from mcp.client.streamable_http import streamablehttp_client
+            from mcp import ClientSession
+            async with streamablehttp_client(url, headers=headers, timeout=60) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(tool_name, arguments)
+
+        texts = []
+        for item in result.content:
+            if hasattr(item, "text"):
+                texts.append(item.text)
+        combined = "\n".join(texts) if texts else str(result)
+        try:
+            return json.loads(combined)
+        except (json.JSONDecodeError, TypeError):
+            return {"result": combined}
+    except BaseException as e:
+        detail = str(e)
+        if hasattr(e, 'exceptions'):
+            detail = "; ".join(f"{type(sub).__name__}: {sub}" for sub in e.exceptions)
+        return {"error": f"Proxy {service}/{tool_name}: {detail}"}
+
+
+async def _async_proxy_call(service: str, tool_name: str, arguments: dict) -> Any:
+    """Proxy call — SSE via subprocess (isolated process), HTTP via MCP client."""
+    services = _get_proxy_services()
+    if service not in services:
+        return {"error": f"Unknown service: {service}"}
+    svc = services[service]
+    transport_type = svc["transport"]
+    url = svc["url"]
+    headers = svc.get("headers", {})
+
+    try:
+        if transport_type == "sse":
+            # SSE supergateway requires isolated process (event loop conflict with uvicorn)
+            return await asyncio.get_event_loop().run_in_executor(
+                None, _subprocess_sse_call, url, tool_name, arguments)
+        else:
+            from mcp.client.streamable_http import streamablehttp_client
+            from mcp import ClientSession
+            async with streamablehttp_client(url, headers=headers, timeout=60) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(tool_name, arguments)
+            texts = [item.text for item in result.content if hasattr(item, "text")]
+            combined = "\n".join(texts) if texts else str(result)
+            try:
+                return json.loads(combined)
+            except (json.JSONDecodeError, TypeError):
+                return {"result": combined}
+    except BaseException as e:
+        detail = str(e)
+        if hasattr(e, 'exceptions'):
+            detail = "; ".join(f"{type(sub).__name__}: {sub}" for sub in e.exceptions)
+        logger.error(f"Proxy {service}/{tool_name}: {detail}")
+        return {"error": f"Proxy {service}/{tool_name}: {detail}"}
+
+
+def _subprocess_sse_call(url: str, tool_name: str, arguments: dict) -> Any:
+    """Call SSE MCP tool via subprocess — fully isolated event loop."""
+    import subprocess
+    script = f'''
+import asyncio, json, sys
+from mcp.client.sse import sse_client
+from mcp import ClientSession
+
+async def main():
+    async with sse_client({url!r}, timeout=60, sse_read_timeout=120) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool({tool_name!r}, {json.dumps(arguments)})
+            texts = [item.text for item in result.content if hasattr(item, "text")]
+            print(json.dumps({{"result": "\\n".join(texts)}}))
+
+asyncio.run(main())
+'''
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=60,
+        )
+        if proc.returncode != 0:
+            return {"error": f"SSE subprocess: {proc.stderr.strip()[-500:]}"}
+        output = proc.stdout.strip()
+        if not output:
+            return {"error": "SSE subprocess: no output"}
+        data = json.loads(output)
+        text = data.get("result", "")
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            return {"result": text}
+    except subprocess.TimeoutExpired:
+        return {"error": "SSE subprocess: timeout"}
+    except Exception as e:
+        return {"error": f"SSE subprocess: {str(e)}"}
 
 
 def _proxy_call(service: str, tool_name: str, arguments: dict) -> Any:
@@ -143,7 +266,7 @@ def _proxy_call(service: str, tool_name: str, arguments: dict) -> Any:
         if transport_type == "sse":
             from mcp.client.sse import sse_client
             from mcp import ClientSession
-            async with sse_client(url, headers=headers) as (read, write):
+            async with sse_client(url, headers=headers, timeout=60, sse_read_timeout=120) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     result = await session.call_tool(tool_name, arguments)
@@ -151,15 +274,21 @@ def _proxy_call(service: str, tool_name: str, arguments: dict) -> Any:
         else:
             from mcp.client.streamable_http import streamablehttp_client
             from mcp import ClientSession
-            async with streamablehttp_client(url, headers=headers) as (read, write, _):
+            async with streamablehttp_client(url, headers=headers, timeout=60) as (read, write, _):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     result = await session.call_tool(tool_name, arguments)
                     return result
 
-    loop = asyncio.new_event_loop()
+    import concurrent.futures
+    import traceback
+
+    def _run():
+        return asyncio.run(_do_call())
+
     try:
-        result = loop.run_until_complete(_do_call())
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            result = pool.submit(_run).result(timeout=60)
         texts = []
         for item in result.content:
             if hasattr(item, "text"):
@@ -170,9 +299,13 @@ def _proxy_call(service: str, tool_name: str, arguments: dict) -> Any:
         except (json.JSONDecodeError, TypeError):
             return {"result": combined}
     except Exception as e:
-        return {"error": f"Proxy {service}/{tool_name}: {str(e)}"}
-    finally:
-        loop.close()
+        tb = traceback.format_exc()
+        logger.error(f"Proxy {service}/{tool_name} error:\n{tb}")
+        # Try to extract sub-exceptions from ExceptionGroup
+        detail = str(e)
+        if hasattr(e, 'exceptions'):
+            detail = "; ".join(str(sub) for sub in e.exceptions)
+        return {"error": f"Proxy {service}/{tool_name}: {detail}"}
 
 
 def _proxy_list_tools(service: str) -> list[dict]:
@@ -203,15 +336,14 @@ def _proxy_list_tools(service: str) -> list[dict]:
                     result = await session.list_tools()
                     return result.tools
 
-    loop = asyncio.new_event_loop()
-    try:
-        tools = loop.run_until_complete(_do_list())
-        return [{"name": t.name, "description": t.description,
-                 "inputSchema": t.inputSchema if hasattr(t, "inputSchema") else {}} for t in tools]
-    except Exception as e:
-        return [{"error": str(e)}]
-    finally:
-        loop.close()
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            tools = pool.submit(lambda: asyncio.run(_do_list())).result(timeout=30)
+            return [{"name": t.name, "description": t.description,
+                     "inputSchema": t.inputSchema if hasattr(t, "inputSchema") else {}} for t in tools]
+        except Exception as e:
+            return [{"error": str(e)}]
 
 
 # ─── Configuration ──────────────────────────────────────────
@@ -1745,11 +1877,26 @@ async def list_tools() -> list[Tool]:
 @mcp_server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     try:
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, _execute_tool, name, arguments
-        )
+        # ── Handle proxied tools directly in async context ──
+        if name in PROXY_TOOLS:
+            info = PROXY_TOOLS[name]
+            result = await _async_proxy_call(info["service"], info["tool"], arguments)
+        elif name == "proxy_call":
+            result = await _async_proxy_call(
+                arguments["service"], arguments["tool"], arguments.get("arguments", {}))
+        elif name == "proxy_refresh":
+            await asyncio.get_event_loop().run_in_executor(None, _discover_proxy_tools, None)
+            result = {
+                "status": "refreshed",
+                "proxied_tools": len(PROXY_TOOLS),
+                "services": {svc: sum(1 for v in PROXY_TOOLS.values() if v["service"] == svc)
+                             for svc in _get_proxy_services()},
+            }
+        else:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, _execute_tool, name, arguments
+            )
         text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
-        # Truncate very large responses
         if len(text) > 100_000:
             text = text[:100_000] + "\n... (truncated, use limit/fields to narrow)"
         return [TextContent(type="text", text=text)]
@@ -3295,19 +3442,22 @@ if __name__ == "__main__":
     # ── Discover proxy tools from sub-services (with retry) ──
     import threading
     def _startup_discover():
-        """Discover proxy tools after a delay to let sub-services start."""
+        """Discover proxy tools with retries until all services respond."""
         import time
-        for attempt in range(5):
-            time.sleep(5)
+        services = _get_proxy_services()
+        missing = set(services.keys())
+        for attempt in range(6):
+            time.sleep(5 + attempt * 2)
             try:
-                _discover_proxy_tools()
-                if PROXY_TOOLS:
-                    logger.info(f"Proxy startup: {len(PROXY_TOOLS)} tools registered")
+                _discover_proxy_tools(only_services=missing)
+                found = {v["service"] for v in PROXY_TOOLS.values()}
+                missing = set(services.keys()) - found
+                logger.info(f"Proxy attempt {attempt+1}: {len(PROXY_TOOLS)} tools, missing={missing or 'none'}")
+                if not missing:
                     break
             except Exception as e:
-                logger.warning(f"Proxy startup attempt {attempt+1}: {e}")
-        if not PROXY_TOOLS:
-            logger.warning("Proxy startup: no sub-service tools discovered (services may be down)")
+                logger.warning(f"Proxy attempt {attempt+1}: {e}")
+        logger.info(f"Proxy startup done: {len(PROXY_TOOLS)} total proxied tools")
 
     threading.Thread(target=_startup_discover, daemon=True).start()
 
