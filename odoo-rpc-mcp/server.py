@@ -37,26 +37,44 @@ from telegram_service import TelegramServiceManager
 
 # ─── MCP Proxy (client for sub-services) ────────────────────
 
-PROXY_SERVICES = {
-    "portainer": {"transport": "sse", "url": "http://portainer-mcp:8085/sse"},
-    "github": {"transport": "http", "url": "http://github-mcp:8086/mcp"},
-    "teams": {"transport": "sse", "url": "http://teams-mcp:8087/sse"},
-}
+def _proxy_services():
+    """Build proxy config lazily (reads env vars at call time)."""
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+    return {
+        "portainer": {"transport": "sse", "url": "http://portainer-mcp:8085/sse"},
+        "github": {
+            "transport": "http",
+            "url": "http://github-mcp:8086/mcp",
+            "headers": {"Authorization": f"Bearer {github_token}"} if github_token else {},
+        },
+        "teams": {"transport": "sse", "url": "http://teams-mcp:8087/sse"},
+    }
+
+PROXY_SERVICES = None  # lazy init
+
+
+def _get_proxy_services():
+    global PROXY_SERVICES
+    if PROXY_SERVICES is None:
+        PROXY_SERVICES = _proxy_services()
+    return PROXY_SERVICES
 
 
 def _proxy_call(service: str, tool_name: str, arguments: dict) -> Any:
     """Forward a tool call to an internal MCP sub-service."""
-    if service not in PROXY_SERVICES:
+    services = _get_proxy_services()
+    if service not in services:
         return {"error": f"Unknown service: {service}"}
-    svc = PROXY_SERVICES[service]
+    svc = services[service]
     transport_type = svc["transport"]
     url = svc["url"]
+    headers = svc.get("headers", {})
 
     async def _do_call():
         if transport_type == "sse":
             from mcp.client.sse import sse_client
             from mcp import ClientSession
-            async with sse_client(url) as (read, write):
+            async with sse_client(url, headers=headers) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     result = await session.call_tool(tool_name, arguments)
@@ -64,7 +82,7 @@ def _proxy_call(service: str, tool_name: str, arguments: dict) -> Any:
         else:
             from mcp.client.streamable_http import streamablehttp_client
             from mcp import ClientSession
-            async with streamablehttp_client(url) as (read, write, _):
+            async with streamablehttp_client(url, headers=headers) as (read, write, _):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     result = await session.call_tool(tool_name, arguments)
@@ -90,17 +108,19 @@ def _proxy_call(service: str, tool_name: str, arguments: dict) -> Any:
 
 def _proxy_list_tools(service: str) -> list[dict]:
     """List tools available on an internal MCP sub-service."""
-    if service not in PROXY_SERVICES:
+    services = _get_proxy_services()
+    if service not in services:
         return []
-    svc = PROXY_SERVICES[service]
+    svc = services[service]
     transport_type = svc["transport"]
     url = svc["url"]
+    headers = svc.get("headers", {})
 
     async def _do_list():
         if transport_type == "sse":
             from mcp.client.sse import sse_client
             from mcp import ClientSession
-            async with sse_client(url) as (read, write):
+            async with sse_client(url, headers=headers) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     result = await session.list_tools()
@@ -108,7 +128,7 @@ def _proxy_list_tools(service: str) -> list[dict]:
         else:
             from mcp.client.streamable_http import streamablehttp_client
             from mcp import ClientSession
-            async with streamablehttp_client(url) as (read, write, _):
+            async with streamablehttp_client(url, headers=headers) as (read, write, _):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     result = await session.list_tools()

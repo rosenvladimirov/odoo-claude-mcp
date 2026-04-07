@@ -15,7 +15,6 @@ networks:
     driver: bridge
   backend:
     driver: bridge
-    internal: true
 
 services:
   # ─── Claude Code web terminal (ttyd + Claude CLI) ─────────
@@ -86,6 +85,7 @@ services:
       - TELEGRAM_API_HASH=${TELEGRAM_API_HASH:-}
       - TELEGRAM_SESSION_PATH=/data/telegram_session
       - SSH_AUTH_SOCK=/ssh-agent
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
     ports:
       - "${ODOO_MCP_PORT:-8084}:8084"
     volumes:
