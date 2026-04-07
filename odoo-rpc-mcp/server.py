@@ -2445,11 +2445,10 @@ def create_app():
   .hero {{
     position: relative; width: 100%; min-height: 380px;
     background-image: url('{cover}');
-    background-position: center center;
-    background-size: contain;
+    background-position: right center;
+    background-size: cover;
     background-repeat: no-repeat;
     background-attachment: fixed;
-    background-color: #714ba0;
     display: flex; align-items: flex-end;
   }}
   .hero-overlay {{
