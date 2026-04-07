@@ -56,10 +56,11 @@ Docker-based MCP server stack for [Claude Code](https://docs.anthropic.com/en/do
 |---------|------|-----------|-------|-------------|
 | `odoo-rpc-mcp` | 8084 | HTTP | 55 | Odoo + Gmail + Calendar + Telegram + SSH + Git + Identity + Memory |
 | `portainer-mcp` | 8085 | SSE | 38 | Docker/K8s management via Portainer |
+| `teams-mcp` | 8087 | SSE | 6 | Microsoft Teams messaging (InditexTech) |
 | `github-mcp` | 8086 | HTTP | 20 | GitHub repo management (official server) |
 | `claude-terminal` | 8080 | — | — | Web terminal (ttyd + Claude Code CLI) |
 
-**Total: 113 MCP tools**
+**Total: 119 MCP tools**
 
 ## Quick Start
 
@@ -92,6 +93,9 @@ claude mcp add -t http -s user odoo-rpc http://localhost:8084/mcp
 
 # Docker management via Portainer
 claude mcp add -t sse -s user portainer http://localhost:8085/sse
+
+# Microsoft Teams (requires Azure AD app)
+claude mcp add -t sse -s user teams-mcp http://localhost:8087/sse
 
 # GitHub repos (requires PAT)
 claude mcp add -t http -s user github-mcp http://localhost:8086/mcp \
@@ -146,6 +150,15 @@ docker pull vladimirovrosen/odoo-claude-terminal:latest
 | **Docker Proxy** | `dockerProxy` | Full Docker Engine API (containers, images, volumes, networks) |
 | **Kubernetes** | `kubernetesProxy`, `getKubernetesResourceStripped` | K8s cluster management |
 | **Management** | Access groups, environment groups, tags, teams, users, settings | Organization and permissions |
+
+### Microsoft Teams (6 tools)
+
+| Category | Tools | Description |
+|----------|-------|-------------|
+| **Threads** | `start_thread`, `update_thread`, `read_thread`, `list_threads` | Create, reply, read, and list channel threads |
+| **Members** | `get_member_by_name`, `list_members` | Look up and list team members |
+
+Requires Azure AD app registration with Teams RSC permissions. See [InditexTech/mcp-teams-server](https://github.com/InditexTech/mcp-teams-server) for setup.
 
 ### GitHub (20 tools)
 
@@ -205,6 +218,14 @@ The server supports multiple authentication modes for different deployment scena
 | `PORTAINER_TOKEN` | | API token |
 | `PORTAINER_READ_ONLY` | | `true` for safe mode |
 | `PORTAINER_MCP_PORT` | `8085` | MCP port |
+| **Microsoft Teams** | | |
+| `TEAMS_APP_ID` | | Azure AD application ID |
+| `TEAMS_APP_PASSWORD` | | Client secret |
+| `TEAMS_APP_TYPE` | `SingleTenant` | SingleTenant or MultiTenant |
+| `TEAMS_APP_TENANT_ID` | | Azure tenant ID |
+| `TEAMS_TEAM_ID` | | Teams group ID |
+| `TEAMS_CHANNEL_ID` | | Teams channel ID |
+| `TEAMS_MCP_PORT` | `8087` | MCP port |
 | **GitHub** | | |
 | `GITHUB_TOKEN` | | Personal Access Token |
 | `GITHUB_MCP_PORT` | `8086` | MCP port |

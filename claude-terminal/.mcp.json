@@ -11,6 +11,10 @@
     "github": {
       "type": "http",
       "url": "http://github-mcp:8086/mcp"
+    },
+    "teams": {
+      "type": "sse",
+      "url": "http://teams-mcp:8000/sse"
     }
   }
 }

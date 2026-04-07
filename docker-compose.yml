@@ -100,6 +100,25 @@ services:
     labels:
       - "com.blconsulting.service=mcp-portainer"
 
+  # ─── Microsoft Teams MCP (Teams messaging) ─────────────────
+  teams-mcp:
+    image: ghcr.io/inditextech/mcp-teams-server:latest
+    container_name: mcp-teams
+    restart: unless-stopped
+    environment:
+      - MCP_TRANSPORT=sse
+      - TEAMS_APP_ID=${TEAMS_APP_ID:-}
+      - TEAMS_APP_PASSWORD=${TEAMS_APP_PASSWORD:-}
+      - TEAMS_APP_TYPE=${TEAMS_APP_TYPE:-SingleTenant}
+      - TEAMS_APP_TENANT_ID=${TEAMS_APP_TENANT_ID:-}
+      - TEAM_ID=${TEAMS_TEAM_ID:-}
+      - TEAMS_CHANNEL_ID=${TEAMS_CHANNEL_ID:-}
+      - MCP_LOGLEVEL=${TEAMS_LOG_LEVEL:-ERROR}
+    ports:
+      - "${TEAMS_MCP_PORT:-8087}:8000"
+    labels:
+      - "com.blconsulting.service=mcp-teams"
+
   # ─── GitHub MCP (GitHub repo management) ───────────────────
   github-mcp:
     image: ghcr.io/github/github-mcp-server:latest
