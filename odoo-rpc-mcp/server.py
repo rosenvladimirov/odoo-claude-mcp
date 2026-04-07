@@ -2424,6 +2424,102 @@ def create_app():
                     await response(scope, receive, send)
                     return
 
+        # ── Landing page ───────────────────────────────────────────
+        if path in ("/", "") and scope["type"] == "http":
+            from starlette.responses import HTMLResponse
+            host = dict(scope.get("headers", [])).get(b"host", b"localhost").decode()
+            html = f"""<!DOCTYPE html>
+<html lang="bg">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Odoo RPC MCP Server</title>
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+         background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+         color: #e0e0e0; min-height: 100vh; display: flex; align-items: center; justify-content: center; }}
+  .container {{ max-width: 720px; padding: 48px; background: rgba(255,255,255,0.05);
+                border-radius: 16px; backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }}
+  h1 {{ font-size: 2em; margin-bottom: 8px; color: #fff; }}
+  .subtitle {{ color: #8b9dc3; margin-bottom: 32px; font-size: 1.1em; }}
+  .badge {{ display: inline-block; background: #28a745; color: #fff; padding: 4px 12px;
+            border-radius: 12px; font-size: 0.85em; margin-bottom: 24px; }}
+  h2 {{ font-size: 1.2em; color: #a0c4ff; margin: 24px 0 12px; }}
+  .endpoint {{ background: rgba(255,255,255,0.08); padding: 12px 16px; border-radius: 8px;
+               margin: 8px 0; font-family: monospace; font-size: 0.95em; }}
+  .endpoint .method {{ color: #ffd166; font-weight: bold; }}
+  .endpoint .path {{ color: #06d6a0; }}
+  .endpoint .desc {{ color: #8b9dc3; font-size: 0.85em; margin-top: 4px; }}
+  .setup {{ background: rgba(6,214,160,0.1); border: 1px solid rgba(6,214,160,0.3);
+            padding: 20px; border-radius: 12px; margin: 24px 0; }}
+  .setup h3 {{ color: #06d6a0; margin-bottom: 12px; }}
+  .setup ol {{ padding-left: 20px; line-height: 2; }}
+  code {{ background: rgba(255,255,255,0.1); padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }}
+  .footer {{ margin-top: 32px; text-align: center; color: #555; font-size: 0.85em; }}
+  a {{ color: #a0c4ff; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Odoo RPC MCP Server</h1>
+  <p class="subtitle">Model Context Protocol server for Odoo ERP</p>
+  <span class="badge">Online</span>
+
+  <h2>Endpoints</h2>
+  <div class="endpoint">
+    <span class="method">POST</span> <span class="path">/mcp</span>
+    <div class="desc">Streamable HTTP transport (MCP protocol)</div>
+  </div>
+  <div class="endpoint">
+    <span class="method">GET</span> <span class="path">/sse</span>
+    <div class="desc">SSE transport (legacy)</div>
+  </div>
+  <div class="endpoint">
+    <span class="method">GET</span> <span class="path">/health</span>
+    <div class="desc">Health check (public)</div>
+  </div>
+  <div class="endpoint">
+    <span class="method">GET</span> <span class="path">/.well-known/oauth-authorization-server</span>
+    <div class="desc">OAuth 2.0 metadata</div>
+  </div>
+
+  <div class="setup">
+    <h3>Setup in Claude.ai</h3>
+    <ol>
+      <li>Go to <strong>Settings &rarr; Connectors &rarr; Add custom connector</strong></li>
+      <li>URL: <code>https://{host}/mcp</code></li>
+      <li>Enter your <strong>OAuth Client ID</strong> and <strong>Client Secret</strong></li>
+      <li>Start a conversation and call <code>identify("your name")</code></li>
+    </ol>
+  </div>
+
+  <h2>Features</h2>
+  <div class="endpoint">
+    <div class="desc">40+ Odoo tools: CRUD, reports, fiscal positions, search, execute</div>
+  </div>
+  <div class="endpoint">
+    <div class="desc">SSH remote execution &amp; Git operations</div>
+  </div>
+  <div class="endpoint">
+    <div class="desc">Google Calendar, Gmail, Telegram integration</div>
+  </div>
+  <div class="endpoint">
+    <div class="desc">Per-user connections with session isolation</div>
+  </div>
+
+  <div class="footer">
+    <a href="https://github.com/rosenvladimirov/odoo-claude-mcp">GitHub</a> &middot;
+    BL Consulting &middot; Powered by <a href="https://modelcontextprotocol.io">MCP</a>
+  </div>
+</div>
+</body>
+</html>"""
+            response = HTMLResponse(html)
+            await response(scope, receive, send)
+            return
+
         if path == "/health" and scope["type"] == "http":
             from starlette.requests import Request
             from starlette.responses import JSONResponse
