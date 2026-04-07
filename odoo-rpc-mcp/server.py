@@ -51,6 +51,8 @@ def _proxy_services():
     }
 
 PROXY_SERVICES = None  # lazy init
+PROXY_TOOLS: dict[str, dict] = {}  # "portainer__listStacks" -> {"service": "portainer", "tool": "listStacks"}
+PROXY_TOOL_DEFS: list[Tool] = []  # Tool definitions for proxied tools
 
 
 def _get_proxy_services():
@@ -58,6 +60,43 @@ def _get_proxy_services():
     if PROXY_SERVICES is None:
         PROXY_SERVICES = _proxy_services()
     return PROXY_SERVICES
+
+
+def _discover_proxy_tools():
+    """Connect to sub-services and register their tools with prefixed names."""
+    global PROXY_TOOLS, PROXY_TOOL_DEFS
+    services = _get_proxy_services()
+    discovered = {}
+    tool_defs = []
+
+    for svc_name, svc_config in services.items():
+        try:
+            raw_tools = _proxy_list_tools(svc_name)
+            if raw_tools and not any("error" in t for t in raw_tools):
+                for t in raw_tools:
+                    prefixed = f"{svc_name}__{t['name']}"
+                    discovered[prefixed] = {
+                        "service": svc_name,
+                        "tool": t["name"],
+                    }
+                    # Build Tool definition
+                    tool_defs.append(Tool(
+                        name=prefixed,
+                        description=f"[{svc_name}] {t.get('description', t['name'])}",
+                        inputSchema=t.get("inputSchema", {
+                            "type": "object",
+                            "properties": {},
+                        }),
+                    ))
+                logger.info(f"Proxy: discovered {len(raw_tools)} tools from {svc_name}")
+            else:
+                logger.warning(f"Proxy: {svc_name} returned no tools or error")
+        except Exception as e:
+            logger.warning(f"Proxy: failed to discover {svc_name}: {e}")
+
+    PROXY_TOOLS = discovered
+    PROXY_TOOL_DEFS = tool_defs
+    logger.info(f"Proxy: total {len(discovered)} proxied tools registered")
 
 
 def _proxy_call(service: str, tool_name: str, arguments: dict) -> Any:
@@ -137,7 +176,8 @@ def _proxy_list_tools(service: str) -> list[dict]:
     loop = asyncio.new_event_loop()
     try:
         tools = loop.run_until_complete(_do_list())
-        return [{"name": t.name, "description": t.description} for t in tools]
+        return [{"name": t.name, "description": t.description,
+                 "inputSchema": t.inputSchema if hasattr(t, "inputSchema") else {}} for t in tools]
     except Exception as e:
         return [{"error": str(e)}]
     finally:
@@ -1652,14 +1692,24 @@ TOOLS = [
             "required": ["service"],
         },
     ),
+    Tool(
+        name="proxy_refresh",
+        description=(
+            "Re-discover tools from all internal MCP sub-services. "
+            "Use after starting a new sub-service or if tools are missing."
+        ),
+        inputSchema={"type": "object", "properties": {}},
+    ),
 ]
 
 
 @mcp_server.list_tools()
 async def list_tools() -> list[Tool]:
-    if SINGLE_CONNECTION:
-        return [t for t in TOOLS if t.name != "odoo_disconnect"]
-    return TOOLS
+    base = [t for t in TOOLS if t.name != "odoo_disconnect"] if SINGLE_CONNECTION else list(TOOLS)
+    # Append dynamically discovered proxy tools
+    if PROXY_TOOL_DEFS:
+        base.extend(PROXY_TOOL_DEFS)
+    return base
 
 
 @mcp_server.call_tool()
@@ -2251,6 +2301,20 @@ def _execute_tool(name: str, args: dict) -> Any:
     elif name == "proxy_discover":
         tools = _proxy_list_tools(args["service"])
         return {"service": args["service"], "tools": tools, "count": len(tools)}
+
+    elif name == "proxy_refresh":
+        _discover_proxy_tools()
+        return {
+            "status": "refreshed",
+            "proxied_tools": len(PROXY_TOOLS),
+            "services": {svc: sum(1 for v in PROXY_TOOLS.values() if v["service"] == svc)
+                         for svc in _get_proxy_services()},
+        }
+
+    # ── Dynamically proxied tools (prefix__toolname) ──
+    elif name in PROXY_TOOLS:
+        info = PROXY_TOOLS[name]
+        return _proxy_call(info["service"], info["tool"], args)
 
     elif name == "open_connection_manager":
         return _open_connection_manager()
@@ -3197,6 +3261,26 @@ def create_app():
 
 if __name__ == "__main__":
     app = create_app()
+
+    # ── Discover proxy tools from sub-services (with retry) ──
+    import threading
+    def _startup_discover():
+        """Discover proxy tools after a delay to let sub-services start."""
+        import time
+        for attempt in range(5):
+            time.sleep(5)
+            try:
+                _discover_proxy_tools()
+                if PROXY_TOOLS:
+                    logger.info(f"Proxy startup: {len(PROXY_TOOLS)} tools registered")
+                    break
+            except Exception as e:
+                logger.warning(f"Proxy startup attempt {attempt+1}: {e}")
+        if not PROXY_TOOLS:
+            logger.warning("Proxy startup: no sub-service tools discovered (services may be down)")
+
+    threading.Thread(target=_startup_discover, daemon=True).start()
+
     logger.info(f"Odoo RPC MCP server starting on {MCP_HOST}:{MCP_PORT}")
     logger.info(f"  Streamable HTTP: http://{MCP_HOST}:{MCP_PORT}/mcp")
     logger.info(f"  SSE (legacy):    http://{MCP_HOST}:{MCP_PORT}/sse")
