@@ -2439,28 +2439,31 @@ def create_app():
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-  body {{ font-family: 'Inter', sans-serif; background: #f8f9fa; color: #21222c; }}
-
-  /* ── Hero header with cover image ── */
-  .hero {{
-    position: relative; width: 100%; min-height: 380px;
+  body {{
+    font-family: 'Inter', sans-serif; color: #fff; min-height: 100vh;
     background-image: url('{cover}');
     background-position: right center;
     background-size: cover;
     background-repeat: no-repeat;
     background-attachment: fixed;
+  }}
+
+  /* ── Hero header ── */
+  .hero {{
+    position: relative; width: 100%; min-height: 420px;
     display: flex; align-items: flex-end;
   }}
   .hero-overlay {{
     position: absolute; inset: 0;
-    background: linear-gradient(180deg, rgba(113,75,160,0.3) 0%, rgba(113,75,160,0.85) 100%);
+    background: linear-gradient(180deg, rgba(113,75,160,0.2) 0%, rgba(113,75,160,0.75) 100%);
   }}
   .hero-content {{
     position: relative; z-index: 1; width: 100%; max-width: 960px;
-    margin: 0 auto; padding: 40px 32px;
+    margin: 0 auto; padding: 48px 32px;
   }}
-  .hero h1 {{ font-size: 2.2em; font-weight: 700; color: #fff; margin-bottom: 8px; }}
-  .hero p {{ color: rgba(255,255,255,0.85); font-size: 1.15em; }}
+  .hero h1 {{ font-size: 2.4em; font-weight: 700; color: #fff; margin-bottom: 8px;
+              text-shadow: 0 2px 8px rgba(0,0,0,0.3); }}
+  .hero p {{ color: rgba(255,255,255,0.9); font-size: 1.15em; text-shadow: 0 1px 4px rgba(0,0,0,0.3); }}
   .hero .badge {{
     display: inline-block; background: #21b6b7; color: #fff; padding: 5px 16px;
     border-radius: 20px; font-size: 0.85em; font-weight: 600; margin-top: 16px;
@@ -2468,8 +2471,9 @@ def create_app():
 
   /* ── Odoo-style nav bar ── */
   .navbar {{
-    background: #714ba0; padding: 0 32px; display: flex; align-items: center;
-    height: 46px; max-width: 100%;
+    background: rgba(113,75,160,0.85); backdrop-filter: blur(10px);
+    padding: 0 32px; display: flex; align-items: center;
+    height: 46px; max-width: 100%; position: sticky; top: 0; z-index: 100;
   }}
   .navbar a {{
     color: rgba(255,255,255,0.8); text-decoration: none; font-size: 0.9em;
@@ -2483,31 +2487,34 @@ def create_app():
 
   .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin: 24px 0; }}
   .card {{
-    background: #fff; border-radius: 12px; padding: 24px;
-    border: 1px solid #e9ecef; transition: box-shadow 0.2s;
+    background: rgba(255,255,255,0.12); backdrop-filter: blur(16px);
+    border-radius: 12px; padding: 24px;
+    border: 1px solid rgba(255,255,255,0.15); transition: all 0.3s;
   }}
-  .card:hover {{ box-shadow: 0 4px 20px rgba(0,0,0,0.08); }}
-  .card h3 {{ font-size: 1.05em; color: #714ba0; margin-bottom: 8px; }}
-  .card p {{ font-size: 0.9em; color: #555; line-height: 1.6; }}
-  .card code {{ background: #f1f3f5; padding: 2px 8px; border-radius: 4px; font-size: 0.85em; color: #714ba0; }}
+  .card:hover {{ background: rgba(255,255,255,0.18); box-shadow: 0 8px 32px rgba(0,0,0,0.2); transform: translateY(-2px); }}
+  .card h3 {{ font-size: 1.05em; color: #d4b8ff; margin-bottom: 8px; }}
+  .card p {{ font-size: 0.9em; color: rgba(255,255,255,0.8); line-height: 1.6; }}
+  .card code {{ background: rgba(255,255,255,0.15); padding: 2px 8px; border-radius: 4px; font-size: 0.85em; color: #d4b8ff; }}
 
   /* ── Endpoint list ── */
   .endpoints {{ margin: 24px 0; }}
   .ep {{
     display: flex; align-items: center; gap: 12px; padding: 14px 20px;
-    background: #fff; border: 1px solid #e9ecef; border-radius: 8px; margin: 8px 0;
+    background: rgba(255,255,255,0.1); backdrop-filter: blur(12px);
+    border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; margin: 8px 0;
   }}
   .ep .method {{
-    background: #714ba0; color: #fff; padding: 3px 10px; border-radius: 4px;
+    background: rgba(113,75,160,0.8); color: #fff; padding: 3px 10px; border-radius: 4px;
     font-size: 0.8em; font-weight: 600; font-family: monospace; min-width: 52px; text-align: center;
   }}
-  .ep .method.get {{ background: #21b6b7; }}
-  .ep .path {{ font-family: monospace; font-weight: 600; color: #21222c; }}
-  .ep .desc {{ color: #888; font-size: 0.85em; margin-left: auto; }}
+  .ep .method.get {{ background: rgba(33,182,183,0.8); }}
+  .ep .path {{ font-family: monospace; font-weight: 600; color: #fff; }}
+  .ep .desc {{ color: rgba(255,255,255,0.6); font-size: 0.85em; margin-left: auto; }}
 
   /* ── Setup box ── */
   .setup-box {{
-    background: linear-gradient(135deg, #714ba0 0%, #8e6fc1 100%);
+    background: rgba(113,75,160,0.5); backdrop-filter: blur(16px);
+    border: 1px solid rgba(255,255,255,0.15);
     color: #fff; padding: 32px; border-radius: 16px; margin: 32px 0;
   }}
   .setup-box h2 {{ font-size: 1.3em; margin-bottom: 16px; }}
@@ -2516,14 +2523,15 @@ def create_app():
 
   /* ── Footer ── */
   .footer {{
-    text-align: center; padding: 32px; color: #999; font-size: 0.85em;
-    border-top: 1px solid #e9ecef; margin-top: 40px;
+    text-align: center; padding: 32px; color: rgba(255,255,255,0.5); font-size: 0.85em;
+    border-top: 1px solid rgba(255,255,255,0.1); margin-top: 40px;
   }}
-  .footer a {{ color: #714ba0; text-decoration: none; }}
+  .footer a {{ color: #d4b8ff; text-decoration: none; }}
   .footer a:hover {{ text-decoration: underline; }}
 
-  h2 {{ font-size: 1.4em; color: #21222c; margin: 32px 0 16px; font-weight: 600; }}
-  h2 span {{ color: #714ba0; }}
+  h2 {{ font-size: 1.4em; color: #fff; margin: 32px 0 16px; font-weight: 600;
+       text-shadow: 0 1px 4px rgba(0,0,0,0.3); }}
+  h2 span {{ color: #d4b8ff; }}
 </style>
 </head>
 <body>
