@@ -37,8 +37,38 @@ from telegram_service import TelegramServiceManager
 
 # ─── MCP Proxy (client for sub-services) ────────────────────
 
+PROXY_CONFIG_FILE = Path(os.environ.get("PROXY_CONFIG_FILE", "/data/proxy_services.json"))
+PROXY_CONFIG_ENV = os.environ.get("PROXY_SERVICES_JSON", "")
+
+
 def _proxy_services():
-    """Build proxy config lazily (reads env vars at call time)."""
+    """Load proxy config from JSON file, env var, or defaults."""
+    # 1. Try config file
+    if PROXY_CONFIG_FILE.is_file():
+        try:
+            with open(PROXY_CONFIG_FILE, "r", encoding="utf-8") as f:
+                services = json.load(f)
+            logger.info(f"Proxy config loaded from {PROXY_CONFIG_FILE}: {list(services.keys())}")
+            # Expand env vars in headers
+            for svc in services.values():
+                if "headers" in svc:
+                    svc["headers"] = {
+                        k: os.path.expandvars(v) for k, v in svc["headers"].items()
+                    }
+            return services
+        except Exception as e:
+            logger.warning(f"Proxy config file error: {e}")
+
+    # 2. Try env var (JSON string)
+    if PROXY_CONFIG_ENV:
+        try:
+            services = json.loads(PROXY_CONFIG_ENV)
+            logger.info(f"Proxy config from PROXY_SERVICES_JSON: {list(services.keys())}")
+            return services
+        except Exception as e:
+            logger.warning(f"Proxy config env error: {e}")
+
+    # 3. Defaults (backwards compatible)
     github_token = os.environ.get("GITHUB_TOKEN", "")
     return {
         "portainer": {"transport": "sse", "url": "http://portainer-mcp:8085/sse"},

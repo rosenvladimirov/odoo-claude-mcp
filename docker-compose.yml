@@ -93,6 +93,7 @@ services:
       - ${HOME}/Проекти/odoo/odoo-18.0/claude.ai/.odoo_connections:/config:ro
       - ${HOME}/.ssh:/home/mcp/.ssh:ro
       - ${SSH_AUTH_SOCK:-/dev/null}:/ssh-agent:ro
+      - ./proxy_services.json:/data/proxy_services.json:ro
     labels:
       - "com.blconsulting.service=mcp-odoo-rpc"
 

@@ -9,3 +9,4 @@ node_modules/
 .DS_Store
 .idea/
 .odoo_connections
+proxy_services.json

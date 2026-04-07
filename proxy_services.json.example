@@ -1,0 +1,17 @@
+{
+  "portainer": {
+    "transport": "sse",
+    "url": "http://portainer-mcp:8085/sse"
+  },
+  "github": {
+    "transport": "http",
+    "url": "http://github-mcp:8086/mcp",
+    "headers": {
+      "Authorization": "Bearer ${GITHUB_TOKEN}"
+    }
+  },
+  "teams": {
+    "transport": "sse",
+    "url": "http://teams-mcp:8087/sse"
+  }
+}
