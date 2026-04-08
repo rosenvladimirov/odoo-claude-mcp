@@ -4145,7 +4145,8 @@ def create_app():
     protected_paths = {"/mcp", "/sse", "/messages", "/api/session/register",
                        "/api/session/list", "/api/session/update",
                        "/api/session/delete", "/api/connect",
-                       "/api/identify"}
+                       "/api/identify",
+                       "/api/user/connections"}
     public_paths = {"/health", "/.well-known/oauth-authorization-server",
                     "/oauth/token", "/oauth/register"}
 
@@ -4624,6 +4625,51 @@ def create_app():
                         "active": active.get("alias"),
                         "existing_profiles": existing,
                     })
+            except Exception as e:
+                response = JSONResponse({"error": str(e)}, status_code=400)
+            await response(scope, receive, send)
+        elif path == "/api/user/connections" and scope["type"] == "http":
+            from starlette.requests import Request
+            from starlette.responses import JSONResponse
+            request = Request(scope, receive)
+            method = scope.get("method", "GET")
+            try:
+                if method == "GET":
+                    # GET /api/user/connections?name=Rosen
+                    name = request.query_params.get("name", "")
+                    if not name:
+                        response = JSONResponse({"error": "name parameter required"}, status_code=400)
+                    else:
+                        conns = _load_user_connections(name)
+                        active = _load_user_active(name)
+                        response = JSONResponse({
+                            "user": name,
+                            "profile": _sanitize_name(name),
+                            "connections": conns,
+                            "active": active.get("alias"),
+                        })
+                elif method == "POST":
+                    # POST /api/user/connections — save full connections dict
+                    body = await request.json()
+                    name = body.get("name", "")
+                    connections = body.get("connections", {})
+                    if not name:
+                        response = JSONResponse({"error": "name required"}, status_code=400)
+                    elif not isinstance(connections, dict):
+                        response = JSONResponse({"error": "connections must be a dict"}, status_code=400)
+                    else:
+                        _save_user_connections(name, connections)
+                        # Optionally save active connection
+                        if body.get("active"):
+                            _save_user_active(name, {"alias": body["active"]})
+                        response = JSONResponse({
+                            "status": "saved",
+                            "user": name,
+                            "profile": _sanitize_name(name),
+                            "count": len(connections),
+                        })
+                else:
+                    response = JSONResponse({"error": "Method not allowed"}, status_code=405)
             except Exception as e:
                 response = JSONResponse({"error": str(e)}, status_code=400)
             await response(scope, receive, send)
