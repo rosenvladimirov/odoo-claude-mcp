@@ -1165,7 +1165,7 @@ def _save_user_active(user_name: str, active: dict):
 def _get_mcp_session_key() -> str:
     """Get unique key for the current MCP session (per-client isolation)."""
     try:
-        ctx = server.request_context
+        ctx = mcp_server.request_context
         return str(id(ctx.session))
     except (LookupError, AttributeError):
         return "default"
