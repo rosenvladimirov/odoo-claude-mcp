@@ -1,7 +1,7 @@
 FROM node:22-bookworm-slim
 
 LABEL maintainer="BL Consulting"
-LABEL description="Claude Code CLI with ttyd web terminal"
+LABEL description="Claude Code CLI with ttyd web terminal (multi-user)"
 
 # Build ttyd from source
 RUN apt-get update && \
@@ -20,9 +20,12 @@ RUN apt-get update && \
 # Install Claude Code CLI
 RUN npm install -g @anthropic-ai/claude-code
 
-# Use node user (uid 1000) matching host
+# Use node user (uid 1000) matching host + create dirs
 RUN usermod -d /home/claude -l claude -s /bin/bash node && \
-    mv /home/node /home/claude
+    groupmod -n claude node && \
+    mv /home/node /home/claude && \
+    mkdir -p /home/claude/template /data/users && \
+    chown -R claude:claude /home/claude /data
 
 USER claude
 WORKDIR /home/claude
@@ -37,6 +40,9 @@ EXPOSE 8080
 
 COPY --chown=claude entrypoint.sh /home/claude/entrypoint.sh
 COPY --chown=claude start-session.sh /home/claude/start-session.sh
+COPY --chown=claude themes.json /home/claude/themes.json
+COPY --chown=claude gateway.js /home/claude/gateway.js
+COPY --chown=claude landing.html /home/claude/landing.html
 RUN chmod +x /home/claude/entrypoint.sh /home/claude/start-session.sh
 
 ENTRYPOINT ["/home/claude/entrypoint.sh"]

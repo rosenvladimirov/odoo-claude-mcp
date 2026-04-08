@@ -21,6 +21,7 @@ import signal
 import sqlite3
 import sys
 import uuid
+import unicodedata
 import xmlrpc.client
 from datetime import datetime
 from pathlib import Path
@@ -841,6 +842,23 @@ def _notify_live_refresh(conn: OdooConnection, kind: str, model: str, res_ids: l
         logger.warning(f"Live refresh notify failed ({kind}): {e}")
 
 
+def _md_to_html(text: str) -> str:
+    """Convert Markdown text to Odoo-safe HTML."""
+    try:
+        import markdown as _md
+        return _md.markdown(
+            text,
+            extensions=["tables", "fenced_code", "nl2br", "sane_lists"],
+        )
+    except ImportError:
+        import html as _html
+        escaped = _html.escape(text)
+        paragraphs = escaped.split("\n\n")
+        return "".join(
+            f'<p>{p.replace(chr(10), "<br/>")}</p>' for p in paragraphs
+        )
+
+
 def _conn(args: dict) -> OdooConnection:
     return _mgr().get(args.get("connection", "default"))
 
@@ -853,11 +871,45 @@ _session_users: dict[str, str] = {}
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 
 
-def _user_dir(user_name: str) -> str:
-    """Get/create per-user data directory."""
-    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in user_name.lower())
+_CYR_TO_LAT = str.maketrans({
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ж": "zh",
+    "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m", "н": "n",
+    "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f",
+    "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sht", "ъ": "a",
+    "ь": "", "ю": "yu", "я": "ya", "є": "ye", "і": "i", "ї": "yi",
+    "ґ": "g", "ё": "yo", "э": "e", "ы": "y",
+})
+
+
+def _sanitize_name(name: str) -> str:
+    """Transliterate to ASCII and sanitize for use as directory name."""
+    # Cyrillic transliteration first, then NFKD for accented Latin
+    text = name.lower().translate(_CYR_TO_LAT)
+    nfkd = unicodedata.normalize("NFKD", text)
+    ascii_name = nfkd.encode("ascii", "ignore").decode("ascii")
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in ascii_name)
+    while "__" in safe:
+        safe = safe.replace("__", "_")
+    return safe.strip("_") or "user"
+
+
+def _list_existing_users() -> list[str]:
+    """List existing user profile directories."""
+    users_dir = os.path.join(DATA_DIR, "users")
+    if not os.path.isdir(users_dir):
+        return []
+    return sorted(
+        d for d in os.listdir(users_dir)
+        if os.path.isdir(os.path.join(users_dir, d))
+    )
+
+
+def _user_dir(user_name: str, create: bool = False) -> str:
+    """Get per-user data directory. Only creates if create=True."""
+    safe = _sanitize_name(user_name)
     d = os.path.join(DATA_DIR, "users", safe)
-    os.makedirs(d, exist_ok=True)
+    if create:
+        os.makedirs(d, exist_ok=True)
     return d
 
 
@@ -878,6 +930,7 @@ def _load_user_connections(user_name: str) -> dict:
 
 
 def _save_user_connections(user_name: str, conns: dict):
+    _user_dir(user_name, create=True)
     with open(_user_connections_file(user_name), "w", encoding="utf-8") as f:
         json.dump(conns, f, indent=2, ensure_ascii=False)
 
@@ -891,6 +944,7 @@ def _load_user_active(user_name: str) -> dict:
 
 
 def _save_user_active(user_name: str, active: dict):
+    _user_dir(user_name, create=True)
     with open(_user_active_file(user_name), "w", encoding="utf-8") as f:
         json.dump(active, f, indent=2, ensure_ascii=False)
 
@@ -908,16 +962,18 @@ def _get_current_user(args: dict) -> str | None:
 MEMORY_DIR = os.path.join(DATA_DIR, "memory")
 
 
-def _memory_shared_dir() -> str:
+def _memory_shared_dir(create: bool = False) -> str:
     d = os.path.join(MEMORY_DIR, "shared")
-    os.makedirs(d, exist_ok=True)
+    if create:
+        os.makedirs(d, exist_ok=True)
     return d
 
 
-def _memory_user_dir(user_name: str) -> str:
-    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in user_name.lower())
+def _memory_user_dir(user_name: str, create: bool = False) -> str:
+    safe = _sanitize_name(user_name)
     d = os.path.join(MEMORY_DIR, "users", safe)
-    os.makedirs(d, exist_ok=True)
+    if create:
+        os.makedirs(d, exist_ok=True)
     return d
 
 
@@ -1156,6 +1212,84 @@ TOOLS = [
                 "kwargs": {"type": "object", "description": "Keyword arguments", "default": {}},
             },
             "required": ["model", "method"],
+        },
+    ),
+    # ── Message Post ──
+    Tool(
+        name="odoo_message_post",
+        description=(
+            "Post a message or internal note on any Odoo record (chatter). "
+            "Body supports Markdown formatting (headers, bold, italic, tables, "
+            "code blocks) — automatically converted to HTML. "
+            "Use message_type='note' for internal notes (employees only) "
+            "or 'comment' for public messages (visible to followers)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string", "description": "Model name (e.g. 'sale.order')"},
+                "res_id": {"type": "integer", "description": "Record ID to post on"},
+                "body": {"type": "string", "description": "Message body in Markdown format"},
+                "message_type": {
+                    "type": "string",
+                    "enum": ["note", "comment"],
+                    "default": "note",
+                    "description": "note = internal (employees only), comment = public (all followers)",
+                },
+                "subject": {"type": "string", "description": "Message subject (optional)"},
+                "partner_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Partner IDs to notify (optional)",
+                },
+                "attachment_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Existing ir.attachment IDs to attach (optional)",
+                },
+            },
+            "required": ["model", "res_id", "body"],
+        },
+    ),
+    # ── Attachment Upload ──
+    Tool(
+        name="odoo_attachment_upload",
+        description=(
+            "Upload a file as an ir.attachment on an Odoo record. "
+            "Returns the attachment ID which can be used with odoo_message_post "
+            "(attachment_ids parameter) or linked to any record."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string", "description": "Model name (e.g. 'sale.order')"},
+                "res_id": {"type": "integer", "description": "Record ID to attach to"},
+                "filename": {"type": "string", "description": "File name (e.g. 'report.pdf')"},
+                "content_base64": {"type": "string", "description": "Base64-encoded file content"},
+                "mimetype": {"type": "string", "description": "MIME type (optional, auto-detected)"},
+            },
+            "required": ["model", "res_id", "filename", "content_base64"],
+        },
+    ),
+    Tool(
+        name="odoo_attachment_download",
+        description=(
+            "Download an ir.attachment from Odoo by ID. "
+            "Returns filename, mimetype, size, and base64-encoded content."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "attachment_id": {"type": "integer", "description": "ir.attachment record ID"},
+                "save_path": {
+                    "type": "string", "default": "",
+                    "description": "Optional local path to save the file (instead of returning base64)",
+                },
+            },
+            "required": ["attachment_id"],
         },
     ),
     # ── Report ──
@@ -2170,6 +2304,12 @@ def _execute_tool(name: str, args: dict) -> Any:
 
     elif name == "identify":
         user_name = args["name"]
+        safe_name = _sanitize_name(user_name)
+        existing = _list_existing_users()
+
+        # Check if this is a known profile
+        is_new = safe_name not in existing
+
         _session_users["current"] = user_name
         conns = _load_user_connections(user_name)
         active = _load_user_active(user_name)
@@ -2191,13 +2331,21 @@ def _execute_tool(name: str, args: dict) -> Any:
                     logger.info(f"User {user_name}: auto-activated connection '{alias}'")
                 except Exception as e:
                     logger.warning(f"User {user_name}: auto-activate '{alias}' failed: {e}")
-        return {
-            "status": "identified",
+        result = {
+            "status": "new_profile" if is_new else "identified",
             "user": user_name,
+            "profile": safe_name,
             "connections": list(conns.keys()),
             "active": active.get("alias", None),
-            "data_dir": _user_dir(user_name),
+            "existing_profiles": existing,
         }
+        if is_new:
+            result["hint"] = (
+                f"Profile '{safe_name}' is new. "
+                f"Existing profiles: {', '.join(existing) if existing else '(none)'}. "
+                f"Data will be saved on first write."
+            )
+        return result
 
     elif name == "who_am_i":
         user = _get_current_user(args)
@@ -2360,12 +2508,12 @@ def _execute_tool(name: str, args: dict) -> Any:
         scope = args.get("scope", "personal")
 
         if scope == "shared":
-            directory = _memory_shared_dir()
+            directory = _memory_shared_dir(create=True)
         else:
             user = _get_current_user(args)
             if not user:
                 return {"error": "Call identify(name) first to write personal files"}
-            directory = _memory_user_dir(user)
+            directory = _memory_user_dir(user, create=True)
 
         fpath = os.path.join(directory, filename)
         existed = os.path.isfile(fpath)
@@ -2400,7 +2548,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         import shutil
         filename = args["filename"].strip()
         user_dir = _memory_user_dir(user)
-        shared_dir = _memory_shared_dir()
+        shared_dir = _memory_shared_dir(create=True)
 
         if filename == "*":
             files = [f for f in os.listdir(user_dir) if f.endswith(".md")]
@@ -2435,7 +2583,7 @@ def _execute_tool(name: str, args: dict) -> Any:
             return {"error": "Call identify(name) first"}
         import shutil
         filename = args["filename"].strip()
-        user_dir = _memory_user_dir(user)
+        user_dir = _memory_user_dir(user, create=True)
         shared_dir = _memory_shared_dir()
 
         if filename == "*":
@@ -2654,6 +2802,74 @@ def _execute_tool(name: str, args: dict) -> Any:
             args.get("args", []),
             args.get("kwargs", {}),
         )
+
+    elif name == "odoo_message_post":
+        model = args["model"]
+        res_id = int(args["res_id"])
+        body_md = args["body"]
+        msg_type = args.get("message_type", "note")
+        body_html = _md_to_html(body_md)
+        kwargs = {
+            "body": body_html,
+            "body_is_html": True,
+            "message_type": "comment",
+            "subtype_xmlid": "mail.mt_note" if msg_type == "note" else "mail.mt_comment",
+        }
+        if args.get("subject"):
+            kwargs["subject"] = args["subject"]
+        if args.get("partner_ids"):
+            kwargs["partner_ids"] = args["partner_ids"]
+        if args.get("attachment_ids"):
+            kwargs["attachment_ids"] = args["attachment_ids"]
+        message_id = conn.execute_kw(model, "message_post", [[res_id]], kwargs)
+        _notify_live_refresh(conn, "field", model, [res_id])
+        return {"message_id": message_id, "model": model, "res_id": res_id, "type": msg_type}
+
+    elif name == "odoo_attachment_upload":
+        model = args["model"]
+        res_id = int(args["res_id"])
+        filename = args["filename"]
+        content_b64 = args["content_base64"]
+        vals = {
+            "name": filename,
+            "datas": content_b64,
+            "res_model": model,
+            "res_id": res_id,
+            "type": "binary",
+        }
+        if args.get("mimetype"):
+            vals["mimetype"] = args["mimetype"]
+        att_id = conn.execute_kw("ir.attachment", "create", [vals])
+        return {"attachment_id": att_id, "filename": filename, "model": model, "res_id": res_id}
+
+    elif name == "odoo_attachment_download":
+        att_id = int(args["attachment_id"])
+        save_path = args.get("save_path", "")
+        records = conn.execute_kw(
+            "ir.attachment", "read", [[att_id]],
+            {"fields": ["name", "datas", "mimetype", "file_size"]},
+        )
+        if not records:
+            return {"error": f"Attachment {att_id} not found"}
+        rec = records[0]
+        content_b64 = rec.get("datas") or ""
+        result = {
+            "attachment_id": att_id,
+            "filename": rec.get("name", ""),
+            "mimetype": rec.get("mimetype", ""),
+            "size": rec.get("file_size", 0),
+        }
+        if save_path:
+            import base64
+            data = base64.b64decode(content_b64)
+            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            with open(save_path, "wb") as f:
+                f.write(data)
+            result["saved_to"] = save_path
+            result["bytes_written"] = len(data)
+        else:
+            result["content_base64"] = content_b64
+        return result
 
     elif name == "odoo_report":
         report_obj = xmlrpc.client.ServerProxy(
@@ -2985,7 +3201,8 @@ def create_app():
     oauth_client_secret = os.environ.get("MCP_OAUTH_CLIENT_SECRET", secret_token)
     protected_paths = {"/mcp", "/sse", "/messages", "/api/session/register",
                        "/api/session/list", "/api/session/update",
-                       "/api/session/delete", "/api/connect"}
+                       "/api/session/delete", "/api/connect",
+                       "/api/identify"}
     public_paths = {"/health", "/.well-known/oauth-authorization-server",
                     "/oauth/token", "/oauth/register"}
 
@@ -3420,6 +3637,50 @@ def create_app():
                 )
                 uid = conn.authenticate()
                 response = JSONResponse({"status": "connected", "uid": uid, **conn.to_dict()})
+            except Exception as e:
+                response = JSONResponse({"error": str(e)}, status_code=400)
+            await response(scope, receive, send)
+        elif path == "/api/identify" and scope["type"] == "http" and scope.get("method") == "POST":
+            from starlette.requests import Request
+            from starlette.responses import JSONResponse
+            request = Request(scope, receive)
+            try:
+                body = await request.json()
+                user_name = body.get("name", "")
+                if not user_name:
+                    response = JSONResponse({"error": "name required"}, status_code=400)
+                else:
+                    safe_name = _sanitize_name(user_name)
+                    existing = _list_existing_users()
+                    is_new = safe_name not in existing
+                    _session_users["current"] = user_name
+                    conns = _load_user_connections(user_name)
+                    active = _load_user_active(user_name)
+                    # Auto-activate if user has saved connection
+                    if active and active.get("alias") and active["alias"] in conns:
+                        c = conns[active["alias"]]
+                        try:
+                            conn = manager.add(
+                                alias="default",
+                                url=c["url"], db=c["db"],
+                                username=c["user"],
+                                api_key=c.get("api_key", ""),
+                                password=c.get("password", ""),
+                                protocol=c.get("protocol", "xmlrpc"),
+                            )
+                            conn.authenticate()
+                        except Exception:
+                            pass
+                    response = JSONResponse({
+                        "status": "new_profile" if is_new else "identified",
+                        "user": user_name,
+                        "profile": safe_name,
+                        "data_dir": f"/data/users/{safe_name}",
+                        "memory_dir": f"/data/memory/users/{safe_name}",
+                        "connections": list(conns.keys()),
+                        "active": active.get("alias"),
+                        "existing_profiles": existing,
+                    })
             except Exception as e:
                 response = JSONResponse({"error": str(e)}, status_code=400)
             await response(scope, receive, send)

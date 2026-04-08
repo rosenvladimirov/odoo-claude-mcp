@@ -13,5 +13,9 @@
   "teams": {
     "transport": "sse",
     "url": "http://teams-mcp:8087/sse"
+  },
+  "filesystem": {
+    "transport": "sse",
+    "url": "http://filesystem-mcp:8088/sse"
   }
 }

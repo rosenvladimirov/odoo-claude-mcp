@@ -19,7 +19,7 @@ networks:
     external: true
 
 services:
-  # ─── Claude Code web terminal (ttyd + Claude CLI) ─────────
+  # ─── Claude Code web terminal (ttyd + Claude CLI, multi-user) ──
   claude-terminal:
     build:
       context: ./claude-terminal
@@ -31,27 +31,21 @@ services:
       - backend
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - CLAUDE_THEME=${CLAUDE_THEME:-light}
-      - ODOO_API_KEY=${ODOO_API_KEY:-}
+      - CLAUDE_THEME=${CLAUDE_THEME:-github}
+      - MCP_URL=http://odoo-rpc-mcp:8084
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
       - "${TERMINAL_PORT:-8080}:8080"
     volumes:
-      # Host Claude config (API key, memory, sessions)
-      - ${HOME}/.claude:/home/claude/.claude
-      # Container-specific settings
-      - ./claude-terminal/settings.json:/home/claude/.claude/settings.json:ro
-      # MCP server configuration (odoo-rpc SSE)
-      - ./claude-terminal/.mcp.json:/home/claude/.mcp.json:ro
-      # MCP tools documentation (auto-loaded by Claude Code)
-      - ./claude-terminal/CLAUDE.md:/home/claude/CLAUDE.md:ro
-      # Claude main config file (login state, preferences)
-      - ${HOME}/.claude.json:/home/claude/.claude.json
-      # Host project workspace
-      - ${WORKSPACE_PATH:-${HOME}/Проекти}:/workspace
-      # Shared Odoo connections (API keys, saved locally)
-      - ${HOME}/odoo-claude-connections:/data
+      # Per-user persistent data (isolated HOME dirs)
+      - claude-user-data:/data/users
+      # Templates (read-only, copied to user dir on first login)
+      - ./claude-terminal/settings.json:/home/claude/template/settings.json:ro
+      - ./claude-terminal/.mcp.json:/home/claude/template/.mcp.json:ro
+      - ./claude-terminal/CLAUDE.md:/home/claude/template/CLAUDE.md:ro
+      # Shared data (connections, memory, sessions)
+      - ${HOME}/odoo-claude-connections:/shared-data
     tty: true
     stdin_open: true
     labels:
@@ -160,3 +154,26 @@ services:
     command: ["http", "--port", "8086", "--toolsets", "all"]
     labels:
       - "com.blconsulting.service=mcp-github"
+
+  # ─── Filesystem MCP (file/folder management) ──────────────
+  # BACKEND ONLY — sandboxed file operations on /repos volume
+  filesystem-mcp:
+    build:
+      context: ./filesystem-mcp
+      dockerfile: Dockerfile
+    container_name: mcp-filesystem
+    restart: unless-stopped
+    networks:
+      - backend
+    environment:
+      - MCP_PORT=8088
+    volumes:
+      - mcp-repos:/repos
+    labels:
+      - "com.blconsulting.service=mcp-filesystem"
+
+volumes:
+  claude-user-data:
+    driver: local
+  mcp-repos:
+    driver: local

@@ -5,6 +5,56 @@ All notable changes to the Odoo RPC MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-04-08
+
+### Added
+- **Filesystem MCP plugin**: Isolated file/folder management service
+  - Official `@modelcontextprotocol/server-filesystem` + supergateway (SSE)
+  - 14 tools: read_file, write_file, edit_file, create_directory, list_directory, move_file, delete_file, search_files, get_file_info, list_allowed_directories, read_multiple_files, read_media_file, search_within_files, tree
+  - Sandboxed in `/repos` volume — all operations restricted to allowed directories
+  - Docker image: `vladimirovrosen/odoo-filesystem-mcp:latest`
+- **GitHub MCP plugin** (rebuilt): Switched from HTTP to SSE transport
+  - Official `@modelcontextprotocol/server-github` + supergateway
+  - 26 tools: repos, issues, PRs, code search, file operations, branches
+  - Docker image: `vladimirovrosen/odoo-github-mcp:latest`
+- **Terminal theme support**: Per-user color themes via URL parameter
+  - 19 themes (9 light + 10 dark): github, dracula, monokai, solarized, gruvbox, atom, etc.
+  - `themes.json` — shared theme definitions
+  - OSC escape sequences applied per-session in `start-session.sh`
+  - Odoo module: `claude_theme` Selection field in user preferences
+  - URL parameter: `&arg=CLAUDE_THEME=dracula`
+- **`/api/identify` REST endpoint**: Terminal auto-identifies with MCP server on login
+  - Returns profile name, data directories, existing profiles list
+  - Creates symlinks in terminal HOME to shared MCP data (`mcp-data`, `mcp-memory`)
+- **`odoo_attachment_download` tool**: Download `ir.attachment` by ID
+  - Returns base64 content, filename, mimetype, size
+  - Optional `save_path` to save file directly to disk
+- **Cyrillic transliteration**: User names properly converted to Latin for directory names
+  - `Росен` → `rosen`, `Иван Петров` → `ivan_petrov`
+  - Supports Bulgarian, Ukrainian, Russian Cyrillic + accented Latin (NFKD)
+- **Lazy directory creation**: User/memory directories created only on write, not on read
+  - `identify()` no longer creates empty directories
+  - Returns `existing_profiles` list and `new_profile` status for unknown users
+
+### Changed
+- Total tools on single endpoint: 139 (60 native + 79 proxied)
+- Proxied breakdown: portainer 39 + github 26 + filesystem 14
+- `entrypoint.sh`: reads theme from `themes.json` instead of bash associative array
+- `docker-compose.yml`: added `filesystem-mcp` service, `mcp-repos` volume, fixed `CLAUDE_THEME` default
+- `Dockerfile`: added `themes.json`, `gateway.js`, `landing.html` to image build
+
+### Fixed
+- `portainer-mcp` compatibility with Portainer 2.33.x (`-disable-version-check` flag)
+- `proxy_services.json` Docker mount conflict (directory vs file)
+- Odoo module: defensive `getattr()` for `claude_theme` field (prevents crash before module upgrade)
+
+### Docker Hub Images
+- `vladimirovrosen/odoo-rpc-mcp:latest`
+- `vladimirovrosen/odoo-claude-terminal:latest`
+- `vladimirovrosen/odoo-filesystem-mcp:latest` (NEW)
+- `vladimirovrosen/odoo-github-mcp:latest` (NEW)
+- `vladimirovrosen/odoo-portainer-mcp:latest`
+
 ## [2.0.0] - 2026-04-07
 
 ### Added

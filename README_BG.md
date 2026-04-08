@@ -9,43 +9,51 @@ Docker базиран мост между [Claude Code CLI](https://docs.anthrop
 ## Архитектура
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Браузър                                                        │
-│  ┌───────────────────────────┐   ┌───────────────────────────┐  │
-│  │  Odoo 18 (инстанция)      │   │  Claude Terminal (:8080)  │  │
-│  │                           │   │  xterm.js + Claude Code   │  │
-│  │  [AI] бутон в chatter ────┼──►│                           │  │
-│  │  или list view            │   │  claude> "покажи ми       │  │
-│  │                           │   │   неплатените фактури..." │  │
-│  └───────────────────────────┘   └─────────────┬─────────────┘  │
-└────────────────────────────────────────────────┼────────────────┘
-                                                 │ MCP (HTTP)
-                                    ┌────────────▼────────────┐
-                                    │  odoo-rpc-mcp (:8084)   │
-                                    │  18 инструмента         │
-                                    │  XML-RPC / JSON-RPC     │
-                                    │  Множество връзки       │
-                                    └────────────┬────────────┘
-                                                 │ RPC
-                                    ┌────────────▼────────────┐
-                                    │  Odoo инстанция (:8069) │
-                                    │  Версия 8+              │
-                                    └─────────────────────────┘
+Internet / Cloudflare
+  │
+  ├─► claude-terminal (:8080)          ← уеб терминал, xterm.js + Claude Code
+  │     │ MCP (HTTP)
+  │     ▼
+  └─► odoo-rpc-mcp (:8084)            ← GATEWAY, 60 native + 79 proxied = 139 tools
+        │
+        ├── filesystem-mcp (:8088)     ← plugin: файлове/папки, 14 tools
+        ├── github-mcp     (:8086)     ← plugin: GitHub API, 26 tools
+        ├── portainer-mcp  (:8085)     ← plugin: Docker mgmt, 39 tools
+        └── teams-mcp      (:8087)     ← plugin: MS Teams, 6 tools
+              │
+              └── backend мрежа (без публичен достъп)
 ```
 
-### Два Docker сървиса
+### Философия на плъгините
 
-| Сървис | Порт | Описание |
-|--------|------|----------|
-| `claude-terminal` | 8080 | [ttyd](https://github.com/tsl0922/ttyd) уеб терминал с Claude Code CLI |
-| `odoo-rpc-mcp` | 8084 | MCP сървър с 18 инструмента за Odoo RPC операции |
+Проектът следва принципа **"една услуга — една отговорност"**:
 
-### Как работят заедно
+- **Изолация**: Всеки плъгин е отделен Docker контейнер на backend мрежата. Няма публични портове, няма директен достъп от интернет. Ако плъгинът падне, останалите продължават да работят.
+- **Единствена функция**: Filesystem MCP управлява файлове. GitHub MCP говори с GitHub API. Portainer MCP управлява Docker. Никой плъгин не прави повече от едно нещо.
+- **Plug & Play**: Добавяне на нов плъгин = нов контейнер + един ред в `proxy_services.json`. Без промяна на код. Gateway-ят автоматично discover-ва tools при старт.
+- **Самостоятелна работа**: Всеки плъгин може да се стартира и ползва независимо — директно по hostname:port, без gateway. Gateway-ят само агрегира и проксира.
+- **Споделен storage**: Плъгините споделят Docker volumes за данни (repos, memory, connections). Всеки вижда само каквото му е mount-нато.
 
-1. **claude-terminal** стартира ttyd (уеб терминал базиран на xterm.js) и вътре пуска Claude Code CLI
-2. Claude Code е конфигуриран да ползва MCP сървъра чрез `.mcp.json`
-3. **odoo-rpc-mcp** приема MCP заявки и ги превежда в XML-RPC/JSON-RPC извиквания към Odoo
-4. Двата контейнера споделят файл с credentials: `~/odoo-claude-connections/connections.json`
+### Добавяне на нов плъгин
+
+1. Стартирай MCP контейнер на backend мрежата (stdio + supergateway или native HTTP/SSE)
+2. Добави един ред в `proxy_services.json`:
+   ```json
+   {"my-plugin": {"transport": "sse", "url": "http://my-plugin:PORT/sse"}}
+   ```
+3. Извикай `proxy_refresh` или рестартирай gateway-а
+4. Готово — tools-ите на плъгина са достъпни на единния endpoint (:8084)
+
+### Docker сървиси
+
+| Сървис | Порт | Мрежа | Описание |
+|--------|------|-------|----------|
+| `claude-terminal` | 8080 | public | [ttyd](https://github.com/tsl0922/ttyd) уеб терминал, 19 теми, multi-user |
+| `odoo-rpc-mcp` | 8084 | public + backend | MCP gateway — 60 native tools + proxy |
+| `filesystem-mcp` | 8088 | backend | Файлови операции, sandboxed в `/repos` |
+| `github-mcp` | 8086 | backend | GitHub repos, issues, PRs, code search |
+| `portainer-mcp` | 8085 | backend | Docker container/stack management |
+| `teams-mcp` | 8087 | backend | Microsoft Teams messaging |
 
 ---
 
@@ -387,7 +395,7 @@ python tools/glb_viewer.py model.glb
 | `ODOO_API_KEY` | | Odoo API ключ (предпочитан пред парола) |
 | `ODOO_PROTOCOL` | `xmlrpc` | `xmlrpc` (Odoo 8+) или `jsonrpc` (Odoo 14+) |
 | `WORKSPACE_PATH` | `./_workspace` | Хост директория, mount-ната в `/workspace` |
-| `CLAUDE_THEME` | `light` | Тема на терминала: `light` или `dark` |
+| `CLAUDE_THEME` | `github` | Тема: github, dracula, monokai, solarized-light/dark, gruvbox-dark, atom, и още 12 |
 | `SINGLE_CONNECTION` | `false` | Скрива connect/disconnect, ползва само "default" |
 
 ### Docker volumes
@@ -413,30 +421,55 @@ python tools/glb_viewer.py model.glb
 
 ```
 odoo-claude-mcp/
-├── docker-compose.yml          # Оркестрация на сървисите
+├── docker-compose.yml          # Оркестрация на всички сървиси
 ├── .env.example                # Шаблон за конфигурация
-├── server.py                   # Самостоятелен MCP сървър (SSE транспорт)
-├── Dockerfile                  # Image за самостоятелен сървър
+├── proxy_services.json         # Конфигурация на плъгините (gitignored)
+├── proxy_services.json.example # Шаблон за плъгини
+├── CHANGELOG.md                # История на промените
 │
 ├── claude-terminal/            # Уеб терминал сървис
-│   ├── Dockerfile              # Node 22 + ttyd (компилиран от сорс) + Claude Code CLI
-│   ├── entrypoint.sh           # Стартира ttyd с конфигурация на тема
-│   ├── start-session.sh        # Парсва URL параметри → сесиен контекст → пуска claude
-│   ├── CLAUDE.md               # База от знания за Odoo (чете се от Claude)
+│   ├── Dockerfile              # Node 22 + ttyd (от сорс) + Claude Code CLI
+│   ├── entrypoint.sh           # Стартира ttyd с тема от themes.json
+│   ├── start-session.sh        # Auth → identify → symlink → theme → exec claude
+│   ├── gateway.js              # Node.js reverse proxy (landing page + ttyd)
+│   ├── landing.html            # Landing page при достъп без параметри
+│   ├── themes.json             # 19 xterm.js цветови теми
+│   ├── CLAUDE.md               # База от знания за Odoo
 │   ├── settings.json           # Claude Code настройки
-│   └── .mcp.json               # MCP сървър endpoint (вътрешна Docker мрежа)
+│   └── .mcp.json               # MCP endpoint (вътрешна Docker мрежа)
 │
-├── odoo-rpc-mcp/               # MCP сървър сървис
-│   ├── Dockerfile              # Python 3.13-slim, non-root потребител
-│   ├── server.py               # 18 MCP инструмента (CRUD + фискални позиции)
-│   ├── requirements.txt        # mcp >= 1.0.0, uvicorn
-│   └── odoo_connect_cli.py     # CLI мениджър на връзки с SSH поддръжка
+├── odoo-rpc-mcp/               # MCP gateway (главен сървис)
+│   ├── Dockerfile              # Python 3.13-slim, non-root
+│   ├── server.py               # 60 native tools + proxy engine
+│   ├── google_service.py       # Gmail + Calendar OAuth2
+│   ├── telegram_service.py     # Telegram клиент (Telethon)
+│   ├── requirements.txt        # mcp, uvicorn, telethon, google-api, markdown
+│   └── odoo_connect_cli.py     # CLI мениджър на връзки
 │
-└── tools/                      # Самостоятелни десктоп и CLI програми
-    ├── odoo_connect.py         # GTK4 GUI мениджър на връзки (GNOME)
+├── filesystem-mcp/             # Плъгин: файлови операции
+│   └── Dockerfile              # @modelcontextprotocol/server-filesystem + supergateway
+│
+├── portainer-mcp/              # Плъгин: Docker management
+│   └── Dockerfile              # portainer-mcp binary + supergateway
+│
+├── teams-mcp/                  # Плъгин: Microsoft Teams
+│   └── Dockerfile              # InditexTech mcp-teams-server + supergateway
+│
+└── tools/                      # Десктоп и CLI инструменти (хост машина)
+    ├── odoo_connect.py         # GTK4 GUI мениджър на връзки
     ├── odoo_module_analyzer.py # Odoo модул → Claude memory файл
     └── glb_viewer.py           # GTK4 + OpenGL 3D GLB визуализатор
 ```
+
+### Docker Hub Images
+
+| Image | Описание |
+|-------|----------|
+| `vladimirovrosen/odoo-rpc-mcp` | MCP gateway (60 native tools) |
+| `vladimirovrosen/odoo-claude-terminal` | Уеб терминал (ttyd + Claude Code) |
+| `vladimirovrosen/odoo-filesystem-mcp` | Filesystem плъгин (14 tools) |
+| `vladimirovrosen/odoo-github-mcp` | GitHub плъгин (26 tools) |
+| `vladimirovrosen/odoo-portainer-mcp` | Portainer плъгин (39 tools) |
 
 ---
 
