@@ -1632,6 +1632,200 @@ TOOLS = [
             },
         },
     ),
+    # ── Public Access (web session controller routes) ──
+    Tool(
+        name="public_access_export_xlsx",
+        description="Export Odoo list data as XLSX file via web session. Returns base64.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string", "description": "Model name (e.g. 'sale.order')"},
+                "fields": {"type": "array", "items": {"type": "string"}, "description": "Field names to export"},
+                "domain": {"type": "array", "default": [], "description": "Search domain"},
+                "import_compat": {"type": "boolean", "default": False},
+                "save_path": {"type": "string", "default": ""},
+            },
+            "required": ["model", "fields"],
+        },
+    ),
+    Tool(
+        name="public_access_export_csv",
+        description="Export Odoo list data as CSV via web session.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string"},
+                "fields": {"type": "array", "items": {"type": "string"}},
+                "domain": {"type": "array", "default": []},
+                "import_compat": {"type": "boolean", "default": False},
+                "save_path": {"type": "string", "default": ""},
+            },
+            "required": ["model", "fields"],
+        },
+    ),
+    Tool(
+        name="public_access_report_pdf",
+        description="Download PDF report via web session. Route: /report/pdf/{report_name}/{doc_ids}.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "report_name": {"type": "string", "description": "Technical report name (e.g. 'account.report_invoice')"},
+                "ids": {"type": "array", "items": {"type": "integer"}},
+                "save_path": {"type": "string", "default": ""},
+            },
+            "required": ["report_name", "ids"],
+        },
+    ),
+    Tool(
+        name="public_access_report_html",
+        description="Render report as HTML via web session.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "report_name": {"type": "string"},
+                "ids": {"type": "array", "items": {"type": "integer"}},
+            },
+            "required": ["report_name", "ids"],
+        },
+    ),
+    Tool(
+        name="public_access_download",
+        description="Download attachment/binary content by ID via /web/content/{id}. Public route.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "content_id": {"type": "integer", "description": "Attachment ID"},
+                "save_path": {"type": "string", "default": ""},
+            },
+            "required": ["content_id"],
+        },
+    ),
+    Tool(
+        name="public_access_image",
+        description="Download image field from record via /web/image/{model}/{id}/{field}.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string"},
+                "record_id": {"type": "integer"},
+                "field": {"type": "string", "default": "image_1920"},
+                "save_path": {"type": "string", "default": ""},
+            },
+            "required": ["model", "record_id"],
+        },
+    ),
+    Tool(
+        name="public_access_barcode",
+        description="Generate barcode image via /report/barcode/{type}/{value}.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "barcode_type": {"type": "string", "enum": ["Code128", "QR", "EAN13", "EAN8", "UPC-A", "Code39"], "default": "Code128"},
+                "value": {"type": "string", "description": "Barcode value"},
+                "width": {"type": "integer", "default": 600},
+                "height": {"type": "integer", "default": 100},
+                "save_path": {"type": "string", "default": ""},
+            },
+            "required": ["value"],
+        },
+    ),
+    Tool(
+        name="public_access_portal_home",
+        description="Get portal home page content via web session (/my/home).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+            },
+        },
+    ),
+    Tool(
+        name="public_access_portal_invoices",
+        description="Get list of portal invoices (/my/invoices). Returns HTML page content.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "page": {"type": "integer", "default": 1},
+            },
+        },
+    ),
+    Tool(
+        name="public_access_portal_orders",
+        description="Get list of portal sale orders (/my/orders). Returns HTML page content.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "page": {"type": "integer", "default": 1},
+            },
+        },
+    ),
+    Tool(
+        name="public_access_portal_purchases",
+        description="Get list of portal purchase orders (/my/purchase).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "page": {"type": "integer", "default": 1},
+            },
+        },
+    ),
+    Tool(
+        name="public_access_portal_tickets",
+        description="Get list of portal helpdesk tickets (/my/tickets).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "page": {"type": "integer", "default": 1},
+            },
+        },
+    ),
+    Tool(
+        name="public_access_report_xlsx",
+        description="Download XLSX report via OCA reporting-engine (/report/xlsx/{name}/{ids}).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "report_name": {"type": "string"},
+                "ids": {"type": "array", "items": {"type": "integer"}},
+                "save_path": {"type": "string", "default": ""},
+            },
+            "required": ["report_name", "ids"],
+        },
+    ),
+    Tool(
+        name="public_access_shop",
+        description="Get website shop product listing (/shop). Returns HTML.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "page": {"type": "integer", "default": 1},
+                "search": {"type": "string", "default": ""},
+            },
+        },
+    ),
+    Tool(
+        name="public_access_sitemap",
+        description="Download sitemap.xml from Odoo website.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+            },
+        },
+    ),
     # ── Report ──
     Tool(
         name="odoo_report",
@@ -3398,6 +3592,208 @@ def _execute_tool(name: str, args: dict) -> Any:
             ws.destroy()
             return {"status": "logged_out", "connection": alias}
         return {"status": "no_session", "connection": alias}
+
+    # ── Public Access handlers ──
+
+    elif name == "public_access_export_xlsx" or name == "public_access_export_csv":
+        ws = _get_web_session(args)
+        import base64 as b64, re as _re
+        model = args["model"]
+        fields = args["fields"]
+        domain = args.get("domain", [])
+
+        # Get record IDs
+        ids = ws.call_kw(model, "search", [domain])
+        if not ids:
+            return {"status": "empty", "records": 0}
+
+        # Get CSRF token from /odoo page
+        csrf_page = ws.session.get(f"{ws.url}/odoo", verify=False, timeout=15)
+        csrf_match = _re.search(r'csrf_token[^"\']*["\x27]([a-f0-9]+o\d+)["\x27]', csrf_page.text)
+        csrf = csrf_match.group(1) if csrf_match else ""
+
+        # Build export params with label (required by Odoo export controller)
+        fmt = "xlsx" if name.endswith("xlsx") else "csv"
+        export_fields = [{"name": f, "label": f} for f in fields]
+
+        import json as _json
+        export_data = _json.dumps({
+            "model": model,
+            "fields": export_fields,
+            "ids": ids,
+            "domain": domain,
+            "import_compat": args.get("import_compat", False),
+        })
+
+        resp = ws.session.post(
+            f"{ws.url}/web/export/{fmt}",
+            data={"data": export_data, "csrf_token": csrf},
+            verify=False, timeout=120,
+        )
+        if resp.status_code != 200:
+            return {"error": f"HTTP {resp.status_code}", "body": resp.text[:500]}
+        content = resp.content
+        save_path = args.get("save_path", "")
+        if save_path:
+            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            with open(save_path, "wb") as f:
+                f.write(content)
+            return {"status": "saved", "path": save_path, "size": len(content), "format": fmt, "records": len(ids)}
+        return {"content_base64": b64.b64encode(content).decode(), "size": len(content), "format": fmt, "records": len(ids)}
+
+    elif name == "public_access_report_pdf":
+        ws = _get_web_session(args)
+        import base64 as b64
+        ids_str = ",".join(str(i) for i in args["ids"])
+        resp = ws.session.get(
+            f"{ws.url}/report/pdf/{args['report_name']}/{ids_str}",
+            verify=False, timeout=120,
+        )
+        if resp.status_code != 200:
+            return {"error": f"HTTP {resp.status_code}", "body": resp.text[:500]}
+        save_path = args.get("save_path", "")
+        if save_path:
+            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            with open(save_path, "wb") as f:
+                f.write(resp.content)
+            return {"status": "saved", "path": save_path, "size": len(resp.content)}
+        return {"content_base64": b64.b64encode(resp.content).decode(), "size": len(resp.content)}
+
+    elif name == "public_access_report_html":
+        ws = _get_web_session(args)
+        ids_str = ",".join(str(i) for i in args["ids"])
+        resp = ws.session.get(
+            f"{ws.url}/report/html/{args['report_name']}/{ids_str}",
+            verify=False, timeout=120,
+        )
+        return {"status": resp.status_code, "html": resp.text[:10000], "size": len(resp.content)}
+
+    elif name == "public_access_download":
+        ws = _get_web_session(args)
+        import base64 as b64
+        resp = ws.session.get(
+            f"{ws.url}/web/content/{args['content_id']}",
+            verify=False, timeout=120,
+        )
+        if resp.status_code != 200:
+            return {"error": f"HTTP {resp.status_code}"}
+        ct = resp.headers.get("Content-Type", "")
+        cd = resp.headers.get("Content-Disposition", "")
+        filename = ""
+        if "filename=" in cd:
+            filename = cd.split("filename=")[-1].strip('"').strip("'")
+        save_path = args.get("save_path", "")
+        if save_path:
+            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            with open(save_path, "wb") as f:
+                f.write(resp.content)
+            return {"status": "saved", "path": save_path, "size": len(resp.content), "content_type": ct, "filename": filename}
+        return {"content_base64": b64.b64encode(resp.content).decode(), "size": len(resp.content), "content_type": ct, "filename": filename}
+
+    elif name == "public_access_image":
+        ws = _get_web_session(args)
+        import base64 as b64
+        field = args.get("field", "image_1920")
+        resp = ws.session.get(
+            f"{ws.url}/web/image/{args['model']}/{args['record_id']}/{field}",
+            verify=False, timeout=60,
+        )
+        if resp.status_code != 200:
+            return {"error": f"HTTP {resp.status_code}"}
+        ct = resp.headers.get("Content-Type", "")
+        save_path = args.get("save_path", "")
+        if save_path:
+            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            with open(save_path, "wb") as f:
+                f.write(resp.content)
+            return {"status": "saved", "path": save_path, "size": len(resp.content), "content_type": ct}
+        return {"content_base64": b64.b64encode(resp.content).decode(), "size": len(resp.content), "content_type": ct}
+
+    elif name == "public_access_barcode":
+        ws = _get_web_session(args)
+        import base64 as b64
+        btype = args.get("barcode_type", "Code128")
+        value = args["value"]
+        w = args.get("width", 600)
+        h = args.get("height", 100)
+        resp = ws.session.get(
+            f"{ws.url}/report/barcode/{btype}/{value}",
+            params={"width": w, "height": h},
+            verify=False, timeout=30,
+        )
+        if resp.status_code != 200:
+            return {"error": f"HTTP {resp.status_code}"}
+        save_path = args.get("save_path", "")
+        if save_path:
+            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            with open(save_path, "wb") as f:
+                f.write(resp.content)
+            return {"status": "saved", "path": save_path, "size": len(resp.content)}
+        return {"content_base64": b64.b64encode(resp.content).decode(), "size": len(resp.content), "type": btype}
+
+    elif name in ("public_access_portal_home", "public_access_portal_invoices",
+                   "public_access_portal_orders", "public_access_portal_purchases",
+                   "public_access_portal_tickets"):
+        ws = _get_web_session(args)
+        path_map = {
+            "public_access_portal_home": "/my/home",
+            "public_access_portal_invoices": "/my/invoices",
+            "public_access_portal_orders": "/my/orders",
+            "public_access_portal_purchases": "/my/purchase",
+            "public_access_portal_tickets": "/my/tickets",
+        }
+        path = path_map[name]
+        page = args.get("page", 1)
+        params = {"page": page} if page > 1 else {}
+        resp = ws.session.get(f"{ws.url}{path}", params=params, verify=False, timeout=30)
+        # Extract useful text from HTML
+        body = resp.text
+        # Simple extraction: strip scripts/styles, keep text
+        import re
+        body = re.sub(r'<script[^>]*>.*?</script>', '', body, flags=re.DOTALL)
+        body = re.sub(r'<style[^>]*>.*?</style>', '', body, flags=re.DOTALL)
+        body = re.sub(r'<[^>]+>', ' ', body)
+        body = re.sub(r'\s+', ' ', body).strip()
+        return {"status": resp.status_code, "path": path, "text": body[:8000], "size": len(resp.content)}
+
+    elif name == "public_access_report_xlsx":
+        ws = _get_web_session(args)
+        import base64 as b64
+        ids_str = ",".join(str(i) for i in args["ids"])
+        resp = ws.session.get(
+            f"{ws.url}/report/xlsx/{args['report_name']}/{ids_str}",
+            verify=False, timeout=120,
+        )
+        if resp.status_code != 200:
+            return {"error": f"HTTP {resp.status_code}", "body": resp.text[:500]}
+        save_path = args.get("save_path", "")
+        if save_path:
+            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            with open(save_path, "wb") as f:
+                f.write(resp.content)
+            return {"status": "saved", "path": save_path, "size": len(resp.content)}
+        return {"content_base64": b64.b64encode(resp.content).decode(), "size": len(resp.content)}
+
+    elif name == "public_access_shop":
+        ws = _get_web_session(args)
+        params = {}
+        if args.get("page", 1) > 1:
+            params["page"] = args["page"]
+        if args.get("search"):
+            params["search"] = args["search"]
+        resp = ws.session.get(f"{ws.url}/shop", params=params, verify=False, timeout=30)
+        import re
+        body = resp.text
+        body = re.sub(r'<script[^>]*>.*?</script>', '', body, flags=re.DOTALL)
+        body = re.sub(r'<style[^>]*>.*?</style>', '', body, flags=re.DOTALL)
+        body = re.sub(r'<[^>]+>', ' ', body)
+        body = re.sub(r'\s+', ' ', body).strip()
+        return {"status": resp.status_code, "text": body[:8000], "size": len(resp.content)}
+
+    elif name == "public_access_sitemap":
+        ws = _get_web_session(args)
+        resp = ws.session.get(f"{ws.url}/sitemap.xml", verify=False, timeout=30)
+        return {"status": resp.status_code, "content": resp.text[:10000], "size": len(resp.content)}
 
     elif name == "odoo_report":
         report_obj = xmlrpc.client.ServerProxy(
