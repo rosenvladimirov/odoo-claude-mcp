@@ -1,0 +1,2 @@
+mcp>=1.0.0
+oca-maintainers-tools @ git+https://github.com/OCA/maintainer-tools.git

@@ -17,5 +17,13 @@
   "filesystem": {
     "transport": "sse",
     "url": "http://filesystem-mcp:8088/sse"
+  },
+  "oca": {
+    "transport": "sse",
+    "url": "http://oca-mcp:8089/sse"
+  },
+  "ee": {
+    "transport": "sse",
+    "url": "http://ee-mcp:8090/sse"
   }
 }

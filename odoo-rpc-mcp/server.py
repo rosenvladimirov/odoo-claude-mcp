@@ -863,12 +863,221 @@ def _conn(args: dict) -> OdooConnection:
     return _mgr().get(args.get("connection", "default"))
 
 
+# ─── Web Session Manager ─────────────────────────────────
+
+import requests as http_requests
+
+_web_sessions: dict[str, "OdooWebSession"] = {}
+
+
+class OdooWebSession:
+    """Persistent Odoo web session with cookie-based authentication."""
+
+    def __init__(self, url: str, db: str, login: str, password: str):
+        self.url = url.rstrip("/")
+        self.db = db
+        self.login = login
+        self.password = password
+        self.session = http_requests.Session()
+        self.session.headers.update({"Content-Type": "application/json"})
+        self.uid = None
+        self.session_info = None
+        self._rpc_id = 0
+
+    def _next_id(self) -> int:
+        self._rpc_id += 1
+        return self._rpc_id
+
+    def authenticate(self) -> dict:
+        """Login via /web/session/authenticate, stores session_id cookie."""
+        resp = self.session.post(
+            f"{self.url}/web/session/authenticate",
+            json={
+                "jsonrpc": "2.0", "method": "call",
+                "params": {"db": self.db, "login": self.login, "password": self.password},
+                "id": self._next_id(),
+            },
+            verify=False, timeout=30,
+        )
+        data = resp.json()
+        if "error" in data:
+            raise RuntimeError(data["error"].get("message", str(data["error"])))
+        result = data.get("result", {})
+        self.uid = result.get("uid")
+        if not self.uid:
+            raise RuntimeError("Authentication failed: no uid returned")
+        self.session_info = result
+        return result
+
+    @property
+    def authenticated(self) -> bool:
+        return self.uid is not None
+
+    @property
+    def session_id(self) -> str:
+        return self.session.cookies.get("session_id", "")
+
+    def _jsonrpc(self, url: str, params: dict, timeout: int = 60) -> Any:
+        """Execute JSON-RPC call with session cookie."""
+        if not self.authenticated:
+            self.authenticate()
+        resp = self.session.post(
+            f"{self.url}{url}",
+            json={
+                "jsonrpc": "2.0", "method": "call",
+                "params": params,
+                "id": self._next_id(),
+            },
+            verify=False, timeout=timeout,
+        )
+        data = resp.json()
+        if "error" in data:
+            err = data["error"]
+            code = err.get("code", 0)
+            if code == 100:  # Session expired
+                self.authenticate()
+                return self._jsonrpc(url, params, timeout)
+            raise RuntimeError(err.get("data", {}).get("message", err.get("message", str(err))))
+        return data.get("result")
+
+    def call_kw(self, model: str, method: str, args: list = None, kwargs: dict = None) -> Any:
+        """Call model method via /web/dataset/call_kw."""
+        return self._jsonrpc("/web/dataset/call_kw", {
+            "model": model, "method": method,
+            "args": args or [], "kwargs": kwargs or {},
+        })
+
+    def web_read(self, model: str, domain: list, fields: list,
+                 limit: int = 80, offset: int = 0, order: str = "") -> Any:
+        """Search+read via /web/dataset/call_kw (frontend format)."""
+        return self._jsonrpc("/web/dataset/call_kw", {
+            "model": model, "method": "web_search_read",
+            "args": [],
+            "kwargs": {
+                "domain": domain, "fields": fields,
+                "limit": limit, "offset": offset, "order": order,
+            },
+        })
+
+    def export_data(self, model: str, domain: list, fields: list,
+                    import_compat: bool = False) -> Any:
+        """Export data via /web/export/csv."""
+        # First get record IDs
+        ids = self.call_kw(model, "search", [domain])
+        return self.call_kw(model, "export_data", [ids, fields], {
+            "import_compat": import_compat,
+        })
+
+    def get_report_pdf(self, report_name: str, ids: list) -> bytes:
+        """Download PDF report via /report/pdf."""
+        if not self.authenticated:
+            self.authenticate()
+        ids_str = ",".join(str(i) for i in ids)
+        resp = self.session.get(
+            f"{self.url}/report/pdf/{report_name}/{ids_str}",
+            verify=False, timeout=120,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Report download failed: HTTP {resp.status_code}")
+        return resp.content
+
+    def get_binary(self, model: str, record_id: int, field: str = "datas") -> bytes:
+        """Download binary field via /web/content."""
+        if not self.authenticated:
+            self.authenticate()
+        resp = self.session.get(
+            f"{self.url}/web/content/{model}/{record_id}/{field}",
+            verify=False, timeout=120,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Binary download failed: HTTP {resp.status_code}")
+        return resp.content
+
+    def raw_request(self, path: str, method: str = "GET",
+                    data: dict = None, params: dict = None) -> dict:
+        """Raw HTTP request to any controller URL."""
+        if not self.authenticated:
+            self.authenticate()
+        url = f"{self.url}{path}"
+        if method.upper() == "GET":
+            resp = self.session.get(url, params=params, verify=False, timeout=60)
+        else:
+            resp = self.session.post(
+                url, json=data or params, verify=False, timeout=60,
+            )
+        content_type = resp.headers.get("Content-Type", "")
+        if "application/json" in content_type:
+            return {"status": resp.status_code, "json": resp.json()}
+        return {
+            "status": resp.status_code,
+            "content_type": content_type,
+            "body": resp.text[:5000],
+            "size": len(resp.content),
+        }
+
+    def destroy(self):
+        """Logout via /web/session/destroy."""
+        try:
+            self._jsonrpc("/web/session/destroy", {})
+        except Exception:
+            pass
+        self.uid = None
+        self.session_info = None
+
+    def to_dict(self) -> dict:
+        return {
+            "url": self.url, "db": self.db, "login": self.login,
+            "uid": self.uid, "authenticated": self.authenticated,
+            "session_id": self.session_id[:12] + "..." if self.session_id else None,
+        }
+
+
+def _get_web_session(args: dict) -> OdooWebSession:
+    """Get or create web session from connection alias."""
+    alias = args.get("connection", "default")
+    if alias in _web_sessions and _web_sessions[alias].authenticated:
+        return _web_sessions[alias]
+    raise RuntimeError(f"No active web session for '{alias}'. Call odoo_web_login first.")
+
+
 # ─── Per-user storage ──────────────────────────────────────
 
 # In-memory: mcp_session_id -> user_name
 _session_users: dict[str, str] = {}
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
+REPOS_DIR = os.environ.get("REPOS_DIR", "/repos")
+
+
+def _parse_fs_module(mod_path: str, manifest_path: str, source: str,
+                     repo: str, instance: str) -> dict:
+    """Parse a module from filesystem for odoo_module_info."""
+    import ast as _ast
+    info = {
+        "source": source,
+        "repo": repo,
+        "instance": instance,
+        "path": mod_path,
+    }
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            data = _ast.literal_eval(f.read())
+        info["version"] = data.get("version", "")
+        info["license"] = data.get("license", "")
+        info["summary"] = data.get("summary", data.get("description", ""))[:200]
+        info["depends"] = data.get("depends", [])
+        info["auto_install"] = data.get("auto_install", False)
+        info["installable"] = data.get("installable", True)
+        info["category"] = data.get("category", "")
+        info["author"] = data.get("author", "")
+        info["application"] = data.get("application", False)
+        info["countries"] = data.get("countries", [])
+        ext = data.get("external_dependencies", {})
+        if ext:
+            info["external_dependencies"] = ext
+    except Exception as e:
+        info["parse_error"] = str(e)
+    return info
 
 
 _CYR_TO_LAT = str.maketrans({
@@ -1290,6 +1499,137 @@ TOOLS = [
                 },
             },
             "required": ["attachment_id"],
+        },
+    ),
+    # ── Module inspector ──
+    Tool(
+        name="odoo_module_info",
+        description=(
+            "Get detailed information about an Odoo module: Odoo RPC state + "
+            "filesystem locations (OCA, EE, custom repos). Shows where the module "
+            "physically exists, its manifest, dependencies, and installation status."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "module": {"type": "string", "description": "Technical module name (e.g. 'account_asset')"},
+            },
+            "required": ["module"],
+        },
+    ),
+    # ── Web Session (cookie-based HTTP access) ──
+    Tool(
+        name="odoo_web_login",
+        description=(
+            "Login to Odoo web interface with user/password. Creates a persistent "
+            "cookie session for accessing web controllers, exports, reports, and "
+            "any frontend URL. Session is reused until logout or expiry."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "url": {"type": "string", "description": "Odoo URL (default: from connection)"},
+                "db": {"type": "string", "description": "Database (default: from connection)"},
+                "login": {"type": "string", "description": "Username/email"},
+                "password": {"type": "string", "description": "Password or API key"},
+            },
+        },
+    ),
+    Tool(
+        name="odoo_web_call",
+        description=(
+            "Call any Odoo model method via web session (JSON-RPC /web/dataset/call_kw). "
+            "Works like odoo_execute but uses cookie session instead of XML-RPC."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string", "description": "Model name"},
+                "method": {"type": "string", "description": "Method name"},
+                "args": {"type": "array", "default": []},
+                "kwargs": {"type": "object", "default": {}},
+            },
+            "required": ["model", "method"],
+        },
+    ),
+    Tool(
+        name="odoo_web_read",
+        description=(
+            "Search and read records via web session (frontend web_search_read format). "
+            "Supports field specification, domain, limit, offset, order."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string", "description": "Model name"},
+                "domain": {"type": "array", "default": []},
+                "fields": {"type": "array", "items": {"type": "string"}},
+                "limit": {"type": "integer", "default": 80},
+                "offset": {"type": "integer", "default": 0},
+                "order": {"type": "string", "default": ""},
+            },
+            "required": ["model", "fields"],
+        },
+    ),
+    Tool(
+        name="odoo_web_export",
+        description="Export records to structured data via web session (Odoo export_data).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string", "description": "Model name"},
+                "domain": {"type": "array", "default": []},
+                "fields": {"type": "array", "items": {"type": "string"}, "description": "Field paths (e.g. 'partner_id/name')"},
+                "import_compat": {"type": "boolean", "default": False},
+            },
+            "required": ["model", "fields"],
+        },
+    ),
+    Tool(
+        name="odoo_web_report",
+        description="Download PDF report via web session. Returns base64-encoded PDF.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "report_name": {"type": "string", "description": "Report technical name"},
+                "ids": {"type": "array", "items": {"type": "integer"}},
+                "save_path": {"type": "string", "default": "", "description": "Save to file instead of returning base64"},
+            },
+            "required": ["report_name", "ids"],
+        },
+    ),
+    Tool(
+        name="odoo_web_request",
+        description=(
+            "Raw HTTP request to any Odoo controller URL via web session. "
+            "Access frontend pages, custom controllers, website routes, etc."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "path": {"type": "string", "description": "URL path (e.g. '/shop/cart', '/my/invoices')"},
+                "method": {"type": "string", "enum": ["GET", "POST"], "default": "GET"},
+                "data": {"type": "object", "default": {}, "description": "POST body (JSON)"},
+                "params": {"type": "object", "default": {}, "description": "Query params"},
+            },
+            "required": ["path"],
+        },
+    ),
+    Tool(
+        name="odoo_web_logout",
+        description="Destroy web session and logout.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+            },
         },
     ),
     # ── Report ──
@@ -1809,6 +2149,8 @@ TOOLS = [
                 "ssh_port": {"type": "integer", "default": 22},
                 "portainer_url": {"type": "string", "default": ""},
                 "portainer_token": {"type": "string", "default": ""},
+                "web_login": {"type": "string", "default": "", "description": "Web session login (user/email)"},
+                "web_password": {"type": "string", "default": "", "description": "Web session password"},
             },
             "required": ["alias", "url", "db", "user"],
         },
@@ -2383,6 +2725,11 @@ def _execute_tool(name: str, args: dict) -> Any:
                 "url": args["portainer_url"],
                 "token": args.get("portainer_token", ""),
             }
+        if args.get("web_login"):
+            conn_data["web"] = {
+                "login": args["web_login"],
+                "password": args.get("web_password", ""),
+            }
         conns[alias] = conn_data
         _save_user_connections(user, conns)
         return {"status": "saved", "alias": alias, "user": user}
@@ -2870,6 +3217,187 @@ def _execute_tool(name: str, args: dict) -> Any:
         else:
             result["content_base64"] = content_b64
         return result
+
+    elif name == "odoo_module_info":
+        module_name = args["module"]
+        result = {"module": module_name, "odoo": None, "filesystem": []}
+
+        # ── 1. Odoo RPC: module state ──
+        try:
+            records = conn.execute_kw(
+                "ir.module.module", "search_read",
+                [[["name", "=", module_name]]],
+                {"fields": [
+                    "name", "state", "shortdesc", "summary", "author",
+                    "website", "license", "installed_version", "latest_version",
+                    "category_id", "application", "auto_install",
+                    "icon", "to_buy",
+                ]},
+            )
+            if records:
+                rec = records[0]
+                # Get dependencies from Odoo
+                dep_ids = conn.execute_kw(
+                    "ir.module.module.dependency", "search_read",
+                    [[["module_id", "=", rec["id"]]]],
+                    {"fields": ["name", "depend_id", "auto_install_required"]},
+                )
+                rec["depends"] = [d["name"] for d in dep_ids]
+                # Get dependents (who depends on this module)
+                rev_dep_ids = conn.execute_kw(
+                    "ir.module.module.dependency", "search_read",
+                    [[["name", "=", module_name]]],
+                    {"fields": ["module_id"]},
+                )
+                rec["dependents"] = [
+                    d["module_id"][1] for d in rev_dep_ids if d.get("module_id")
+                ]
+                result["odoo"] = rec
+        except Exception as e:
+            result["odoo_error"] = str(e)
+
+        # ── 2. Filesystem: scan /repos for the module ──
+        repos_dir = os.environ.get("REPOS_DIR", "/repos")
+        if os.path.isdir(repos_dir):
+            for instance in sorted(os.listdir(repos_dir)):
+                instance_path = os.path.join(repos_dir, instance)
+                if not os.path.isdir(instance_path):
+                    continue
+
+                # Check OCA repos
+                oca_base = os.path.join(instance_path, "oca")
+                if os.path.isdir(oca_base):
+                    for repo_name in sorted(os.listdir(oca_base)):
+                        mod_path = os.path.join(oca_base, repo_name, module_name)
+                        manifest = os.path.join(mod_path, "__manifest__.py")
+                        if os.path.isfile(manifest):
+                            result["filesystem"].append(
+                                _parse_fs_module(mod_path, manifest, "oca", repo_name, instance)
+                            )
+
+                # Check EE
+                for ee_sub in ["ee/enterprise", "ee"]:
+                    mod_path = os.path.join(instance_path, ee_sub, module_name)
+                    manifest = os.path.join(mod_path, "__manifest__.py")
+                    if os.path.isfile(manifest):
+                        result["filesystem"].append(
+                            _parse_fs_module(mod_path, manifest, "ee", "enterprise", instance)
+                        )
+                        break
+
+                # Check custom
+                custom_base = os.path.join(instance_path, "custom")
+                if os.path.isdir(custom_base):
+                    for repo_name in sorted(os.listdir(custom_base)):
+                        mod_path = os.path.join(custom_base, repo_name, module_name)
+                        manifest = os.path.join(mod_path, "__manifest__.py")
+                        if os.path.isfile(manifest):
+                            result["filesystem"].append(
+                                _parse_fs_module(mod_path, manifest, "custom", repo_name, instance)
+                            )
+
+        # ── 3. Summary ──
+        sources = [f["source"] for f in result["filesystem"]]
+        result["found_in"] = sorted(set(sources)) if sources else ["odoo_core_only" if result.get("odoo") else "not_found"]
+        if result.get("odoo"):
+            result["installed"] = result["odoo"].get("state") == "installed"
+        else:
+            result["installed"] = False
+
+        return result
+
+    # ── Web Session handlers ──
+
+    elif name == "odoo_web_login":
+        alias = args.get("connection", "default")
+        url = args.get("url", "")
+        db = args.get("db", "")
+        login = args.get("login", "")
+        password = args.get("password", "")
+
+        # Fall back to RPC connection config + saved web credentials
+        if not url or not db or not login or not password:
+            try:
+                rpc_conn = _conn(args)
+                url = url or rpc_conn.url
+                db = db or rpc_conn.db
+            except Exception:
+                pass
+
+            # Check saved user connection for web credentials
+            if not login or not password:
+                current_user = _get_current_user(args)
+                if current_user:
+                    conns = _load_user_connections(current_user)
+                    conn_cfg = conns.get(alias, {})
+                    web_cfg = conn_cfg.get("web", {})
+                    login = login or web_cfg.get("login", conn_cfg.get("user", ""))
+                    password = password or web_cfg.get("password", conn_cfg.get("api_key", ""))
+
+        if not url or not db:
+            return {"error": "URL and database required. Provide explicitly or configure RPC connection first."}
+        if not login or not password:
+            return {"error": "Login and password required. Provide explicitly or save with user_connection_add(web_login=, web_password=)."}
+
+        ws = OdooWebSession(url, db, login, password)
+        try:
+            info = ws.authenticate()
+            _web_sessions[alias] = ws
+            return {
+                "status": "authenticated",
+                "uid": ws.uid,
+                "name": info.get("name", ""),
+                "session_id": ws.session_id[:12] + "...",
+                "server_version": info.get("server_version", ""),
+                "connection": alias,
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    elif name == "odoo_web_call":
+        ws = _get_web_session(args)
+        return ws.call_kw(args["model"], args["method"], args.get("args", []), args.get("kwargs", {}))
+
+    elif name == "odoo_web_read":
+        ws = _get_web_session(args)
+        return ws.web_read(
+            args["model"], args.get("domain", []), args["fields"],
+            args.get("limit", 80), args.get("offset", 0), args.get("order", ""),
+        )
+
+    elif name == "odoo_web_export":
+        ws = _get_web_session(args)
+        return ws.export_data(
+            args["model"], args.get("domain", []), args["fields"],
+            args.get("import_compat", False),
+        )
+
+    elif name == "odoo_web_report":
+        ws = _get_web_session(args)
+        import base64 as b64
+        pdf_bytes = ws.get_report_pdf(args["report_name"], args["ids"])
+        save_path = args.get("save_path", "")
+        if save_path:
+            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            with open(save_path, "wb") as f:
+                f.write(pdf_bytes)
+            return {"status": "saved", "path": save_path, "size": len(pdf_bytes)}
+        return {"content_base64": b64.b64encode(pdf_bytes).decode(), "size": len(pdf_bytes)}
+
+    elif name == "odoo_web_request":
+        ws = _get_web_session(args)
+        return ws.raw_request(
+            args["path"], args.get("method", "GET"),
+            args.get("data", {}), args.get("params", {}),
+        )
+
+    elif name == "odoo_web_logout":
+        alias = args.get("connection", "default")
+        ws = _web_sessions.pop(alias, None)
+        if ws:
+            ws.destroy()
+            return {"status": "logged_out", "connection": alias}
+        return {"status": "no_session", "connection": alias}
 
     elif name == "odoo_report":
         report_obj = xmlrpc.client.ServerProxy(

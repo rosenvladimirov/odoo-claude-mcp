@@ -91,6 +91,7 @@ services:
       - ${HOME}/.ssh:/home/mcp/.ssh:ro
       - ${SSH_AUTH_SOCK:-/dev/null}:/ssh-agent:ro
       - ./proxy_services.json:/data/proxy_services.json:ro
+      - mcp-repos:/repos:ro
     labels:
       - "com.blconsulting.service=mcp-odoo-rpc"
 
@@ -154,6 +155,44 @@ services:
     command: ["http", "--port", "8086", "--toolsets", "all"]
     labels:
       - "com.blconsulting.service=mcp-github"
+
+  # ─── OCA MCP (OCA addon management) ────────────────────────
+  # BACKEND ONLY — OCA maintainer-tools + git repo management
+  oca-mcp:
+    build:
+      context: ./oca-mcp
+      dockerfile: Dockerfile
+    container_name: mcp-oca
+    restart: unless-stopped
+    networks:
+      - backend
+    environment:
+      - MCP_PORT=8089
+      - ODOO_BRANCH=${ODOO_BRANCH:-19.0}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+    volumes:
+      - mcp-repos:/repos
+    labels:
+      - "com.blconsulting.service=mcp-oca"
+
+  # ─── EE MCP (Enterprise module management) ────────────────
+  # BACKEND ONLY — Enterprise clone/update, license check, OCA conflicts
+  ee-mcp:
+    build:
+      context: ./ee-mcp
+      dockerfile: Dockerfile
+    container_name: mcp-ee
+    restart: unless-stopped
+    networks:
+      - backend
+    environment:
+      - MCP_PORT=8090
+      - ODOO_BRANCH=${ODOO_BRANCH:-19.0}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+    volumes:
+      - mcp-repos:/repos
+    labels:
+      - "com.blconsulting.service=mcp-ee"
 
   # ─── Filesystem MCP (file/folder management) ──────────────
   # BACKEND ONLY — sandboxed file operations on /repos volume
