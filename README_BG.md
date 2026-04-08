@@ -14,11 +14,13 @@ Internet / Cloudflare
   ├─► claude-terminal (:8080)          ← уеб терминал, xterm.js + Claude Code
   │     │ MCP (HTTP)
   │     ▼
-  └─► odoo-rpc-mcp (:8084)            ← GATEWAY, 60 native + 79 proxied = 139 tools
+  └─► odoo-rpc-mcp (:8084)            ← GATEWAY, 83 native + 105 proxied = 188 tools
         │
         ├── filesystem-mcp (:8088)     ← plugin: файлове/папки, 14 tools
         ├── github-mcp     (:8086)     ← plugin: GitHub API, 26 tools
         ├── portainer-mcp  (:8085)     ← plugin: Docker mgmt, 39 tools
+        ├── oca-mcp        (:8089)     ← plugin: OCA addon repos, 14 tools
+        ├── ee-mcp         (:8090)     ← plugin: Enterprise modules, 12 tools
         └── teams-mcp      (:8087)     ← plugin: MS Teams, 6 tools
               │
               └── backend мрежа (без публичен достъп)
@@ -49,10 +51,12 @@ Internet / Cloudflare
 | Сървис | Порт | Мрежа | Описание |
 |--------|------|-------|----------|
 | `claude-terminal` | 8080 | public | [ttyd](https://github.com/tsl0922/ttyd) уеб терминал, 19 теми, multi-user |
-| `odoo-rpc-mcp` | 8084 | public + backend | MCP gateway — 60 native tools + proxy |
+| `odoo-rpc-mcp` | 8084 | public + backend | MCP gateway — 83 native tools + proxy, web session, public access |
 | `filesystem-mcp` | 8088 | backend | Файлови операции, sandboxed в `/repos` |
 | `github-mcp` | 8086 | backend | GitHub repos, issues, PRs, code search |
 | `portainer-mcp` | 8085 | backend | Docker container/stack management |
+| `oca-mcp` | 8089 | backend | OCA addon repos — clone, update, search, maintainer-tools |
+| `ee-mcp` | 8090 | backend | Enterprise modules — license, conflicts, dependency tree |
 | `teams-mcp` | 8087 | backend | Microsoft Teams messaging |
 
 ---
@@ -452,6 +456,16 @@ odoo-claude-mcp/
 ├── portainer-mcp/              # Плъгин: Docker management
 │   └── Dockerfile              # portainer-mcp binary + supergateway
 │
+├── oca-mcp/                    # Плъгин: OCA addon management
+│   ├── Dockerfile              # Python 3.12 + oca-maintainers-tools + supergateway
+│   ├── server.py               # 14 tools (clone, update, search, gen-readme, migrate)
+│   └── requirements.txt
+│
+├── ee-mcp/                     # Плъгин: Enterprise modules
+│   ├── Dockerfile              # Python 3.12 + supergateway
+│   ├── server.py               # 12 tools (license, conflicts, dependency tree)
+│   └── requirements.txt
+│
 ├── teams-mcp/                  # Плъгин: Microsoft Teams
 │   └── Dockerfile              # InditexTech mcp-teams-server + supergateway
 │
@@ -470,6 +484,8 @@ odoo-claude-mcp/
 | `vladimirovrosen/odoo-filesystem-mcp` | Filesystem плъгин (14 tools) |
 | `vladimirovrosen/odoo-github-mcp` | GitHub плъгин (26 tools) |
 | `vladimirovrosen/odoo-portainer-mcp` | Portainer плъгин (39 tools) |
+| `vladimirovrosen/odoo-oca-mcp` | OCA плъгин (14 tools) |
+| `vladimirovrosen/odoo-ee-mcp` | Enterprise плъгин (12 tools) |
 
 ---
 

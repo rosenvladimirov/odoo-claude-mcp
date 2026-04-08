@@ -5,6 +5,66 @@ All notable changes to the Odoo RPC MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-04-08
+
+### Added
+- **OCA MCP plugin** (14 tools): OCA maintainer-tools wrapper for addon repo management
+  - `oca_clone_all`, `oca_clone_repo`, `oca_update`, `oca_status`, `oca_search`
+  - `oca_deploy` (buffered mode), `oca_link` (symlink to addons_path)
+  - `oca_gen_readme`, `oca_gen_table`, `oca_gen_icon`, `oca_gen_requirements`
+  - `oca_changelog`, `oca_migrate`, `oca_fix_website`
+  - Dual mode: direct (/opt/odoo) or buffered (/repos/{instance})
+  - Docker image: `vladimirovrosen/odoo-oca-mcp:latest`
+- **EE MCP plugin** (12 tools): Odoo Enterprise module management
+  - `ee_clone`, `ee_update`, `ee_modules`, `ee_search`, `ee_link`, `ee_unlink`
+  - `ee_depends` (full dependency tree CE+EE), `ee_deploy`
+  - `ee_token_check` (validate GitHub access to odoo/enterprise)
+  - `ee_license_status` (read expiration from Odoo instance)
+  - `ee_oca_conflicts` (name collision + model overlap detection)
+  - `ee_oca_recommend` (compare and recommend EE vs OCA version)
+  - Docker image: `vladimirovrosen/odoo-ee-mcp:latest`
+- **Web Session tools** (7): Cookie-based HTTP access to Odoo web controllers
+  - `odoo_web_login` — authenticate with user/password, persistent session
+  - `odoo_web_call` — JSON-RPC call_kw via web session
+  - `odoo_web_read` — web_search_read (frontend format)
+  - `odoo_web_export` — export_data via web session
+  - `odoo_web_report` — download PDF report via web session
+  - `odoo_web_request` — raw HTTP request to any controller URL
+  - `odoo_web_logout` — destroy session
+  - Auto-reads credentials from connection config (web.login/password)
+  - CSRF token auto-extraction for HTTP controller routes
+- **Public Access tools** (15): Direct controller route access via web session
+  - Export: `public_access_export_xlsx`, `public_access_export_csv` (with CSRF)
+  - Reports: `public_access_report_pdf`, `public_access_report_html`, `public_access_report_xlsx`
+  - Downloads: `public_access_download`, `public_access_image`, `public_access_barcode`
+  - Portal: `public_access_portal_home/invoices/orders/purchases/tickets`
+  - Website: `public_access_shop`, `public_access_sitemap`
+- **`odoo_module_info`**: Cross-reference module RPC state + filesystem locations (OCA/EE/custom)
+- **`odoo_attachment_download`**: Download ir.attachment by ID (base64 or save to disk)
+- **Web session config**: `web.login/password` section in connections.json
+- **GUI**: Web Session expander in GTK4 Connection Manager (login, password, test button)
+
+### Security
+- **Per-session user isolation**: `identify()` uses `id(ServerSession)` to isolate concurrent users
+  - Each MCP client (claude.ai, PyCharm, terminal) gets unique session key
+  - Prevents cross-user data leakage on shared public server
+- **Cyrillic transliteration**: User names converted to Latin for directory names
+
+### Changed
+- Total tools: 188 (83 native + 105 proxied)
+- Proxied breakdown: portainer 39 + github 26 + filesystem 14 + oca 14 + ee 12
+- `user_connection_add` supports `web_login`/`web_password` parameters
+- `_get_current_user()` uses MCP request_context for per-session resolution
+
+### Docker Hub Images (7)
+- `vladimirovrosen/odoo-rpc-mcp:latest`
+- `vladimirovrosen/odoo-claude-terminal:latest`
+- `vladimirovrosen/odoo-filesystem-mcp:latest`
+- `vladimirovrosen/odoo-github-mcp:latest`
+- `vladimirovrosen/odoo-portainer-mcp:latest`
+- `vladimirovrosen/odoo-oca-mcp:latest` (NEW)
+- `vladimirovrosen/odoo-ee-mcp:latest` (NEW)
+
 ## [2.1.0] - 2026-04-08
 
 ### Added
