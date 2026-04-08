@@ -1045,6 +1045,10 @@ def _get_web_session(args: dict) -> OdooWebSession:
 # In-memory: mcp_session_id -> user_name
 _session_users: dict[str, str] = {}
 
+# Per-async-task user context (isolates concurrent MCP sessions)
+import contextvars
+_current_user_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar("current_user", default=None)
+
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 REPOS_DIR = os.environ.get("REPOS_DIR", "/repos")
 
@@ -1158,11 +1162,24 @@ def _save_user_active(user_name: str, active: dict):
         json.dump(active, f, indent=2, ensure_ascii=False)
 
 
+def _get_mcp_session_key() -> str:
+    """Get unique key for the current MCP session (per-client isolation)."""
+    try:
+        ctx = server.request_context
+        return str(id(ctx.session))
+    except (LookupError, AttributeError):
+        return "default"
+
+
 def _get_current_user(args: dict) -> str | None:
-    """Try to find current user from session or return None."""
-    # Check all sessions for a match
-    for user in _session_users.values():
-        return user  # Return first known user (single-session typical)
+    """Get current user, isolated per MCP session."""
+    key = _get_mcp_session_key()
+    # 1. Per-session user (set by identify)
+    if key in _session_users:
+        return _session_users[key]
+    # 2. Fallback: "current" (single-session backward compat)
+    if "current" in _session_users:
+        return _session_users["current"]
     return None
 
 
@@ -2846,7 +2863,9 @@ def _execute_tool(name: str, args: dict) -> Any:
         # Check if this is a known profile
         is_new = safe_name not in existing
 
-        _session_users["current"] = user_name
+        session_key = _get_mcp_session_key()
+        _session_users[session_key] = user_name
+        _session_users["current"] = user_name  # backward compat
         conns = _load_user_connections(user_name)
         active = _load_user_active(user_name)
         # Auto-activate if user has an active connection
