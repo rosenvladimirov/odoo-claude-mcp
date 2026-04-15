@@ -1,0 +1,86 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claude-terminal
+  labels:
+    app: claude-terminal
+    tier: public
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # single pod with RWO PVC
+  selector:
+    matchLabels:
+      app: claude-terminal
+  template:
+    metadata:
+      labels:
+        app: claude-terminal
+        tier: public
+    spec:
+      containers:
+        - name: claude-terminal
+          image: ghcr.io/rosenvladimirov/claude-terminal:latest  # overridden in kustomization.images
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef: { name: mcp-app, key: ANTHROPIC_API_KEY }
+            - name: CLAUDE_THEME
+              valueFrom:
+                secretKeyRef: { name: mcp-app, key: CLAUDE_THEME }
+            - name: MCP_URL
+              value: "http://odoo-rpc-mcp:8084"
+          ports:
+            - containerPort: 8080
+              name: http
+          stdin: true
+          tty: true
+          volumeMounts:
+            - name: user-data
+              mountPath: /data/users
+            - name: shared-data
+              mountPath: /shared-data
+            - name: templates
+              mountPath: /home/claude/template/settings.json
+              subPath: settings.json
+              readOnly: true
+            - name: templates
+              mountPath: /home/claude/template/.mcp.json
+              subPath: .mcp.json
+              readOnly: true
+            - name: templates
+              mountPath: /home/claude/template/CLAUDE.md
+              subPath: CLAUDE.md
+              readOnly: true
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+      volumes:
+        - name: user-data
+          persistentVolumeClaim:
+            claimName: claude-user-data
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: mcp-shared-data
+        - name: templates
+          configMap:
+            name: claude-terminal-templates
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: claude-terminal
+spec:
+  selector:
+    app: claude-terminal
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+  type: ClusterIP

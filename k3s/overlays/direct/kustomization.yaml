@@ -1,0 +1,69 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: odoo-mcp
+
+# Direct exposure overlay — БЕЗ Cloudflare Tunnel.
+# Двата public-а се изнасят през NodePort (директно до node IP-то) + незадължителен
+# plain-HTTP Traefik Ingress без TLS. Използвай когато имаш:
+#   - public IP на node-а (DNS A record към IP-то, или LAN/VPN достъп)
+#   - или self-hosted reverse proxy (nginx/caddy) пред k3s node-а
+#
+# За TLS без Cloudflare → виж cert-manager раздела по-долу.
+
+resources:
+  - ../../base
+  - nodeport-services.yaml
+
+# Махаме Traefik IngressRoute-ите от base (не ни трябват за NodePort-а).
+# Ако искаш ДА ги запазиш (plain HTTP, без TLS) — коментирай patches блока.
+patches:
+  - path: patch-ingress-claude-terminal.yaml
+    target:
+      group: traefik.containo.us
+      version: v1alpha1
+      kind: IngressRoute
+      name: claude-terminal
+  - path: patch-ingress-odoo-rpc-mcp.yaml
+    target:
+      group: traefik.containo.us
+      version: v1alpha1
+      kind: IngressRoute
+      name: odoo-rpc-mcp
+
+# Secret + configmap generators — идентични с prod overlay.
+secretGenerator:
+  - name: mcp-app
+    behavior: create
+    envs:
+      - .env
+    options:
+      disableNameSuffixHash: true
+
+configMapGenerator:
+  - name: proxy-services
+    behavior: replace
+    files:
+      - proxy_services.json=../../../proxy_services.json
+  - name: claude-terminal-templates
+    behavior: replace
+    files:
+      - settings.json=../../../claude-terminal/settings.json
+      - .mcp.json=../../../claude-terminal/.mcp.json
+      - CLAUDE.md=../../../claude-terminal/CLAUDE.md
+
+images:
+  - name: ghcr.io/rosenvladimirov/claude-terminal
+    newTag: latest
+  - name: ghcr.io/rosenvladimirov/odoo-rpc-mcp
+    newTag: latest
+  - name: ghcr.io/rosenvladimirov/portainer-mcp
+    newTag: latest
+  - name: ghcr.io/rosenvladimirov/teams-mcp
+    newTag: latest
+  - name: ghcr.io/rosenvladimirov/oca-mcp
+    newTag: latest
+  - name: ghcr.io/rosenvladimirov/ee-mcp
+    newTag: latest
+  - name: ghcr.io/rosenvladimirov/filesystem-mcp
+    newTag: latest

@@ -1,0 +1,48 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: teams-mcp
+  labels: { app: teams-mcp, tier: backend }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: teams-mcp } }
+  template:
+    metadata:
+      labels: { app: teams-mcp, tier: backend }
+    spec:
+      containers:
+        - name: teams-mcp
+          image: ghcr.io/rosenvladimirov/teams-mcp:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MCP_PORT
+              value: "8087"
+            - name: TEAMS_APP_ID
+              valueFrom: { secretKeyRef: { name: mcp-app, key: TEAMS_APP_ID } }
+            - name: TEAMS_APP_PASSWORD
+              valueFrom: { secretKeyRef: { name: mcp-app, key: TEAMS_APP_PASSWORD } }
+            - name: TEAMS_APP_TYPE
+              valueFrom: { secretKeyRef: { name: mcp-app, key: TEAMS_APP_TYPE } }
+            - name: TEAMS_APP_TENANT_ID
+              valueFrom: { secretKeyRef: { name: mcp-app, key: TEAMS_APP_TENANT_ID } }
+            - name: TEAM_ID
+              valueFrom: { secretKeyRef: { name: mcp-app, key: TEAMS_TEAM_ID } }
+            - name: TEAMS_CHANNEL_ID
+              valueFrom: { secretKeyRef: { name: mcp-app, key: TEAMS_CHANNEL_ID } }
+            - name: MCP_LOGLEVEL
+              valueFrom: { secretKeyRef: { name: mcp-app, key: TEAMS_LOG_LEVEL } }
+          ports:
+            - containerPort: 8087
+          resources:
+            requests: { cpu: "50m", memory: "128Mi" }
+            limits:   { cpu: "500m", memory: "512Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: teams-mcp
+spec:
+  selector: { app: teams-mcp }
+  ports: [{ port: 8087, targetPort: 8087 }]
+  type: ClusterIP

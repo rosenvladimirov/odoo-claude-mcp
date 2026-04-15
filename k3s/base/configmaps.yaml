@@ -1,0 +1,22 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: proxy-services
+data:
+  # Mirrors docker-compose ./proxy_services.json mount. Replace with real content via Kustomize configMapGenerator if needed.
+  proxy_services.json: |
+    {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claude-terminal-templates
+data:
+  settings.json: |
+    {}
+  .mcp.json: |
+    {}
+  CLAUDE.md: |
+    # Claude Terminal — k3s deployment
+    # Replace this template via Kustomize configMapGenerator in overlays.

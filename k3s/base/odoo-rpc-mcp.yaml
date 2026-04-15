@@ -1,0 +1,90 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: odoo-rpc-mcp
+  labels:
+    app: odoo-rpc-mcp
+    tier: public
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: odoo-rpc-mcp
+  template:
+    metadata:
+      labels:
+        app: odoo-rpc-mcp
+        tier: public
+    spec:
+      containers:
+        - name: odoo-rpc-mcp
+          image: ghcr.io/rosenvladimirov/odoo-rpc-mcp:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MCP_PORT
+              value: "8084"
+            - name: MCP_HOST
+              value: "0.0.0.0"
+            - name: SINGLE_CONNECTION
+              value: "true"
+            - name: GOOGLE_CREDENTIALS_FILE
+              value: "/data/google_credentials.json"
+            - name: GOOGLE_TOKEN_FILE
+              value: "/data/google_token.json"
+            - name: TELEGRAM_SESSION_PATH
+              value: "/data/telegram_session"
+            - name: SSH_AUTH_SOCK
+              value: ""  # ssh-agent bridge not used in k8s; rely on mounted keys
+          envFrom:
+            - secretRef:
+                name: mcp-app
+          ports:
+            - containerPort: 8084
+              name: http
+          volumeMounts:
+            - name: shared-data
+              mountPath: /data
+            - name: proxy-services
+              mountPath: /data/proxy_services.json
+              subPath: proxy_services.json
+              readOnly: true
+            - name: repos
+              mountPath: /repos
+              readOnly: true
+            - name: ssh-keys
+              mountPath: /home/mcp/.ssh
+              readOnly: true
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "1",    memory: "1Gi"  }
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: mcp-shared-data
+        - name: proxy-services
+          configMap:
+            name: proxy-services
+        - name: repos
+          persistentVolumeClaim:
+            claimName: mcp-repos
+        - name: ssh-keys
+          secret:
+            secretName: ssh-keys
+            defaultMode: 0400
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: odoo-rpc-mcp
+spec:
+  selector:
+    app: odoo-rpc-mcp
+  ports:
+    - port: 8084
+      targetPort: 8084
+      name: http
+  type: ClusterIP

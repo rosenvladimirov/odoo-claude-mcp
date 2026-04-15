@@ -1,0 +1,35 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: github-mcp
+  labels: { app: github-mcp, tier: backend }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: github-mcp } }
+  template:
+    metadata:
+      labels: { app: github-mcp, tier: backend }
+    spec:
+      containers:
+        - name: github-mcp
+          image: ghcr.io/github/github-mcp-server:latest
+          imagePullPolicy: IfNotPresent
+          args: ["http", "--port", "8086", "--toolsets", "all"]
+          env:
+            - name: GITHUB_PERSONAL_ACCESS_TOKEN
+              valueFrom: { secretKeyRef: { name: mcp-app, key: GITHUB_TOKEN } }
+          ports:
+            - containerPort: 8086
+          resources:
+            requests: { cpu: "50m", memory: "128Mi" }
+            limits:   { cpu: "500m", memory: "512Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: github-mcp
+spec:
+  selector: { app: github-mcp }
+  ports: [{ port: 8086, targetPort: 8086 }]
+  type: ClusterIP

@@ -1,0 +1,54 @@
+# NodePort services за директен достъп до двата public workload-а.
+# ВАЖНО: k3s разрешава NodePort range 30000-32767 по подразбиране.
+# За по-ниски портове (80/443/8080) → използвай HostPort в Deployment,
+# или LoadBalancer (k3s идва с Klipper LB бъндълнат) — виж коментара долу.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: claude-terminal-nodeport
+  labels:
+    app: claude-terminal
+    tier: public
+spec:
+  type: NodePort
+  selector:
+    app: claude-terminal
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30080       # достъп: http://<node-ip>:30080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: odoo-rpc-mcp-nodeport
+  labels:
+    app: odoo-rpc-mcp
+    tier: public
+spec:
+  type: NodePort
+  selector:
+    app: odoo-rpc-mcp
+  ports:
+    - name: http
+      port: 8084
+      targetPort: 8084
+      nodePort: 30084       # достъп: http://<node-ip>:30084
+# -----------------------------------------------------------
+# АЛТЕРНАТИВА: k3s Klipper LoadBalancer (type: LoadBalancer).
+# Ще използва портовете директно на node-а (80/443 ако са свободни).
+# Раскоментирай и замени NodePort Service-ите при нужда:
+#
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: claude-terminal-lb
+# spec:
+#   type: LoadBalancer
+#   selector: { app: claude-terminal }
+#   ports:
+#     - name: http
+#       port: 80
+#       targetPort: 8080

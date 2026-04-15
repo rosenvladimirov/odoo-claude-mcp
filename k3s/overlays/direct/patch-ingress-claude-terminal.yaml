@@ -1,0 +1,7 @@
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: claude-terminal
+spec:
+  entryPoints: [web]
+  tls: null

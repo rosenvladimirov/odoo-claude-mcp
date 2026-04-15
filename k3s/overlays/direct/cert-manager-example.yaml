@@ -1,0 +1,58 @@
+# ===========================================================
+#  TLS без Cloudflare — cert-manager + Let's Encrypt HTTP-01
+# ===========================================================
+# Този файл НЕ е включен в kustomization.yaml. Apply го ръчно ПРЕДИ да включиш
+# TLS в ingress-а. Изисква:
+#   1. cert-manager инсталиран (Rancher App catalog → cert-manager)
+#   2. public DNS A record → node IP
+#   3. порт 80 достъпен отвън (HTTP-01 challenge минава през него)
+#
+# Apply:
+#   kubectl apply -f cert-manager-example.yaml
+#
+# След това в overlay patch добави:
+#   spec:
+#     entryPoints: [websecure]
+#     tls:
+#       secretName: claude-terminal-tls   # генерира се от Certificate-а долу
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: vladimirov.rosen@gmail.com      # <-- EDIT
+    privateKeySecretRef:
+      name: letsencrypt-prod-key
+    solvers:
+      - http01:
+          ingress:
+            class: traefik
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: claude-terminal-cert
+  namespace: odoo-mcp
+spec:
+  secretName: claude-terminal-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+    - terminal.example.com                 # <-- EDIT
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: odoo-rpc-mcp-cert
+  namespace: odoo-mcp
+spec:
+  secretName: odoo-rpc-mcp-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+    - mcp.example.com                      # <-- EDIT

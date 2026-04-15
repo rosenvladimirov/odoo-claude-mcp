@@ -1,0 +1,42 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: filesystem-mcp
+  labels: { app: filesystem-mcp, tier: backend }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: filesystem-mcp } }
+  template:
+    metadata:
+      labels: { app: filesystem-mcp, tier: backend }
+    spec:
+      containers:
+        - name: filesystem-mcp
+          image: ghcr.io/rosenvladimirov/filesystem-mcp:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MCP_PORT
+              value: "8088"
+          ports:
+            - containerPort: 8088
+          volumeMounts:
+            - name: repos
+              mountPath: /repos
+          resources:
+            requests: { cpu: "50m", memory: "128Mi" }
+            limits:   { cpu: "500m", memory: "512Mi" }
+      volumes:
+        - name: repos
+          persistentVolumeClaim:
+            claimName: mcp-repos
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: filesystem-mcp
+spec:
+  selector: { app: filesystem-mcp }
+  ports: [{ port: 8088, targetPort: 8088 }]
+  type: ClusterIP

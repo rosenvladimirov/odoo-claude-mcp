@@ -1,0 +1,46 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oca-mcp
+  labels: { app: oca-mcp, tier: backend }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: oca-mcp } }
+  template:
+    metadata:
+      labels: { app: oca-mcp, tier: backend }
+    spec:
+      containers:
+        - name: oca-mcp
+          image: ghcr.io/rosenvladimirov/oca-mcp:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MCP_PORT
+              value: "8089"
+            - name: ODOO_BRANCH
+              valueFrom: { secretKeyRef: { name: mcp-app, key: ODOO_BRANCH } }
+            - name: GITHUB_TOKEN
+              valueFrom: { secretKeyRef: { name: mcp-app, key: GITHUB_TOKEN } }
+          ports:
+            - containerPort: 8089
+          volumeMounts:
+            - name: repos
+              mountPath: /repos
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "1",    memory: "1Gi"   }
+      volumes:
+        - name: repos
+          persistentVolumeClaim:
+            claimName: mcp-repos
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oca-mcp
+spec:
+  selector: { app: oca-mcp }
+  ports: [{ port: 8089, targetPort: 8089 }]
+  type: ClusterIP

@@ -5,6 +5,39 @@ All notable changes to the Odoo RPC MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.1] - 2026-04-15
+
+### Added — Kubernetes deployment (k3s / Rancher)
+Нова папка `k3s/` с Kustomize манифести за deploy на целия стак върху k3s
+клъстер управляван от Rancher.
+
+- `k3s/base/` — всички ресурси (10 Deployments, 10 Services, 5 PVC-та, 2 Traefik
+  IngressRoute-а, ConfigMaps + Secret template). Namespace `odoo-mcp`.
+  Мрежовата сегментация public/backend от docker-compose се пази през label
+  `tier` + Ingress само за двата public workload-а (claude-terminal, odoo-rpc-mcp).
+- `k3s/overlays/prod/` — deploy с Ingress + TLS (за Cloudflare Tunnel или
+  certResolver). secretGenerator от `.env`, configMapGenerator за
+  `proxy_services.json` и claude-terminal templates. Images override-ване.
+- `k3s/overlays/direct/` — deploy БЕЗ Cloudflare. Експозиция през NodePort
+  (30080 за claude-terminal, 30084 за odoo-rpc-mcp), Ingress патчнат на
+  plain HTTP. Включва `cert-manager-example.yaml` за Let's Encrypt HTTP-01
+  challenge. Алтернатива: k3s Klipper LoadBalancer на портове 80/443.
+- `k3s/README.md` — deployment guide с два варианта (kubectl / Rancher UI),
+  Rancher-специфични бележки (project binding, Monitoring/Logging/Backup/RBAC,
+  Fleet GitOps), TODO list.
+
+### Added — Docker Compose: Qdrant + Ollama
+Добавени са двете backend услуги за AI Tokenizer стак-а (companion на
+`ai_tokenizer` модул-а в `l10n_bg_claude_terminal`):
+
+- `qdrant` (REST 6333, gRPC 6334, volume `qdrant-storage`)
+- `ollama` (port 11434, volume `ollama-data`) — pull-ва `nomic-embed-text`
+
+### Changed
+- `claude-terminal/CLAUDE.md` — startup sequence на български с 4 стъпки:
+  `~/.odoo_session.json` → `identify()` → `memory_pull('*')` →
+  `user_connection_list()`. Добавени правила за multi-user изолация.
+
 ## [2.4.0] - 2026-04-15
 
 ### Added — AI Tokenizer tools (5 new MCP tools)

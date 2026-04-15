@@ -1,0 +1,11 @@
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: odoo-rpc-mcp
+spec:
+  routes:
+    - match: Host(`mcp.example.com`)         # <-- EDIT
+      kind: Rule
+      services:
+        - name: odoo-rpc-mcp
+          port: 8084

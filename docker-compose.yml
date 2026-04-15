@@ -194,6 +194,46 @@ services:
     labels:
       - "com.blconsulting.service=mcp-ee"
 
+  # ─── Qdrant vector DB (AI Tokenizer storage) ──────────────
+  # BACKEND ONLY — accessed by Odoo ai_tokenizer + qdrant-mcp
+  # REST on 6333, gRPC on 6334
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    networks:
+      - backend
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:-}
+    ports:
+      # Expose only when the Odoo instance is on a different host.
+      # Remove the publish if Odoo is co-located on this Docker network.
+      - "${QDRANT_REST_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant-storage:/qdrant/storage
+    labels:
+      - "com.blconsulting.service=qdrant"
+
+  # ─── Ollama (local embedding engine) ──────────────────────
+  # BACKEND ONLY — used by Odoo ai_tokenizer (default embedder)
+  # Pull model once after first start:
+  #   docker exec ollama ollama pull nomic-embed-text
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    networks:
+      - backend
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    labels:
+      - "com.blconsulting.service=ollama"
+
   # ─── Filesystem MCP (file/folder management) ──────────────
   # BACKEND ONLY — sandboxed file operations on /repos volume
   filesystem-mcp:
@@ -215,4 +255,8 @@ volumes:
   claude-user-data:
     driver: local
   mcp-repos:
+    driver: local
+  qdrant-storage:
+    driver: local
+  ollama-data:
     driver: local

@@ -1,0 +1,33 @@
+# Traefik IngressRoute (k3s bundles Traefik v2 by default).
+# Exposes only the two public services: claude-terminal and odoo-rpc-mcp.
+# Adjust hostnames in overlays/prod/ingress-patch.yaml.
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: claude-terminal
+spec:
+  entryPoints: [websecure]
+  routes:
+    - match: Host(`terminal.example.com`)
+      kind: Rule
+      services:
+        - name: claude-terminal
+          port: 8080
+  tls:
+    certResolver: default  # replace with your resolver or remove if using Cloudflare Tunnel
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: odoo-rpc-mcp
+spec:
+  entryPoints: [websecure]
+  routes:
+    - match: Host(`mcp.example.com`)
+      kind: Rule
+      services:
+        - name: odoo-rpc-mcp
+          port: 8084
+  tls:
+    certResolver: default

@@ -1,0 +1,62 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: odoo-mcp
+
+resources:
+  - ../../base
+
+# Secret is generated from a gitignored .env file (same schema as docker-compose .env).
+# Copy ../../../.env.example to .env, fill values, then `kubectl apply -k .` will build it.
+secretGenerator:
+  - name: mcp-app
+    behavior: create
+    envs:
+      - .env
+    options:
+      disableNameSuffixHash: true
+
+# Inject real proxy_services.json (the one used by docker-compose).
+configMapGenerator:
+  - name: proxy-services
+    behavior: replace
+    files:
+      - proxy_services.json=../../../proxy_services.json
+  - name: claude-terminal-templates
+    behavior: replace
+    files:
+      - settings.json=../../../claude-terminal/settings.json
+      - .mcp.json=../../../claude-terminal/.mcp.json
+      - CLAUDE.md=../../../claude-terminal/CLAUDE.md
+
+# Override images to your registry/tags.
+images:
+  - name: ghcr.io/rosenvladimirov/claude-terminal
+    newTag: latest
+  - name: ghcr.io/rosenvladimirov/odoo-rpc-mcp
+    newTag: latest
+  - name: ghcr.io/rosenvladimirov/portainer-mcp
+    newTag: latest
+  - name: ghcr.io/rosenvladimirov/teams-mcp
+    newTag: latest
+  - name: ghcr.io/rosenvladimirov/oca-mcp
+    newTag: latest
+  - name: ghcr.io/rosenvladimirov/ee-mcp
+    newTag: latest
+  - name: ghcr.io/rosenvladimirov/filesystem-mcp
+    newTag: latest
+
+# Patch hostnames on ingress (по един patch за всеки IngressRoute).
+patches:
+  - path: ingress-claude-terminal.yaml
+    target:
+      group: traefik.containo.us
+      version: v1alpha1
+      kind: IngressRoute
+      name: claude-terminal
+  - path: ingress-odoo-rpc-mcp.yaml
+    target:
+      group: traefik.containo.us
+      version: v1alpha1
+      kind: IngressRoute
+      name: odoo-rpc-mcp

@@ -1,9 +1,38 @@
 # Odoo RPC MCP Server — Bulgarian Localization Knowledge Base
 
-## ⚠ MANDATORY — Current Session Context (read this FIRST)
+## ⚠ ЗАДЪЛЖИТЕЛНО — Стартова последователност (изпълни тихо)
 
-**On startup, ALWAYS read `~/.odoo_session.json` and remember it for the entire session.**
-This file is the single source of truth for where the user is currently working:
+### Стъпка 1: Прочети сесията
+Прочети `~/.odoo_session.json` за текущ Odoo контекст и потребителски данни.
+Запомни `user_login`, `user_name`, `odoo_url`, `odoo_db`, `model`, `res_id`.
+
+### Стъпка 2: Идентифицирай се в MCP
+Извикай `identify(name=<user_login от session>)` — това зарежда личните
+ти връзки и настройки от MCP сървъра.
+
+### Стъпка 3: Дърпни споделената памет
+Извикай `memory_pull(filename="*")` за да синхронизираш споделената
+knowledge base (модули, ръководства, конфигурации) в личното ти хранилище.
+
+### Стъпка 4: Провери връзките
+Извикай `user_connection_list()`. Ако има активна връзка — вече е заредена
+от `identify()`. Ако няма — използвай данните от сесията:
+```
+odoo_connect(url=<session.odoo_url>, db=<session.odoo_db>,
+             username=<session.odoo_user>, api_key=<env ODOO_API_KEY>)
+```
+
+### Правила за многопотребителска среда
+- Личната ти памет е изолирана — други потребители не я виждат
+- Споделената памет е read-only: `memory_pull()` → лична копия → редактирай
+- Когато научиш нещо полезно за екипа, предложи `memory_write()` + `memory_share()`
+- НИКОГА не споделяй API ключове или credentials между потребители
+
+---
+
+## Session Context (read this AFTER startup sequence)
+
+**The `~/.odoo_session.json` file is the single source of truth for where the user is currently working:**
 
 ```json
 {

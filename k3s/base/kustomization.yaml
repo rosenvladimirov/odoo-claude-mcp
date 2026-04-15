@@ -1,0 +1,34 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: odoo-mcp
+
+labels:
+  - pairs:
+      com.blconsulting.stack: odoo-mcp
+    includeSelectors: false
+    includeTemplates: true
+
+resources:
+  - namespace.yaml
+  - pvcs.yaml
+  - configmaps.yaml
+  - claude-terminal.yaml
+  - odoo-rpc-mcp.yaml
+  - portainer-mcp.yaml
+  - teams-mcp.yaml
+  - github-mcp.yaml
+  - oca-mcp.yaml
+  - ee-mcp.yaml
+  - filesystem-mcp.yaml
+  - qdrant.yaml
+  - ollama.yaml
+  - ingress.yaml
+
+# NOTE: `secrets.example.yaml` is intentionally NOT listed here — real secret
+# is produced in overlays via `secretGenerator` from an .env file.
+
+# Overlays can override images, e.g.:
+#   images:
+#     - name: ghcr.io/rosenvladimirov/claude-terminal
+#       newTag: v1.2.3

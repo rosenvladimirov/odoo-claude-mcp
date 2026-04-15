@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: odoo-mcp
+  labels:
+    name: odoo-mcp
+    com.blconsulting.stack: odoo-mcp

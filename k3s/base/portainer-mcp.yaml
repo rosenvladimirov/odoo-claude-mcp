@@ -1,0 +1,46 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: portainer-mcp
+  labels: { app: portainer-mcp, tier: backend }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: portainer-mcp } }
+  template:
+    metadata:
+      labels: { app: portainer-mcp, tier: backend }
+    spec:
+      containers:
+        - name: portainer-mcp
+          image: ghcr.io/rosenvladimirov/portainer-mcp:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MCP_PORT
+              value: "8085"
+            - name: INSECURE_TLS
+              value: "true"
+            - name: NODE_TLS_REJECT_UNAUTHORIZED
+              value: "0"
+            - name: SSL_CERT_FILE
+              value: "/dev/null"
+          envFrom:
+            - secretRef: { name: mcp-app }
+          command:
+            - sh
+            - -c
+            - 'supergateway --stdio "portainer-mcp -server $PORTAINER_URL -token $PORTAINER_TOKEN -disable-version-check" --port $MCP_PORT'
+          ports:
+            - containerPort: 8085
+          resources:
+            requests: { cpu: "50m",  memory: "128Mi" }
+            limits:   { cpu: "500m", memory: "512Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: portainer-mcp
+spec:
+  selector: { app: portainer-mcp }
+  ports: [{ port: 8085, targetPort: 8085 }]
+  type: ClusterIP
