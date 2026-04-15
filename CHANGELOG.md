@@ -5,6 +5,30 @@ All notable changes to the Odoo RPC MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-04-15
+
+### Added — AI Tokenizer tools (5 new MCP tools)
+Companion to `l10n_bg_claude_terminal` v18.0.1.23.0 / v19.0.1.18.0.
+All tools delegate to Odoo (which talks to Qdrant + Ollama / OpenAI / Voyage).
+
+- `ai_tokenize_record(model, id, view_type='form')` — synchronous tokenize-and-index
+  of a single record. Returns `{ok, document_id, state, token_count, error}`.
+  Calls `ai.view.registry.tokenize_record()`.
+- `ai_tokenize_collection(model, view_type='form')` — bulk tokenize all records
+  of a model. Auto-creates the registry entry if missing, ensures it's active,
+  returns indexed count.
+- `ai_search_similar(query, model='', view_type='', company_id=0, limit=10,
+  score_threshold=0.0)` — semantic search via Qdrant. Embeds the query with
+  the configured provider, returns ranked hits with `model`, `res_id`,
+  `display_name`, `score`, `snippet`, `view_type`, `qdrant_point_id`.
+  Filters: model/view_type/company_id; `db_name` is auto-applied for
+  multi-DB Qdrant isolation.
+- `ai_list_documents(model='', state='', limit=50)` — list `ai.composite.document`
+  rows; useful for monitoring / debugging which records are indexed, stale,
+  or in error.
+- `ai_collection_info()` — returns Qdrant collection stats: vector size,
+  distance, points count, plus Odoo-side indexed-document count for cross-check.
+
 ## [2.3.0] - 2026-04-08
 
 ### Added

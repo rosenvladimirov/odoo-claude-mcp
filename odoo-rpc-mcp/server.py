@@ -2549,6 +2549,96 @@ TOOLS = [
         ),
         inputSchema={"type": "object", "properties": {}},
     ),
+
+    # ── AI Tokenizer (Qdrant + Ollama, l10n_bg_claude_terminal v1.23+) ──
+    Tool(
+        name="ai_tokenize_record",
+        description=(
+            "Tokenize a single Odoo record: build composite document, embed via "
+            "configured provider, upsert to Qdrant. Synchronous — returns final state."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string", "description": "Model name (e.g. 'res.partner')"},
+                "id": {"type": "integer", "description": "Record id"},
+                "view_type": {"type": "string", "enum": ["form", "list", "kanban"], "default": "form"},
+            },
+            "required": ["model", "id"],
+        },
+    ),
+    Tool(
+        name="ai_tokenize_collection",
+        description=(
+            "Tokenize ALL records of a model via the registry entry. Heavy operation — "
+            "for large models prefer the nightly cron. Returns count of processed records."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string", "description": "Model name"},
+                "view_type": {"type": "string", "enum": ["form", "list", "kanban"], "default": "form"},
+            },
+            "required": ["model"],
+        },
+    ),
+    Tool(
+        name="ai_search_similar",
+        description=(
+            "Semantic search across tokenized Odoo records. Embeds the query with the "
+            "configured provider, searches the per-DB Qdrant collection. Filterable by "
+            "model, view_type, company. Returns ranked hits with score + snippet."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "query": {"type": "string", "description": "Natural-language query"},
+                "model": {"type": "string", "description": "Restrict to one model (optional)", "default": ""},
+                "view_type": {"type": "string", "default": ""},
+                "company_id": {"type": "integer", "description": "Restrict to one company (optional)", "default": 0},
+                "limit": {"type": "integer", "default": 10},
+                "score_threshold": {"type": "number", "default": 0.0},
+            },
+            "required": ["query"],
+        },
+    ),
+    Tool(
+        name="ai_list_documents",
+        description=(
+            "List ai.composite.document records (tokenized records tracked by Odoo). "
+            "Useful for monitoring tokenization progress / errors."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string", "description": "Filter by model_name", "default": ""},
+                "state": {
+                    "type": "string",
+                    "enum": ["", "draft", "tokenized", "indexed", "stale", "error"],
+                    "default": "",
+                },
+                "limit": {"type": "integer", "default": 50},
+            },
+        },
+    ),
+    Tool(
+        name="ai_collection_info",
+        description=(
+            "Return info about the per-database Qdrant collection: vector size, "
+            "distance metric, point count, indexed-vectors count, plus Odoo-side "
+            "indexed-document count for cross-check."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+            },
+        },
+    ),
 ]
 
 
@@ -3956,6 +4046,78 @@ def _execute_tool(name: str, args: dict) -> Any:
             },
             "note": "Use live=true to fetch current values from Odoo",
         }
+
+    # ── AI Tokenizer (l10n_bg_claude_terminal v1.23+) ──
+    elif name == "ai_tokenize_record":
+        result = conn.execute_kw(
+            "ai.view.registry", "tokenize_record",
+            [args["model"], int(args["id"]), args.get("view_type", "form")],
+        )
+        return result
+
+    elif name == "ai_tokenize_collection":
+        # Find or create registry entry, then run action_tokenize_all on it.
+        ir_model = conn.execute_kw("ir.model", "search_read",
+            [[["model", "=", args["model"]]]],
+            {"fields": ["id"], "limit": 1})
+        if not ir_model:
+            return {"error": f"Unknown model: {args['model']}"}
+        view_type = args.get("view_type", "form")
+        registry_ids = conn.execute_kw("ai.view.registry", "search",
+            [[["model_id", "=", ir_model[0]["id"]], ["view_type", "=", view_type]]],
+            {"limit": 1})
+        if not registry_ids:
+            registry_id = conn.execute_kw("ai.view.registry", "create",
+                [{"model_id": ir_model[0]["id"], "view_type": view_type, "active": True}])
+            conn.execute_kw("ai.view.registry", "action_parse_arch", [[registry_id]])
+            registry_ids = [registry_id]
+        # Activate if archived
+        conn.execute_kw("ai.view.registry", "write",
+            [registry_ids, {"active": True}])
+        conn.execute_kw("ai.view.registry", "action_tokenize_all", [registry_ids])
+        # Return doc count for this registry
+        count = conn.execute_kw("ai.composite.document", "search_count",
+            [[["registry_id", "=", registry_ids[0]], ["state", "=", "indexed"]]])
+        return {"ok": True, "registry_id": registry_ids[0], "indexed_count": count}
+
+    elif name == "ai_search_similar":
+        kwargs = {
+            "query": args["query"],
+            "limit": int(args.get("limit", 10)),
+            "score_threshold": float(args.get("score_threshold", 0.0)),
+        }
+        if args.get("model"):
+            kwargs["model_name"] = args["model"]
+        if args.get("view_type"):
+            kwargs["view_type"] = args["view_type"]
+        if args.get("company_id"):
+            kwargs["company_id"] = int(args["company_id"])
+        return conn.execute_kw(
+            "ai.composite.document", "search_similar",
+            [], kwargs,
+        )
+
+    elif name == "ai_list_documents":
+        domain = []
+        if args.get("model"):
+            domain.append(["model_name", "=", args["model"]])
+        if args.get("state"):
+            domain.append(["state", "=", args["state"]])
+        records = conn.execute_kw(
+            "ai.composite.document", "search_read",
+            [domain],
+            {
+                "fields": ["display_name", "model_name", "res_id", "view_type",
+                           "state", "token_count", "qdrant_point_id",
+                           "source_write_date", "error_message"],
+                "limit": int(args.get("limit", 50)),
+                "order": "write_date desc",
+            },
+        )
+        return {"count": len(records), "records": records}
+
+    elif name == "ai_collection_info":
+        return conn.execute_kw("ai.composite.document", "collection_stats", [])
 
     # ── Google Services ──
     elif name == "google_auth":
