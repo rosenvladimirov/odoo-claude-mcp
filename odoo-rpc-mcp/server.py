@@ -4304,6 +4304,8 @@ def create_app():
     secret_token = os.environ.get("MCP_SECRET_TOKEN", "")
     oauth_client_id = os.environ.get("MCP_OAUTH_CLIENT_ID", "mcp-client")
     oauth_client_secret = os.environ.get("MCP_OAUTH_CLIENT_SECRET", secret_token)
+    ollama_upstream = os.environ.get("OLLAMA_UPSTREAM", "http://ollama:11434").rstrip("/")
+    ollama_api_key = os.environ.get("OLLAMA_API_KEY", "").strip()
     protected_paths = {"/mcp", "/sse", "/messages", "/api/session/register",
                        "/api/session/list", "/api/session/update",
                        "/api/session/delete", "/api/connect",
@@ -4475,6 +4477,105 @@ def create_app():
                         headers={"WWW-Authenticate": f'Bearer resource_metadata="https://{host}/.well-known/oauth-authorization-server"'})
                     await response(scope, receive, send)
                     return
+
+        # ── Ollama passthrough (/ollama/* → OLLAMA_UPSTREAM) ───────
+        if scope["type"] == "http" and (path == "/ollama" or path.startswith("/ollama/")):
+            import httpx
+            headers_dict = dict(scope.get("headers", []))
+
+            # Dedicated auth — independent from MCP_SECRET_TOKEN.
+            # If OLLAMA_API_KEY is set, require it (Bearer or X-Api-Token).
+            # If not set, fall back to MCP auth (_check_auth) for safety.
+            def _ollama_authorized(hdrs):
+                if ollama_api_key:
+                    auth = hdrs.get(b"authorization", b"").decode()
+                    if auth.startswith("Bearer ") and auth[7:] == ollama_api_key:
+                        return True
+                    api_token = hdrs.get(b"x-api-token", b"").decode()
+                    if api_token and api_token == ollama_api_key:
+                        return True
+                    return False
+                # No dedicated key → reuse MCP auth (returns True if neither set)
+                return _check_auth(hdrs)
+
+            if not _ollama_authorized(headers_dict):
+                from starlette.responses import JSONResponse
+                response = JSONResponse(
+                    {"error": "Unauthorized",
+                     "hint": "Use 'Authorization: Bearer <OLLAMA_API_KEY>' or 'X-Api-Token' header"},
+                    status_code=401,
+                )
+                await response(scope, receive, send)
+                return
+
+            upstream_path = path[len("/ollama"):] or "/"
+            query = scope.get("query_string", b"").decode()
+            upstream_url = f"{ollama_upstream}{upstream_path}"
+            if query:
+                upstream_url += f"?{query}"
+
+            # Read full request body (ollama endpoints are not streaming uploads)
+            body = b""
+            more_body = True
+            while more_body:
+                msg = await receive()
+                if msg.get("type") == "http.disconnect":
+                    return
+                body += msg.get("body", b"")
+                more_body = msg.get("more_body", False)
+
+            # Strip hop-by-hop + auth/host headers
+            drop_headers = {b"host", b"authorization", b"x-api-token",
+                            b"connection", b"transfer-encoding",
+                            b"content-length", b"upgrade"}
+            fwd_headers = {
+                k.decode(): v.decode()
+                for k, v in scope.get("headers", [])
+                if k.lower() not in drop_headers
+            }
+
+            method = scope.get("method", "GET")
+            try:
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    upstream_resp = await client.request(
+                        method, upstream_url,
+                        headers=fwd_headers,
+                        content=body if body else None,
+                    )
+                resp_headers = [
+                    (k.lower().encode(), v.encode())
+                    for k, v in upstream_resp.headers.items()
+                    if k.lower() not in (
+                        "transfer-encoding", "content-encoding",
+                        "connection", "content-length",
+                    )
+                ]
+                await send({
+                    "type": "http.response.start",
+                    "status": upstream_resp.status_code,
+                    "headers": resp_headers,
+                })
+                await send({
+                    "type": "http.response.body",
+                    "body": upstream_resp.content,
+                    "more_body": False,
+                })
+            except httpx.TimeoutException:
+                from starlette.responses import JSONResponse
+                response = JSONResponse(
+                    {"error": "Upstream timeout", "upstream": ollama_upstream},
+                    status_code=504,
+                )
+                await response(scope, receive, send)
+            except Exception as e:
+                logger.exception(f"Ollama passthrough error: {e}")
+                from starlette.responses import JSONResponse
+                response = JSONResponse(
+                    {"error": f"Upstream error: {e}"},
+                    status_code=502,
+                )
+                await response(scope, receive, send)
+            return
 
         # ── Landing page ───────────────────────────────────────────
         if path in ("/", "") and scope["type"] == "http":
