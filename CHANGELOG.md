@@ -5,6 +5,16 @@ All notable changes to the Odoo RPC MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+- **Fix `existing_profiles` information leak in `identify()`** — премахнато изложено поле
+  `existing_profiles` (и от MCP tool, и от HTTP `/api/identify`) което връщаше
+  списък с ВСИЧКИ съществуващи potребителски profiles на каещия се caller.
+  Това позволяваше enumeration на чужди профили. `is_new` вече се изчислява
+  директно през `os.path.isdir` без листване. Hint за нов profile също не
+  изброява съществуващи. Спойка за task 1 от unified-auth плана.
+
 ## [2.4.1] - 2026-04-15
 
 ### Added — Kubernetes deployment (k3s / Rancher)

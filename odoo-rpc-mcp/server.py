@@ -2948,10 +2948,9 @@ def _execute_tool(name: str, args: dict) -> Any:
     elif name == "identify":
         user_name = args["name"]
         safe_name = _sanitize_name(user_name)
-        existing = _list_existing_users()
 
-        # Check if this is a known profile
-        is_new = safe_name not in existing
+        # Check if this is a known profile without leaking other profile names.
+        is_new = not os.path.isdir(os.path.join(DATA_DIR, "users", safe_name))
 
         session_key = _get_mcp_session_key()
         _session_users[session_key] = user_name
@@ -2982,12 +2981,10 @@ def _execute_tool(name: str, args: dict) -> Any:
             "profile": safe_name,
             "connections": list(conns.keys()),
             "active": active.get("alias", None),
-            "existing_profiles": existing,
         }
         if is_new:
             result["hint"] = (
                 f"Profile '{safe_name}' is new. "
-                f"Existing profiles: {', '.join(existing) if existing else '(none)'}. "
                 f"Data will be saved on first write."
             )
         return result
@@ -4858,8 +4855,7 @@ def create_app():
                     response = JSONResponse({"error": "name required"}, status_code=400)
                 else:
                     safe_name = _sanitize_name(user_name)
-                    existing = _list_existing_users()
-                    is_new = safe_name not in existing
+                    is_new = not os.path.isdir(os.path.join(DATA_DIR, "users", safe_name))
                     _session_users["current"] = user_name
                     conns = _load_user_connections(user_name)
                     active = _load_user_active(user_name)
@@ -4886,7 +4882,6 @@ def create_app():
                         "memory_dir": f"/data/memory/users/{safe_name}",
                         "connections": list(conns.keys()),
                         "active": active.get("alias"),
-                        "existing_profiles": existing,
                     })
             except Exception as e:
                 response = JSONResponse({"error": str(e)}, status_code=400)
