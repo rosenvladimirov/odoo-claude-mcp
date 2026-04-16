@@ -1,284 +1,435 @@
-# odoo-claude-mcp
+<div align="center">
 
-Docker-based MCP server stack for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — integrates **Odoo ERP**, **Docker/Portainer**, **GitHub**, **Microsoft Teams**, **SSH**, **Gmail**, **Google Calendar**, and **Telegram** into a unified AI workflow via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/).
+# Odoo Claude MCP
 
-> **116 MCP tools** on a single endpoint — plugin architecture, dual-network isolation, proxy gateway.
+**Production-grade Model Context Protocol (MCP) server suite for Odoo ERP**
 
-## Architecture
+_Connect Claude, Claude Code, and any MCP-compatible client to Odoo, GitHub, filesystem, Portainer, Teams, and more — through a unified, authenticated gateway._
+
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+[![Odoo](https://img.shields.io/badge/Odoo-15%20→%2019-714B67)](https://www.odoo.com)
+[![MCP](https://img.shields.io/badge/MCP-Protocol-black)](https://modelcontextprotocol.io)
+[![Docker](https://img.shields.io/badge/Docker-Compose%20%7C%20K3s-2496ED)](https://www.docker.com)
+[![Made by BL Consulting](https://img.shields.io/badge/Made%20by-BL%20Consulting-714B67)](https://bl-consulting.net)
+
+[Quick Start](#-quick-start) · [Architecture](#-architecture) · [MCP Servers](#-mcp-servers) · [Deployment](#-deployment) · [Claude.ai Connector](#-claudeai-connector) · [Documentation](#-documentation)
+
+**[🇧🇬 Български README](README_BG.md)**
+
+</div>
+
+---
+
+## 🎯 What is this?
+
+`odoo-claude-mcp` is a **self-hosted MCP server suite** that turns any Odoo instance into a first-class citizen in the Claude ecosystem. It exposes Odoo data and operations through the Model Context Protocol, while bundling complementary MCP servers for everything an Odoo developer, consultant, or business user needs — GitHub, OCA modules, Kubernetes/Portainer, Microsoft Teams, and a full Claude Code terminal running in the browser.
+
+Unlike single-purpose MCP wrappers, this stack is built for **real production use**:
+
+- 🔐 **Unified authentication** across all MCP endpoints via token-based auth
+- 🏢 **Multi-connection, multi-tenant** — one stack serves dozens of Odoo databases
+- 🌐 **Claude.ai connector ready** — public HTTPS endpoint with token auth
+- ☸️ **K3s / Kubernetes native** with Kustomize overlays for dev and prod
+- 🐳 **Docker Compose** for solo developers and small teams
+- 🖥️ **Web-based terminal** — xterm.js + tmux + Claude Code in the browser
+- 📦 **Odoo module deployment** via direct RPC (no filesystem access needed)
+- 🔍 **Qdrant vector store** integration for semantic search across records
+- 🤖 **Ollama integration** for local LLMs and privacy-first deployments
+
+---
+
+## 🏗 Architecture
 
 ```
-              Internet / Cloudflare
-                     │
-         ┌───────────┼───────────┐
-         │     public network    │
-         │                       │
-    ┌────▼─────┐          ┌──────▼──────┐
-    │ odoo-rpc │          │   claude-   │
-    │   :8084  │          │  terminal   │
-    │ 60 native│          │   :8080     │
-    │ +59 proxy│          │             │
-    │ =116 tot │          │             │
-    └────┬─────┘          └──────┬──────┘
-         │     backend network   │
-    ┌────▼─────┐ ┌────────┐ ┌───▼────┐
-    │portainer │ │ github │ │ teams  │
-    │  :8085   │ │ :8086  │ │ :8087  │
-    │ 39 tools │ │ 20 tools│ │ 6 tools│
-    └──────────┘ └────────┘ └────────┘
-       No ports exposed — internal only
-       Accessed by hostname via proxy
+                        ┌──────────────────────────────┐
+                        │   Claude.ai / Claude Code    │
+                        │   Claude Desktop / IDE       │
+                        └──────────────┬───────────────┘
+                                       │ HTTPS + Token Auth
+                                       ▼
+        ┌──────────────────────────────────────────────────────────┐
+        │              odoo-claude-mcp gateway                     │
+        │  ┌────────────────────────────────────────────────────┐  │
+        │  │  Unified MCP Router (server.py)                    │  │
+        │  │  • Proxies to backend MCP servers                  │  │
+        │  │  • Per-user profiles & connections                 │  │
+        │  │  • Shared memory store                             │  │
+        │  └────────────────────────────────────────────────────┘  │
+        └──────────────────────────────────────────────────────────┘
+                                       │
+        ┌──────────────────────────────┴──────────────────────────────┐
+        │                                                              │
+   ┌────┴─────┐  ┌──────────┐  ┌──────────┐  ┌───────────┐  ┌────────┴──┐
+   │ odoo-rpc │  │  ee-mcp  │  │ oca-mcp  │  │ github-mcp│  │portainer- │
+   │   -mcp   │  │ (Odoo EE)│  │   (OCA)  │  │           │  │    mcp    │
+   └──────────┘  └──────────┘  └──────────┘  └───────────┘  └───────────┘
+   ┌──────────┐  ┌──────────┐  ┌────────────────┐
+   │filesystem│  │ teams-mcp│  │claude-terminal │
+   │   -mcp   │  │          │  │  (xterm + tmux)│
+   └──────────┘  └──────────┘  └────────────────┘
+                                       │
+                      ┌────────────────┼────────────────┐
+                      ▼                ▼                ▼
+                 ┌────────┐       ┌─────────┐      ┌─────────┐
+                 │  Odoo  │       │ Qdrant  │      │ Ollama  │
+                 │ 15-19  │       │  VDB    │      │  LLMs   │
+                 └────────┘       └─────────┘      └─────────┘
 ```
 
-**Key design:**
-- `odoo-rpc-mcp` is the **single public gateway** (port 8084) — all traffic goes through it
-- Backend services (portainer, github, teams) have **no host port mappings** — completely isolated
-- `odoo-rpc-mcp` bridges both networks and **proxies** backend tools with prefix naming (`portainer__listStacks`, `github__get_me`)
-- At startup, the gateway **auto-discovers** tools from all sub-services and registers them as native tools
-- **Plugin architecture** — add new MCP services via `proxy_services.json` without code changes
+---
 
-## Key Features
+## 🧰 MCP Servers
 
-- **Full Odoo CRUD** — search, read, create, write, delete records in any Odoo model (v8–19+)
-- **Multi-protocol** — XML-RPC (Odoo 8+) and JSON-RPC (Odoo 14+)
-- **Multi-connection** — manage multiple Odoo instances, switch between them on the fly
-- **Per-user identity** — each Claude session identifies its user, loads personal connections
-- **Fiscal positions** — list, inspect, configure, and manage Bulgarian tax fiscal positions
-- **Gmail & Calendar** — OAuth2 integration: search/read/send emails, manage calendar events
-- **Telegram** — search contacts, read/send messages via personal Telegram account
-- **SSH remote** — execute commands on remote servers, run git operations over SSH
-- **GitHub API** — direct REST API + proxied 20 GitHub MCP tools
-- **Docker management** — 39 Portainer tools for containers, stacks, environments, K8s
-- **Microsoft Teams** — 6 tools for channel threads and member management
-- **Memory storage** — shared knowledge base with per-user and team-wide memory files
-- **Plugin system** — add new MCP backends via JSON config, no code changes
-- **Connection Manager GUI** — desktop app (GTK4 on Linux, Qt6 on Windows/macOS)
-- **OAuth 2.0 & API tokens** — secure access for cloud-hosted (claude.ai) and local deployments
+### Core: `odoo-rpc-mcp`
 
-## Services
+The flagship MCP server. **188 MCP tools** (83 native + 105 proxied across Portainer, GitHub, Teams, EE, OCA, filesystem) covering every aspect of Odoo development and operations.
 
-| Service | Port | Network | Transport | Tools | Description |
-|---------|------|---------|-----------|-------|-------------|
-| `odoo-rpc-mcp` | 8084 | public + backend | HTTP | 60 native + 59 proxied | Gateway: Odoo + Gmail + Calendar + Telegram + SSH + Git + Memory + Proxy |
-| `portainer-mcp` | 8085 | backend only | SSE | 39 | Docker/K8s management via Portainer |
-| `github-mcp` | 8086 | backend only | HTTP | 20 | GitHub repo management (official server) |
-| `teams-mcp` | 8087 | backend only | SSE | 6 | Microsoft Teams messaging (InditexTech) |
-| `claude-terminal` | 8080 | public + backend | — | — | Web terminal (ttyd + Claude Code CLI) |
+**Capabilities:**
 
-**Total: 116 MCP tools on one endpoint**
+- **CRUD & Search**: `odoo_search_read`, `odoo_create`, `odoo_write`, `odoo_unlink`, `odoo_execute`
+- **Introspection**: `odoo_fields_get`, `odoo_list_models`, `odoo_module_info`
+- **Multi-connection**: Switch between databases on the fly — `odoo_connect`, `user_connection_activate`
+- **Web session support**: `odoo_web_login`, `odoo_web_call`, `odoo_web_export`, `odoo_web_report`
+- **File operations**: `odoo_attachment_upload`, `odoo_attachment_download`, `public_access_download`
+- **Reporting**: `odoo_report`, `public_access_report_pdf`, `public_access_report_xlsx`
+- **Portal access**: `public_access_portal_orders`, `public_access_portal_invoices`, `public_access_portal_tickets`
+- **Bulgaria l10n**: `odoo_fp_configure`, `odoo_fp_list`, `odoo_fp_details` — fiscal positions tailored for НАП compliance
+- **AI integration**: `ai_tokenize_record`, `ai_search_similar`, `ai_collection_info` — Qdrant vector embeddings per Odoo record
+- **Memory system**: Per-user and shared memory with `memory_read`, `memory_write`, `memory_share`, `memory_pull`
+- **Google services**: OAuth, Gmail search/read/send, Calendar CRUD
+- **Telegram**: MTProto client — send messages, search contacts, read dialogs
+- **SSH & Git**: Remote command execution, git operations
 
-## Plugin Architecture
+### `ee-mcp` — Odoo Enterprise Tools
 
-Add new MCP backends without changing code — edit `proxy_services.json`:
+Tools specific to Odoo Enterprise workflows:
 
-```json
-{
-  "portainer": {
-    "transport": "sse",
-    "url": "http://portainer-mcp:8085/sse"
-  },
-  "github": {
-    "transport": "http",
-    "url": "http://github-mcp:8086/mcp",
-    "headers": {"Authorization": "Bearer ${GITHUB_TOKEN}"}
-  },
-  "teams": {
-    "transport": "sse",
-    "url": "http://teams-mcp:8087/sse"
-  },
-  "my-new-service": {
-    "transport": "sse",
-    "url": "http://my-service:9000/sse"
-  }
-}
+- License validation & status checks
+- EE module repository management
+- Dependency analysis (CE + EE)
+- Selective EE module linking into CE addons paths
+- Conflict detection between Enterprise and OCA modules
+
+### `oca-mcp` — OCA Module Management
+
+Deep integration with the Odoo Community Association ecosystem:
+
+- Clone individual OCA repos or `oca-clone-everything`
+- Search across all local OCA repos
+- Generate READMEs, icons, requirements.txt via `oca-gen-*`
+- Version migration via `oca-migrate-branch`
+- Changelog generation from newsfragments
+
+### `claude-terminal` — Browser-based Claude Code
+
+A complete **xterm.js + tmux + Claude Code** setup running in a Docker container:
+
+- WebSocket gateway (`gateway.js`) with session isolation
+- Per-user tmux sessions that persist across reconnects
+- Themable terminal (see `themes.json` — includes Catppuccin, Dracula, Tokyo Night, Gruvbox, etc.)
+- Landing page (`landing.html`) for public deployments
+- Authenticated via the same token system as other MCP servers
+
+### Infrastructure MCPs
+
+- **`github-mcp`** — GitHub API wrapper (search code, issues, PRs, repos)
+- **`portainer-mcp`** — Docker/Kubernetes environment management
+- **`teams-mcp`** — Microsoft Teams messaging integration
+- **`filesystem-mcp`** — Scoped filesystem operations for AI agents
+
+---
+
+## 🚀 Quick Start
+
+### Option 1: Docker Compose (local dev)
+
+```bash
+git clone https://github.com/rosenvladimirov/odoo-claude-mcp.git
+cd odoo-claude-mcp
+
+# Configure
+cp .env.example .env
+nano .env                    # set ODOO_URL, DB, credentials, tokens
+
+# Start the stack
+docker compose up -d
+
+# Verify
+docker compose ps
+curl http://localhost:8084/health
 ```
 
-**Adding a new plugin:**
-1. Add the service to `docker-compose.yml` on the `backend` network
-2. Add its entry to `proxy_services.json`
-3. `docker compose up -d` + call `proxy_refresh` — tools appear automatically
+### Option 2: Quick installer script
 
-Headers support `${ENV_VAR}` expansion. Config is also available via `PROXY_SERVICES_JSON` env var.
-
-## Quick Start
-
-### Linux / macOS
+**Linux / macOS:**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rosenvladimirov/odoo-claude-mcp/main/install.sh | bash
 ```
 
-### Windows (PowerShell)
+**Windows (PowerShell as Administrator):**
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1
+iwr -useb https://raw.githubusercontent.com/rosenvladimirov/odoo-claude-mcp/main/install.ps1 | iex
 ```
 
-### Manual
+### Option 3: Connect to Claude Code
+
+After the stack is running, add it to Claude Code:
 
 ```bash
-git clone https://github.com/rosenvladimirov/odoo-claude-mcp.git
-cd odoo-claude-mcp
-cp .env.example .env    # edit: set ANTHROPIC_API_KEY
-cp proxy_services.json.example proxy_services.json
-docker compose up -d --build
+claude mcp add odoo-mcp \
+  --url https://your-domain.com/mcp \
+  --header "Authorization: Bearer YOUR_TOKEN"
 ```
 
-### Register MCP with Claude Code
-
-Only one endpoint needed — the gateway handles everything:
+Or use the included `.mcp.json`:
 
 ```bash
-claude mcp add -t http -s user odoo-rpc http://localhost:8084/mcp
+cp claude-terminal/.mcp.json ~/.config/claude-code/mcp.json
 ```
 
-### Docker Hub
+---
+
+## ☸️ Deployment
+
+### Kubernetes / K3s (recommended for production)
+
+Full Kustomize-based deployment in `k3s/`:
+
+```
+k3s/
+├── base/                    # Base manifests
+│   ├── namespace.yaml
+│   ├── configmaps.yaml
+│   ├── secrets.example.yaml
+│   ├── pvcs.yaml
+│   ├── odoo-rpc-mcp.yaml
+│   ├── ee-mcp.yaml
+│   ├── oca-mcp.yaml
+│   ├── github-mcp.yaml
+│   ├── teams-mcp.yaml
+│   ├── portainer-mcp.yaml
+│   ├── filesystem-mcp.yaml
+│   ├── claude-terminal.yaml
+│   ├── qdrant.yaml
+│   ├── ollama.yaml
+│   └── ingress.yaml
+└── overlays/
+    ├── direct/              # NodePort + cert-manager-example
+    └── prod/                # Ingress with TLS for public endpoints
+```
+
+**Deploy:**
 
 ```bash
-docker pull vladimirovrosen/odoo-rpc-mcp:latest
-docker pull vladimirovrosen/odoo-portainer-mcp:latest
-docker pull vladimirovrosen/odoo-claude-terminal:latest
+cd k3s/overlays/prod
+cp .env.example .env
+cp ../../base/secrets.example.yaml secrets.yaml
+# edit secrets.yaml with real values
+
+kubectl apply -k .
+kubectl -n odoo-claude-mcp get pods
 ```
 
-### Prerequisites
+See [`k3s/README.md`](k3s/README.md) for complete deployment guide including cert-manager, Cloudflare tunnels, and horizontal scaling.
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (all platforms)
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) — `npm install -g @anthropic-ai/claude-code`
-- [Anthropic API Key](https://console.anthropic.com)
+### Public deployment pattern
 
-## MCP Tools Reference
-
-### Native Tools (60)
-
-| Category | Tools | Description |
-|----------|-------|-------------|
-| **CRUD** | `odoo_search`, `odoo_read`, `odoo_search_read`, `odoo_search_count`, `odoo_create`, `odoo_write`, `odoo_unlink` | Full record operations on any Odoo model |
-| **Advanced** | `odoo_execute`, `odoo_report` | Call any model method, generate PDF reports |
-| **Introspection** | `odoo_version`, `odoo_list_models`, `odoo_fields_get` | Model discovery and field definitions |
-| **Connections** | `odoo_connect`, `odoo_disconnect`, `odoo_connections`, `odoo_refresh` | Multi-instance connection management |
-| **Fiscal Positions** | `odoo_fp_list`, `odoo_fp_details`, `odoo_fp_configure`, `odoo_fp_remove_action`, `odoo_fp_types` | Bulgarian localization tax configuration |
-| **Gmail** | `google_gmail_search`, `google_gmail_read`, `google_gmail_send`, `google_gmail_labels` | Full Gmail access with OAuth2 |
-| **Google Auth** | `google_auth`, `google_auth_status` | OAuth2 authentication for Google services |
-| **Calendar** | `google_calendar_list`, `google_calendar_events`, `google_calendar_create_event`, `google_calendar_update_event`, `google_calendar_delete_event` | Google Calendar management |
-| **Telegram** | `telegram_send_message`, `telegram_get_messages`, `telegram_search_contacts`, `telegram_get_dialogs`, `telegram_configure`, `telegram_auth`, `telegram_auth_status` | Personal Telegram messaging |
-| **SSH** | `ssh_execute` | Run commands on remote servers via SSH |
-| **Git** | `git_remote` | Pull/status/log/branch/diff on remote repos via SSH |
-| **GitHub API** | `github_api` | Direct GitHub REST API calls |
-| **Identity** | `identify`, `who_am_i` | Per-user session identity management |
-| **User Connections** | `user_connection_add`, `user_connection_list`, `user_connection_activate`, `user_connection_delete` | Per-user personal connection storage |
-| **Memory** | `memory_list`, `memory_read`, `memory_write`, `memory_delete`, `memory_share`, `memory_pull` | Shared knowledge base (`*` for bulk operations) |
-| **Proxy** | `proxy_call`, `proxy_discover`, `proxy_refresh` | Manual proxy control and re-discovery |
-| **GUI** | `open_connection_manager` | Launch desktop Connection Manager |
-
-### Proxied: Portainer (39 tools, prefix: `portainer__`)
-
-| Category | Tools |
-|----------|-------|
-| **Environments** | `listEnvironments`, `updateEnvironmentTags`, `updateEnvironmentTeamAccesses`, `updateEnvironmentUserAccesses` |
-| **Stacks** | `listLocalStacks`, `createLocalStack`, `updateLocalStack`, `startLocalStack`, `stopLocalStack`, `deleteLocalStack`, `getLocalStackFile`, `listStacks`, `createStack`, `updateStack`, `getStackFile` |
-| **Docker Proxy** | `dockerProxy` — full Docker Engine API |
-| **Kubernetes** | `kubernetesProxy`, `getKubernetesResourceStripped` |
-| **Management** | Access groups, environment groups, tags, teams, users, settings |
-
-### Proxied: GitHub (20 tools, prefix: `github__`)
-
-| Category | Tools |
-|----------|-------|
-| **Search** | `search_repositories`, `search_code`, `search_issues`, `search_pull_requests`, `search_users` |
-| **Repos** | `list_branches`, `list_tags`, `list_commits`, `list_releases`, `get_file_contents` |
-| **Issues & PRs** | `list_issues`, `issue_read`, `list_pull_requests`, `pull_request_read` |
-| **Other** | `get_me`, `get_commit`, `get_label`, `get_tag`, `get_latest_release`, `get_release_by_tag` |
-
-### Proxied: Microsoft Teams (6 tools, prefix: `teams__`)
-
-| Category | Tools |
-|----------|-------|
-| **Threads** | `start_thread`, `update_thread`, `read_thread`, `list_threads` |
-| **Members** | `get_member_by_name`, `list_members` |
-
-## Connection Manager GUI
-
-| Platform | Toolkit | Install |
-|----------|---------|---------|
-| Linux (GNOME) | GTK4/libadwaita | `python tools/odoo_connect.py` |
-| Windows | Qt6/PySide6 | Download from [Releases](https://github.com/rosenvladimirov/odoo-claude-mcp/releases) |
-| macOS | Qt6/PySide6 | `pip install PySide6 && python tools/odoo_connect_qt.py` |
-
-## Authentication
-
-| Mode | Use case | How it works |
-|------|----------|--------------|
-| **Local** | `localhost` / Docker internal | No token required |
-| **API Token** | Public-facing server | `X-Api-Token` header or `?token=` query param |
-| **OAuth 2.0** | claude.ai remote MCP | Bearer token flow |
-| **Per-user identity** | Multi-user | `identify` tool loads personal connections |
-
-## Security
-
-- **Dual-network isolation** — backend services have no host ports, accessible only via proxy
-- All containers run as non-root users (`mcp` user)
-- SSH keys mounted read-only, SSH agent forwarded
-- API keys preferred over passwords
-- OAuth 2.0 for cloud-hosted access (claude.ai)
-- `.env` and `proxy_services.json` are in `.gitignore`
-- Portainer supports read-only mode
-- Session tracking prevents connection conflicts
-
-## Configuration
-
-See [`.env.example`](.env.example) for all environment variables and [`proxy_services.json.example`](proxy_services.json.example) for plugin configuration.
-
-### File Structure
+For Claude.ai connector access, the recommended production topology is:
 
 ```
-odoo-claude-mcp/
-├── docker-compose.yml          # All services (public + backend networks)
-├── proxy_services.json         # Plugin config (which backends to proxy)
-├── .env                        # Credentials (gitignored)
-├── install.sh / install.ps1    # One-command installers
-│
-├── odoo-rpc-mcp/               # Gateway server (60 native tools)
-│   ├── Dockerfile
-│   ├── server.py               # Tools + proxy + auth + landing page
-│   ├── google_service.py       # Gmail + Calendar
-│   ├── telegram_service.py     # Telegram (Telethon)
-│   └── requirements.txt
-│
-├── portainer-mcp/              # Backend: Docker management
-│   └── Dockerfile              # portainer-mcp + supergateway
-│
-├── teams-mcp/                  # Backend: MS Teams
-│   └── Dockerfile              # InditexTech + supergateway
-│
-├── github-mcp/                 # Backend: GitHub (official image)
-│   └── Dockerfile
-│
-├── claude-terminal/            # Web terminal (ttyd + Claude Code)
-│   ├── Dockerfile
-│   ├── .mcp.json               # Internal MCP endpoints
-│   └── CLAUDE.md
-│
-├── tools/                      # Desktop utilities
-│   ├── odoo_connect_qt.py      # Qt6 Connection Manager
-│   ├── odoo_module_analyzer.py # Module → memory generator
-│   └── glb_viewer.py           # 3D GLB viewer
-│
-└── packaging/windows/          # Windows installer (NSIS)
+Internet → Cloudflare (DNS + WAF) → Nginx reverse proxy → MCP gateway
+                                                              │
+                                                              ▼
+                                                    Backend MCP servers
 ```
 
-## Docker Hub
+Token-based authentication on the gateway ensures only authorized Claude sessions connect. Cloudflare's Zero Trust or simple tunnel setup both work.
 
-| Image | Description |
-|-------|-------------|
-| [`vladimirovrosen/odoo-rpc-mcp`](https://hub.docker.com/r/vladimirovrosen/odoo-rpc-mcp) | Gateway server (60 native + proxy) |
-| [`vladimirovrosen/odoo-portainer-mcp`](https://hub.docker.com/r/vladimirovrosen/odoo-portainer-mcp) | Portainer MCP wrapper |
-| [`vladimirovrosen/odoo-claude-terminal`](https://hub.docker.com/r/vladimirovrosen/odoo-claude-terminal) | Web terminal with Claude Code |
+---
 
-## License
+## 🔌 Claude.ai Connector
 
-[AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html)
+The stack is designed to be registered as a **Custom Connector** in Claude.ai (Team/Enterprise) or via the API.
 
-## Author
+**Configuration:**
 
-**BL Consulting** — [www.bl-consulting.net](https://www.bl-consulting.net)
+1. Deploy the stack with a public HTTPS endpoint (e.g., `https://mcp.yourdomain.com`)
+2. Generate a user token (see `odoo_connect_cli.py` or Qt GUI)
+3. In Claude.ai Settings → Connectors → Add Custom Connector:
+   - **URL**: `https://mcp.yourdomain.com/mcp`
+   - **Auth**: Bearer token
+4. The gateway will expose all MCP tools to your Claude conversations
 
-Developed by Rosen Vladimirov ([rosenvladimirov](https://github.com/rosenvladimirov))
+**Security features:**
+
+- Per-user profile isolation (`/data/users/{username}/`)
+- Shared memory vs. personal memory separation
+- Connection-level access control (users only see their own Odoo connections)
+- All tool calls logged per user
+
+---
+
+## 🛠 Developer Tools
+
+Beyond MCP servers, the repo includes standalone desktop and CLI tools:
+
+### Connection Manager
+
+**`tools/odoo_connect_qt.py`** — PyQt6 desktop GUI for managing Odoo connections, SSH keys, and MCP endpoints. Cross-platform (Linux/Windows/macOS).
+
+**`tools/odoo_connect.py`** — GTK4/Adwaita alternative for Linux/GNOME users.
+
+**`odoo-rpc-mcp/odoo_connect_cli.py`** — Terminal CLI for CI/CD and scripting.
+
+### Module Analyzer
+
+**`tools/odoo_module_analyzer.py`** — Analyzes Odoo module source for:
+
+- Manifest validation
+- Dependency graph extraction
+- Model relationships
+- View definitions
+- Security rules
+
+### GLB Viewer
+
+**`tools/glb_viewer.py`** — 3D model inspection tool for the MRP Design Matrix workflows.
+
+### Windows Installer
+
+Pre-packaged NSIS installer (`packaging/windows/`) produced automatically via GitHub Actions (`.github/workflows/build-windows.yml`).
+
+---
+
+## 📚 Documentation
+
+- **[README_BG.md](README_BG.md)** — Пълна документация на български
+- **[CHANGELOG.md](CHANGELOG.md)** — Version history and release notes
+- **[claude-terminal/CLAUDE.md](claude-terminal/CLAUDE.md)** — Claude Code workspace documentation
+- **[k3s/README.md](k3s/README.md)** — Kubernetes deployment guide
+
+---
+
+## 🎨 Use Cases
+
+### For Odoo Developers
+
+- **Live module development** with Claude assisting directly on your running instance
+- **RPC-based module deployment** — update code, views, data without filesystem access
+- **Multi-environment workflows** — dev, staging, production from a single Claude session
+- **OCA contribution flows** — clone, search, test, submit PRs through Claude
+
+### For Odoo Consultants
+
+- **Manage multiple client databases** from one authenticated session
+- **Per-client memory** — Claude remembers context for each customer
+- **Shared team knowledge** — `memory_share` distributes institutional know-how
+- **НАП / Bulgaria localization** — built-in tools for fiscal positions, VAT compliance
+
+### For Business Users
+
+- **"Ask Claude about our sales data"** — natural language queries against real Odoo records
+- **Document extraction workflows** — vision LLMs parse invoices into `account.move`
+- **Semantic search** — find similar records, contracts, tickets across the whole database
+- **Email & calendar integration** — Claude coordinates work across Odoo, Gmail, Calendar
+
+### For Platform Operators (SaaS / MSP)
+
+- **Multi-tenant hosting** — each client gets an isolated MCP endpoint
+- **Billing integration** — usage tracking per tenant via Cloudflare AI Gateway
+- **White-label terminals** — brand `claude-terminal` for your customers
+- **Kubernetes scaling** — scale MCP replicas independently based on load
+
+---
+
+## 🔐 Security
+
+- **No credentials in code** — all secrets via environment variables or Kubernetes secrets
+- **Token-based MCP auth** — no shared passwords
+- **Per-user data isolation** — filesystem and memory scoped to authenticated user
+- **OAuth for third-party services** — Google, GitHub, Telegram all use standard OAuth flows
+- **Connection encryption** — HTTPS/WSS everywhere in production deployments
+- **Rate limiting** — via Cloudflare AI Gateway or ingress controller
+- **Audit logging** — all MCP tool calls logged with user context
+
+**Reporting security issues:** please email `vladimirov.rosen@gmail.com` rather than opening a public issue.
+
+---
+
+## 🌍 Bulgaria Localization
+
+This project is maintained by the **[OCA `l10n-bulgaria`](https://github.com/OCA/l10n-bulgaria) maintainer**. Bulgarian-specific features are first-class:
+
+- **НАП integration** — fiscal position tax action maps, VAT reports
+- **`l10n_bg_*` module family** support — fiscal positions, VAT reports, payroll, HR
+- **Образец 1** — monthly NAP declaration (Наредба №Н-13/2019)
+- **Bulgarian partner identification** — UIC/ЕИК, legal forms, NACE activity codes
+- **Transliteration** — BG ⇄ EN ⇄ GR mixin for partner names
+- **НАП справка-декларация** — SQL-engine based audit reports
+
+See the [Bulgaria-specific OCA modules](https://github.com/OCA/l10n-bulgaria) for the complete ecosystem.
+
+---
+
+## 🗺 Roadmap
+
+- [ ] **Billing module** — native Odoo module for SaaS per-user MCP billing (in progress)
+- [ ] **Multi-tenant dashboard** — admin UI for managing hosted MCP instances
+- [ ] **Skills marketplace** — publish and subscribe to pre-built Odoo workflows
+- [ ] **Invoice AI integration** — direct account.move extraction from attachments
+- [ ] **Audit log UI** — searchable web UI for MCP tool call history
+- [ ] **Self-healing connections** — automatic retry with token refresh on auth failures
+
+---
+
+## 🤝 Contributing
+
+Contributions welcome! This project follows OCA conventions:
+
+1. Fork the repo
+2. Create a feature branch (`git checkout -b feature/amazing-thing`)
+3. Follow PEP 8 / Odoo coding guidelines
+4. Add tests where applicable
+5. Submit a PR with a clear description
+
+For large changes, please open an issue first to discuss approach.
+
+---
+
+## 📜 License
+
+This project is licensed under the **AGPL-3.0** license. See [LICENSE](LICENSE) for details.
+
+---
+
+## 🙏 Credits & Acknowledgements
+
+- **[Anthropic](https://www.anthropic.com/)** — Claude, Claude Code, and the Model Context Protocol specification
+- **[Odoo SA](https://www.odoo.com/)** — The ERP platform this project extends
+- **[Odoo Community Association (OCA)](https://odoo-community.org/)** — The open-source Odoo ecosystem
+- **[xterm.js](https://xtermjs.org/)**, **[tmux](https://github.com/tmux/tmux)** — Terminal layer
+- **[Qdrant](https://qdrant.tech/)** — Vector database
+- **[Ollama](https://ollama.com/)** — Local LLM inference
+
+---
+
+## 👤 Maintainer
+
+**Rosen Vladimirov** — Founder, [BL Consulting](https://bl-consulting.net)
+Odoo Silver Partner · OCA `l10n-bulgaria` maintainer · 10+ years of Odoo specialization
+
+📧 Email: vladimirov.rosen@gmail.com
+🐙 GitHub: [@rosenvladimirov](https://github.com/rosenvladimirov)
+🏢 Company: Terraros Комерс ЕООД · Bulgaria
+
+<div align="center">
+
+---
+
+**Made with ❤️ and ☕ in Bulgaria** 🇧🇬
+
+_If this project helps you, consider [starring it on GitHub](https://github.com/rosenvladimirov/odoo-claude-mcp) ⭐_
+
+</div>
