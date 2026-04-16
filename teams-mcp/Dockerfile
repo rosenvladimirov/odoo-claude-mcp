@@ -18,20 +18,12 @@ COPY --from=teams-base /app /app
 
 WORKDIR /app
 
-# Install Python dependencies
-RUN pip3 install --no-cache-dir --break-system-packages -r <(cat <<'REQS'
-microsoft-agents-authentication-msal>=0.8.0
-microsoft-agents-activity>=0.8.0
-microsoft-agents-hosting-core>=0.8.0
-microsoft-agents-hosting-teams>=0.8.0
-microsoft-agents-hosting-aiohttp>=0.8.0
-python-dotenv>=1.2.1
-mcp[cli]==1.26.0
-msgraph-sdk>=1.55.0
-setuptools>=82.0.1
-azure-identity
-REQS
-) 2>/dev/null || pip3 install --no-cache-dir --break-system-packages \
+# Install Python dependencies. Previous revision used a `<(cat <<REQS)`
+# heredoc which broke Dockerfile parsing (no line-continuation after the
+# RUN line meant the heredoc body was parsed as separate Dockerfile
+# instructions). Plain pip invocation with line continuations works the
+# same and is readable.
+RUN pip3 install --no-cache-dir --break-system-packages \
     "microsoft-agents-authentication-msal>=0.8.0" \
     "microsoft-agents-activity>=0.8.0" \
     "microsoft-agents-hosting-core>=0.8.0" \
