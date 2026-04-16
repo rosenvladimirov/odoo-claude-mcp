@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security — `identify()` refactor (task 3 от unified auth plan)
+- MCP tool `identify` и HTTP `POST /api/identify` вече използват валидирания
+  caller от `_odoo_caller_ctx` (HTTP middleware). `args["name"]` / `body.name`
+  се чете само като fallback за stdio/dev (когато няма HTTP auth context).
+  При валидна unified-auth сесия име от клиента се **игнорира** — profile
+  spoofing през `identify(name="somebody_else")` вече не е възможен.
+- Response съдържа ново поле `validated: bool` — true когато identity
+  идва от XMLRPC-валидиран key, false в legacy mode.
+- При unified-auth се авто-активира alias-ът, който caller-ът е използвал
+  (не само последно-записаният `active_connection`).
+
 ### Added — Unified Auth middleware (task 2 от MCP unified auth plan)
 - **`get_caller_odoo_user(headers)`** middleware: валидира `Authorization:
   Bearer <api_key>` + `X-Odoo-Url` + `X-Odoo-Db` + `X-Odoo-Login` срещу

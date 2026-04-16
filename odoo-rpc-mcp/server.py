@@ -3082,41 +3082,58 @@ def _execute_tool(name: str, args: dict) -> Any:
         return {"connections": m.list_all()}
 
     elif name == "identify":
-        user_name = args["name"]
-        safe_name = _sanitize_name(user_name)
+        # Unified-auth priority: if HTTP middleware validated the caller,
+        # use that identity (cannot be spoofed via args["name"]). Fall
+        # back to args["name"] only for stdio/local contexts where no
+        # HTTP validation is available.
+        caller = _odoo_caller_ctx.get()
+        if caller:
+            user_name = caller["mcp_user"]
+            safe_name = user_name  # already a safe dir name from registry
+            preferred_alias = caller.get("alias")
+        else:
+            user_name = args.get("name") or ""
+            if not user_name:
+                return {
+                    "status": "error",
+                    "error": "name is required (or supply unified-auth "
+                             "Authorization + X-Odoo-* headers).",
+                }
+            safe_name = _sanitize_name(user_name)
+            preferred_alias = None
 
-        # Check if this is a known profile without leaking other profile names.
         is_new = not os.path.isdir(os.path.join(DATA_DIR, "users", safe_name))
 
         session_key = _get_mcp_session_key()
         _session_users[session_key] = user_name
         _session_users["current"] = user_name  # backward compat
+
         conns = _load_user_connections(user_name)
         active = _load_user_active(user_name)
-        # Auto-activate if user has an active connection
-        if active and active.get("alias"):
-            alias = active["alias"]
-            if alias in conns:
-                c = conns[alias]
-                try:
-                    conn = m.add(
-                        alias="default",
-                        url=c["url"], db=c["db"],
-                        username=c["user"],
-                        api_key=c.get("api_key", ""),
-                        password=c.get("password", ""),
-                        protocol=c.get("protocol", "xmlrpc"),
-                    )
-                    conn.authenticate()
-                    logger.info(f"User {user_name}: auto-activated connection '{alias}'")
-                except Exception as e:
-                    logger.warning(f"User {user_name}: auto-activate '{alias}' failed: {e}")
+        alias_to_activate = preferred_alias or active.get("alias")
+        if alias_to_activate and alias_to_activate in conns:
+            c = conns[alias_to_activate]
+            try:
+                conn = m.add(
+                    alias="default",
+                    url=c["url"], db=c["db"],
+                    username=c["user"],
+                    api_key=c.get("api_key", ""),
+                    password=c.get("password", ""),
+                    protocol=c.get("protocol", "xmlrpc"),
+                )
+                conn.authenticate()
+                logger.info(f"User {user_name}: auto-activated connection '{alias_to_activate}'")
+            except Exception as e:
+                logger.warning(f"User {user_name}: auto-activate '{alias_to_activate}' failed: {e}")
+
         result = {
             "status": "new_profile" if is_new else "identified",
             "user": user_name,
             "profile": safe_name,
             "connections": list(conns.keys()),
-            "active": active.get("alias", None),
+            "active": alias_to_activate,
+            "validated": bool(caller),
         }
         if is_new:
             result["hint"] = (
@@ -5018,44 +5035,63 @@ def create_app():
                 response = JSONResponse({"error": str(e)}, status_code=400)
             await response(scope, receive, send)
         elif path == "/api/identify" and scope["type"] == "http" and scope.get("method") == "POST":
+            # Unified-auth-aware: if middleware validated the caller,
+            # identity comes from ContextVar (spoof-proof). Only when no
+            # HTTP auth was enforced (no secret_token, no X-Odoo-*) we
+            # fall back to body.name for dev/local compatibility.
             from starlette.requests import Request
             from starlette.responses import JSONResponse
             request = Request(scope, receive)
             try:
-                body = await request.json()
-                user_name = body.get("name", "")
-                if not user_name:
-                    response = JSONResponse({"error": "name required"}, status_code=400)
+                body = await request.json() if await request.body() else {}
+            except Exception:
+                body = {}
+            caller = _odoo_caller_ctx.get()
+            try:
+                if caller:
+                    user_name = caller["mcp_user"]
+                    safe_name = user_name
+                    preferred_alias = caller.get("alias")
                 else:
+                    user_name = (body.get("name") or "").strip()
+                    if not user_name:
+                        response = JSONResponse(
+                            {"error": "name required (or use unified-auth headers)"},
+                            status_code=400)
+                        await response(scope, receive, send)
+                        return
                     safe_name = _sanitize_name(user_name)
-                    is_new = not os.path.isdir(os.path.join(DATA_DIR, "users", safe_name))
-                    _session_users["current"] = user_name
-                    conns = _load_user_connections(user_name)
-                    active = _load_user_active(user_name)
-                    # Auto-activate if user has saved connection
-                    if active and active.get("alias") and active["alias"] in conns:
-                        c = conns[active["alias"]]
-                        try:
-                            conn = manager.add(
-                                alias="default",
-                                url=c["url"], db=c["db"],
-                                username=c["user"],
-                                api_key=c.get("api_key", ""),
-                                password=c.get("password", ""),
-                                protocol=c.get("protocol", "xmlrpc"),
-                            )
-                            conn.authenticate()
-                        except Exception:
-                            pass
-                    response = JSONResponse({
-                        "status": "new_profile" if is_new else "identified",
-                        "user": user_name,
-                        "profile": safe_name,
-                        "data_dir": f"/data/users/{safe_name}",
-                        "memory_dir": f"/data/memory/users/{safe_name}",
-                        "connections": list(conns.keys()),
-                        "active": active.get("alias"),
-                    })
+                    preferred_alias = None
+
+                is_new = not os.path.isdir(os.path.join(DATA_DIR, "users", safe_name))
+                _session_users["current"] = user_name
+                conns = _load_user_connections(user_name)
+                active = _load_user_active(user_name)
+                alias_to_activate = preferred_alias or active.get("alias")
+                if alias_to_activate and alias_to_activate in conns:
+                    c = conns[alias_to_activate]
+                    try:
+                        conn = manager.add(
+                            alias="default",
+                            url=c["url"], db=c["db"],
+                            username=c["user"],
+                            api_key=c.get("api_key", ""),
+                            password=c.get("password", ""),
+                            protocol=c.get("protocol", "xmlrpc"),
+                        )
+                        conn.authenticate()
+                    except Exception:
+                        pass
+                response = JSONResponse({
+                    "status": "new_profile" if is_new else "identified",
+                    "user": user_name,
+                    "profile": safe_name,
+                    "data_dir": f"/data/users/{safe_name}",
+                    "memory_dir": f"/data/memory/users/{safe_name}",
+                    "connections": list(conns.keys()),
+                    "active": alias_to_activate,
+                    "validated": bool(caller),
+                })
             except Exception as e:
                 response = JSONResponse({"error": str(e)}, status_code=400)
             await response(scope, receive, send)
