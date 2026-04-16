@@ -1172,15 +1172,151 @@ def _get_mcp_session_key() -> str:
 
 
 def _get_current_user(args: dict) -> str | None:
-    """Get current user, isolated per MCP session."""
+    """Get current user, isolated per MCP session.
+
+    Priority:
+      0. HTTP-validated Odoo caller (unified-auth, task 2)
+      1. Per-session user set by identify()
+      2. Backward-compat "current" slot
+    """
+    caller = _odoo_caller_ctx.get()
+    if caller:
+        return caller["mcp_user"]
     key = _get_mcp_session_key()
-    # 1. Per-session user (set by identify)
     if key in _session_users:
         return _session_users[key]
-    # 2. Fallback: "current" (single-session backward compat)
     if "current" in _session_users:
         return _session_users["current"]
     return None
+
+
+# ─── Odoo API-key authentication middleware (unified auth, task 2) ──
+import threading as _auth_threading
+import hashlib as _auth_hashlib
+import time as _auth_time
+import ssl as _auth_ssl
+
+# cache_key (sha256) → (mcp_user, login, uid, expires_at)
+_auth_cache: dict[str, tuple[str, str, int, float]] = {}
+_auth_cache_lock = _auth_threading.Lock()
+AUTH_CACHE_TTL = int(os.environ.get("AUTH_CACHE_TTL", "300"))  # 5 minutes default
+
+# Per-async-task validated Odoo caller. Set by ASGI middleware,
+# read by MCP tool handlers via _get_current_user.
+_odoo_caller_ctx: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "odoo_caller", default=None,
+)
+
+
+def _resolve_mcp_user(url: str, db: str, login: str, api_key: str) -> tuple[str, str] | None:
+    """Find the MCP user whose connections.json contains exactly this 4-tuple.
+
+    Returns (mcp_user_safe_name, alias) or None if no profile owns this key.
+    """
+    norm_url = url.rstrip("/")
+    users_dir = os.path.join(DATA_DIR, "users")
+    if not os.path.isdir(users_dir):
+        return None
+    for mcp_user in sorted(os.listdir(users_dir)):
+        conns_file = os.path.join(users_dir, mcp_user, "connections.json")
+        if not os.path.isfile(conns_file):
+            continue
+        try:
+            with open(conns_file, "r", encoding="utf-8") as f:
+                conns = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        for alias, c in (conns or {}).items():
+            if (c.get("url", "").rstrip("/") == norm_url
+                    and c.get("db") == db
+                    and c.get("user") == login
+                    and c.get("api_key") == api_key):
+                return mcp_user, alias
+    return None
+
+
+def _xmlrpc_validate(url: str, db: str, login: str, api_key: str) -> int | None:
+    """Validate (login, api_key) against Odoo XMLRPC. Returns uid or None."""
+    try:
+        ctx = _auth_ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _auth_ssl.CERT_NONE
+        common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", context=ctx)
+        uid = common.authenticate(db, login, api_key, {})
+        return uid if uid else None
+    except Exception as e:
+        logger.warning(f"[AUTH] XMLRPC validate failed for {login}@{url}/{db}: {e}")
+        return None
+
+
+def get_caller_odoo_user(headers: dict) -> dict | None:
+    """Resolve calling MCP user from HTTP headers.
+
+    Required headers (bytes-keyed, as ASGI scope["headers"]):
+        Authorization: Bearer <api_key>
+        X-Odoo-Url:    <https://...>
+        X-Odoo-Db:     <db>
+        X-Odoo-Login:  <login>
+
+    Optional ENV: ALLOWED_ODOO_URLS (comma-separated whitelist).
+
+    Returns dict {mcp_user, alias, url, db, login, uid} or None.
+    """
+    auth = headers.get(b"authorization", b"").decode().strip()
+    if not auth.lower().startswith("bearer "):
+        return None
+    api_key = auth[7:].strip()
+    url = headers.get(b"x-odoo-url", b"").decode().strip().rstrip("/")
+    db = headers.get(b"x-odoo-db", b"").decode().strip()
+    login = headers.get(b"x-odoo-login", b"").decode().strip()
+    if not all([api_key, url, db, login]):
+        return None
+
+    allowed_env = os.environ.get("ALLOWED_ODOO_URLS", "").strip()
+    if allowed_env:
+        allowed = {u.strip().rstrip("/") for u in allowed_env.split(",") if u.strip()}
+        if url not in allowed:
+            logger.warning(f"[AUTH] Rejected non-whitelisted Odoo URL: {url}")
+            return None
+
+    cache_key = _auth_hashlib.sha256(f"{url}|{db}|{login}|{api_key}".encode()).hexdigest()
+    now = _auth_time.time()
+
+    with _auth_cache_lock:
+        cached = _auth_cache.get(cache_key)
+        if cached and cached[3] > now:
+            mcp_user, cached_login, uid, _exp = cached
+            resolved = _resolve_mcp_user(url, db, login, api_key)
+            alias = resolved[1] if resolved else "?"
+            return {
+                "mcp_user": mcp_user, "alias": alias,
+                "url": url, "db": db, "login": cached_login, "uid": uid,
+            }
+
+    uid = _xmlrpc_validate(url, db, login, api_key)
+    if not uid:
+        return None
+
+    resolved = _resolve_mcp_user(url, db, login, api_key)
+    if not resolved:
+        logger.warning(
+            f"[AUTH] Valid Odoo key but no registered MCP user for "
+            f"{login}@{url}/{db}. Use POST /api/user/register-connection first."
+        )
+        return None
+    mcp_user, alias = resolved
+
+    with _auth_cache_lock:
+        _auth_cache[cache_key] = (mcp_user, login, uid, now + AUTH_CACHE_TTL)
+        if len(_auth_cache) > 1000:
+            for k, v in list(_auth_cache.items()):
+                if v[3] <= now:
+                    _auth_cache.pop(k, None)
+
+    return {
+        "mcp_user": mcp_user, "alias": alias,
+        "url": url, "db": db, "login": login, "uid": uid,
+    }
 
 
 # ─── Memory storage helpers ─────────────────────────────────
@@ -4312,20 +4448,45 @@ def create_app():
                     "/oauth/token", "/oauth/register"}
 
     def _check_auth(headers):
-        """Check X-Api-Token or Bearer token. Returns True if valid."""
+        """Backward-compat: True if request has valid legacy MCP credentials.
+
+        Used for paths where unified-auth is not yet enforced (Ollama
+        passthrough fallback, OAuth flow). New-style Odoo-key auth is
+        handled by `_check_auth_and_resolve` below.
+        """
         if not secret_token:
             return True
-        # X-Api-Token header
         api_token = headers.get(b"x-api-token", b"").decode()
         if api_token and api_token == secret_token:
             return True
-        # Bearer token (OAuth 2.0)
         auth = headers.get(b"authorization", b"").decode()
         if auth.startswith("Bearer "):
             bearer = auth[7:]
             if bearer == secret_token:
                 return True
         return False
+
+    def _check_auth_and_resolve(headers):
+        """Auth check that also resolves the calling MCP user.
+
+        Strategy:
+          1. If headers carry the new unified-auth schema (X-Odoo-Url +
+             Bearer + X-Odoo-Db + X-Odoo-Login), validate XMLRPC and
+             resolve to a registered MCP user. Success → set ContextVar.
+             Failure → reject (do NOT fall back to legacy — caller chose
+             this schema explicitly).
+          2. Otherwise, fall back to legacy `_check_auth` (no caller
+             identity bound; tools rely on identify()/_session_users).
+
+        Returns (ok: bool, caller: dict | None).
+        """
+        if headers.get(b"x-odoo-url"):
+            caller = get_caller_odoo_user(headers)
+            if caller:
+                _odoo_caller_ctx.set(caller)
+                return True, caller
+            return False, None
+        return _check_auth(headers), None
 
     async def app(scope, receive, send):
         if scope["type"] == "lifespan":
@@ -4458,22 +4619,34 @@ def create_app():
             return
 
         # ── Authentication for protected paths ─────────────────────
-        if scope["type"] == "http" and secret_token:
+        # Unified-auth: try Odoo API-key validation first (sets ContextVar
+        # so tool handlers can read the validated caller). Falls back to
+        # legacy secret_token auth when the request does not carry the
+        # X-Odoo-* schema. Runs even without secret_token configured so
+        # ContextVar gets set for downstream tools.
+        if scope["type"] == "http":
             check_path = path.rstrip("/")
             needs_auth = (check_path in protected_paths
                           or check_path.startswith("/messages/"))
             is_public = check_path in public_paths
             if needs_auth and not is_public:
                 headers = dict(scope.get("headers", []))
-                if not _check_auth(headers):
-                    from starlette.responses import JSONResponse
-                    host = headers.get(b"host", b"localhost").decode()
-                    response = JSONResponse(
-                        {"error": "Unauthorized", "hint": "Use Bearer token or X-Api-Token header"},
-                        status_code=401,
-                        headers={"WWW-Authenticate": f'Bearer resource_metadata="https://{host}/.well-known/oauth-authorization-server"'})
-                    await response(scope, receive, send)
-                    return
+                # Skip enforcement entirely if no auth is configured AND
+                # the caller is not using the unified schema.
+                if secret_token or headers.get(b"x-odoo-url"):
+                    ok, _caller = _check_auth_and_resolve(headers)
+                    if not ok:
+                        from starlette.responses import JSONResponse
+                        host = headers.get(b"host", b"localhost").decode()
+                        response = JSONResponse(
+                            {"error": "Unauthorized",
+                             "hint": "Use 'Authorization: Bearer <odoo_api_key>' + "
+                                     "X-Odoo-Url/Db/Login, or legacy X-Api-Token. "
+                                     "Register key first via POST /api/user/register-connection."},
+                            status_code=401,
+                            headers={"WWW-Authenticate": f'Bearer resource_metadata="https://{host}/.well-known/oauth-authorization-server"'})
+                        await response(scope, receive, send)
+                        return
 
         # ── Ollama passthrough (/ollama/* → OLLAMA_UPSTREAM) ───────
         if scope["type"] == "http" and (path == "/ollama" or path.startswith("/ollama/")):
@@ -4883,6 +5056,93 @@ def create_app():
                         "connections": list(conns.keys()),
                         "active": active.get("alias"),
                     })
+            except Exception as e:
+                response = JSONResponse({"error": str(e)}, status_code=400)
+            await response(scope, receive, send)
+        elif path == "/api/user/register-connection" and scope["type"] == "http" and scope.get("method") == "POST":
+            # Self-registering endpoint for a single (alias → url/db/login/api_key)
+            # binding under an MCP user profile. Authenticates via XMLRPC validation
+            # of the supplied key — no separate token required.
+            from starlette.requests import Request
+            from starlette.responses import JSONResponse
+            request = Request(scope, receive)
+            try:
+                body = await request.json()
+                name = (body.get("name") or "").strip()
+                alias = (body.get("alias") or "").strip()
+                url = (body.get("url") or "").strip().rstrip("/")
+                db = (body.get("db") or "").strip()
+                login = (body.get("login") or "").strip()
+                api_key = (body.get("api_key") or "").strip()
+                make_active = bool(body.get("active"))
+                if not all([name, alias, url, db, login, api_key]):
+                    response = JSONResponse(
+                        {"error": "name, alias, url, db, login, api_key are required"},
+                        status_code=400)
+                    await response(scope, receive, send)
+                    return
+
+                uid = _xmlrpc_validate(url, db, login, api_key)
+                if not uid:
+                    response = JSONResponse(
+                        {"error": "Invalid Odoo credentials — XMLRPC authenticate failed"},
+                        status_code=401)
+                    await response(scope, receive, send)
+                    return
+
+                # Conflict: same 4-tuple already bound to a different profile?
+                existing = _resolve_mcp_user(url, db, login, api_key)
+                if existing and existing[0] != _sanitize_name(name):
+                    response = JSONResponse(
+                        {"error": "Connection already bound to another MCP profile",
+                         "owner": existing[0]},
+                        status_code=409)
+                    await response(scope, receive, send)
+                    return
+
+                # Ownership proof for non-empty existing profile:
+                # caller must already have at least one connection in this
+                # profile with the same login (email-style identity match).
+                # This lets an owner add new Odoo instances (different
+                # url+db) but blocks an unrelated identity from hijacking
+                # a profile name.
+                conns = _load_user_connections(name) or {}
+                if conns:
+                    proves_ownership = any(
+                        c.get("user") == login for c in conns.values()
+                    )
+                    if not proves_ownership:
+                        response = JSONResponse(
+                            {"error": "Profile already owned by another identity. "
+                                      "Cannot bind unrelated Odoo login."},
+                            status_code=403)
+                        await response(scope, receive, send)
+                        return
+
+                conns[alias] = {
+                    "url": url, "db": db, "user": login,
+                    "api_key": api_key, "uid": uid,
+                    "protocol": body.get("protocol", "xmlrpc"),
+                }
+                _save_user_connections(name, conns)
+                if make_active:
+                    _save_user_active(name, {"alias": alias})
+
+                # Invalidate cache for this 4-tuple so next call picks up
+                # the new mapping (e.g. alias rename, key rotation).
+                cache_key = _auth_hashlib.sha256(
+                    f"{url}|{db}|{login}|{api_key}".encode()).hexdigest()
+                with _auth_cache_lock:
+                    _auth_cache.pop(cache_key, None)
+
+                response = JSONResponse({
+                    "status": "registered",
+                    "user": name,
+                    "profile": _sanitize_name(name),
+                    "alias": alias,
+                    "uid": uid,
+                    "active": alias if make_active else None,
+                })
             except Exception as e:
                 response = JSONResponse({"error": str(e)}, status_code=400)
             await response(scope, receive, send)

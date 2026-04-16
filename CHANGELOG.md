@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Unified Auth middleware (task 2 от MCP unified auth plan)
+- **`get_caller_odoo_user(headers)`** middleware: валидира `Authorization:
+  Bearer <api_key>` + `X-Odoo-Url` + `X-Odoo-Db` + `X-Odoo-Login` срещу
+  Odoo XMLRPC `common.authenticate(db, login, api_key, {})` → uid. Cache
+  5 мин (TTL през env `AUTH_CACHE_TTL`).
+- **`_resolve_mcp_user(url, db, login, api_key)`** — сканира
+  `data/users/*/connections.json` и връща MCP user profile който съдържа
+  точно тази 4-ка. Идентичността се определя от регистрираните
+  connections, не от arbitrary client claim.
+- **ContextVar `_odoo_caller_ctx`** — per-async-task validated caller,
+  set от ASGI middleware-а, четен от `_get_current_user()` с приоритет
+  над per-session identify().
+- **Нов endpoint `POST /api/user/register-connection`** — self-register
+  (alias → url/db/login/api_key) под MCP profile. Auth-ът е built-in:
+  XMLRPC validate на body-то. Ownership proof: ако profile вече съдържа
+  connections, новата трябва да дели (url, db, login) с поне една
+  съществуваща — иначе 403. Conflict (същата 4-ка в друг profile) → 409.
+- **Whitelist `ALLOWED_ODOO_URLS`** (env) — preview за task 9.
+
 ### Security
 - **Fix `existing_profiles` information leak in `identify()`** — премахнато изложено поле
   `existing_profiles` (и от MCP tool, и от HTTP `/api/identify`) което връщаше
