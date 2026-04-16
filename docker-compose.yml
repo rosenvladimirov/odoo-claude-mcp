@@ -76,6 +76,9 @@ services:
       - ODOO_PASSWORD=${ODOO_PASSWORD:-}
       - ODOO_API_KEY=${ODOO_API_KEY:-}
       - ODOO_PROTOCOL=${ODOO_PROTOCOL:-xmlrpc}
+      - MCP_SECRET_TOKEN=${MCP_SECRET_TOKEN:-}
+      - AUTH_CACHE_TTL=${AUTH_CACHE_TTL:-300}
+      - ALLOWED_ODOO_URLS=${ALLOWED_ODOO_URLS:-}
       - GOOGLE_CREDENTIALS_FILE=/data/google_credentials.json
       - GOOGLE_TOKEN_FILE=/data/google_token.json
       - TELEGRAM_API_ID=${TELEGRAM_API_ID:-}

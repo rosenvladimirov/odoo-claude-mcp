@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Integration test suite + plan completion (tasks 8–10)
+- `odoo-rpc-mcp/tests/test_unified_auth.sh` — 10 scenario bash test:
+  register negative/positive/conflict, identify stdio-compat vs
+  unified-auth spoof defense, cache hit latency, whitelist
+  enforcement, full register→identify cycle. 9/10 passing, 1 skipped
+  when `ALLOWED_ODOO_URLS` is empty (whitelist verified manually
+  with `ALLOWED_ODOO_URLS=https://ussmed.odoo.com` → non-whitelisted
+  URL → 401).
+- **Task 8** (stdio backwards compat): ToDo-state already satisfied
+  in tasks 2/3/4 — when no HTTP auth context exists (no
+  `X-Odoo-Url` header), `_get_current_user()` falls back to
+  `identify()`-set session slot. Test T5 asserts this.
+- **Task 9** (whitelist enforcement): `ALLOWED_ODOO_URLS` env wired
+  into `docker-compose.yml` for the `odoo-rpc-mcp` service.
+  Non-whitelisted URL with valid key → 401 (test T9).
+- **Task 10** (integration tests): the full suite above.
+
 ### Added — Web login for terminal gateway (task 7 от unified auth plan)
 - `claude-terminal/landing.html` вече съдържа login форма (Display name,
   Odoo URL, Database, Login, Alias, API Key). При submit прави
