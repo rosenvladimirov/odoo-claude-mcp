@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security — Lock memory / user_connection to validated user (task 4)
+- `_get_current_user()` docstring enforces invariant: identity never
+  reads from `args`, only from ContextVar or per-session identify state.
+- `identify` tool no longer writes to `_session_users` when a
+  validated caller is present — ContextVar is authoritative; stale
+  session state would only confuse later non-HTTP tool calls.
+- `memory_*` and `user_connection_*` tools were already passing
+  identity through `_get_current_user`, so they are now transparently
+  locked to the validated caller without additional per-tool changes.
+
 ### Security — `identify()` refactor (task 3 от unified auth plan)
 - MCP tool `identify` и HTTP `POST /api/identify` вече използват валидирания
   caller от `_odoo_caller_ctx` (HTTP middleware). `args["name"]` / `body.name`

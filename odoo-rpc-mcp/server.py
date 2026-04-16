@@ -1172,12 +1172,23 @@ def _get_mcp_session_key() -> str:
 
 
 def _get_current_user(args: dict) -> str | None:
-    """Get current user, isolated per MCP session.
+    """Resolve the current MCP user for the running request.
+
+    Security invariant (task 4): this function NEVER reads identity from
+    ``args``. Callers of memory_* / user_connection_* tools cannot pass a
+    ``user`` argument and address another profile — identity comes only
+    from the HTTP-validated ContextVar or from the per-session slot set
+    by ``identify()``.
 
     Priority:
-      0. HTTP-validated Odoo caller (unified-auth, task 2)
-      1. Per-session user set by identify()
-      2. Backward-compat "current" slot
+      0. HTTP-validated Odoo caller (unified-auth, task 2).
+         ContextVar ``_odoo_caller_ctx`` is set by the ASGI middleware
+         after successful XMLRPC validation + connection lookup.
+      1. Per-session user bound by ``identify()`` tool call (stdio).
+      2. Backward-compat "current" slot (single-session legacy).
+
+    Returns None if no identity is bound — tools should then error with
+    "Call identify(name) first" or "Use unified-auth headers".
     """
     caller = _odoo_caller_ctx.get()
     if caller:
@@ -3104,9 +3115,13 @@ def _execute_tool(name: str, args: dict) -> Any:
 
         is_new = not os.path.isdir(os.path.join(DATA_DIR, "users", safe_name))
 
-        session_key = _get_mcp_session_key()
-        _session_users[session_key] = user_name
-        _session_users["current"] = user_name  # backward compat
+        # Only write to session_users when we're NOT relying on unified-auth
+        # ContextVar. When caller is set, ContextVar is authoritative and
+        # session_users would just be stale noise for later calls.
+        if not caller:
+            session_key = _get_mcp_session_key()
+            _session_users[session_key] = user_name
+            _session_users["current"] = user_name  # backward compat
 
         conns = _load_user_connections(user_name)
         active = _load_user_active(user_name)
