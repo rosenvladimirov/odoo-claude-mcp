@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Odoo Claude MCP — Production-grade MCP server suite for Odoo ERP</title>
+<meta name="description" content="Self-hosted Model Context Protocol server suite that connects Claude, Claude Code, and MCP clients to Odoo, GitHub, Kubernetes, and more.">
+<meta name="author" content="Rosen Vladimirov — BL Consulting">
+
+<!-- Open Graph -->
+<meta property="og:title" content="Odoo Claude MCP">
+<meta property="og:description" content="Turn any Odoo instance into a first-class citizen in the Claude ecosystem.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://rosenvladimirov.github.io/odoo-claude-mcp/">
+
+<!-- Fonts -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=JetBrains+Mono:wght@400;500;700&family=Inter+Tight:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<!-- Grain overlay -->
+<div class="grain"></div>
+
+<!-- Navigation -->
+<nav class="nav">
+  <div class="nav-inner">
+    <a href="#" class="nav-logo">
+      <span class="logo-mark">◈</span>
+      <span class="logo-text">odoo<span class="logo-dim">/</span>claude<span class="logo-dim">/</span>mcp</span>
+    </a>
+    <div class="nav-links">
+      <a href="#watch">Demo</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#servers">Servers</a>
+      <a href="#deploy">Deploy</a>
+      <a href="https://www.youtube.com/@DavidRosen8424-Gaming" class="nav-yt" target="_blank" rel="noopener" title="YouTube channel">
+        <svg width="18" height="13" viewBox="0 0 28 20" fill="currentColor"><path d="M27.4 3.1a3.5 3.5 0 0 0-2.5-2.5C22.8 0 14 0 14 0S5.2 0 3.1.6A3.5 3.5 0 0 0 .6 3.1C0 5.2 0 10 0 10s0 4.8.6 6.9a3.5 3.5 0 0 0 2.5 2.5C5.2 20 14 20 14 20s8.8 0 10.9-.6a3.5 3.5 0 0 0 2.5-2.5C28 14.8 28 10 28 10s0-4.8-.6-6.9zM11.2 14.3V5.7L18.6 10l-7.4 4.3z"/></svg>
+      </a>
+      <a href="https://github.com/rosenvladimirov/odoo-claude-mcp" class="nav-github" target="_blank" rel="noopener">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+        GitHub
+      </a>
+    </div>
+  </div>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="hero-grid">
+
+    <div class="hero-content">
+      <div class="hero-tag">
+        <span class="dot"></span>
+        <span>Production-grade · MCP server suite · v1.0</span>
+      </div>
+
+      <h1 class="hero-title">
+        <span class="title-line">Turn your Odoo</span>
+        <span class="title-line">into a <em>Claude</em></span>
+        <span class="title-line">native citizen.</span>
+      </h1>
+
+      <p class="hero-lead">
+        A self-hosted Model Context Protocol server suite that connects
+        <strong>Claude</strong>, <strong>Claude Code</strong>, and any MCP-compatible client
+        to <strong>Odoo ERP</strong>, GitHub, filesystems, Kubernetes, Microsoft Teams,
+        and a browser-based Claude Code terminal — all through a unified, authenticated gateway.
+      </p>
+
+      <div class="hero-cta">
+        <a href="https://github.com/rosenvladimirov/odoo-claude-mcp" class="btn btn-primary" target="_blank" rel="noopener">
+          <span>View on GitHub</span>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 17L17 7M17 7H7M17 7V17"/></svg>
+        </a>
+        <a href="#watch" class="btn btn-ghost btn-play">
+          <svg width="12" height="14" viewBox="0 0 12 14" fill="currentColor"><path d="M12 7L0 14V0L12 7Z"/></svg>
+          <span>Watch demo</span>
+        </a>
+      </div>
+
+      <div class="hero-stats">
+        <div class="stat">
+          <div class="stat-num">8</div>
+          <div class="stat-label">MCP servers</div>
+        </div>
+        <div class="stat-divider"></div>
+        <div class="stat">
+          <div class="stat-num">188</div>
+          <div class="stat-label">MCP tools</div>
+        </div>
+        <div class="stat-divider"></div>
+        <div class="stat">
+          <div class="stat-num">15→19</div>
+          <div class="stat-label">Odoo versions</div>
+        </div>
+        <div class="stat-divider"></div>
+        <div class="stat">
+          <div class="stat-num">AGPL-3</div>
+          <div class="stat-label">Open source</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="hero-visual">
+      <div class="terminal">
+        <div class="terminal-chrome">
+          <span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span>
+          <span class="terminal-title">claude-terminal · bash</span>
+        </div>
+        <div class="terminal-body">
+<pre><span class="c-prompt">$</span> <span class="c-cmd">claude mcp add odoo-mcp</span> \
+    <span class="c-flag">--url</span> <span class="c-str">https://mcp.yourdomain.com/mcp</span> \
+    <span class="c-flag">--header</span> <span class="c-str">"Authorization: Bearer $TOKEN"</span>
+
+<span class="c-ok">✓</span> Connected to <span class="c-hi">odoo-mcp</span> (80 tools loaded)
+<span class="c-ok">✓</span> Profile: <span class="c-hi">rosen</span> · 13 Odoo connections
+
+<span class="c-prompt">&gt;</span> <span class="c-user">search our unpaid invoices over €5,000</span>
+
+<span class="c-dim">[odoo_search_read]</span> account.move
+<span class="c-dim">Found 7 records · Total: €42,380.50</span>
+
+<span class="c-prompt">&gt;</span> <span class="c-user">tokenize and index them with ai_tokenize_record</span>
+
+<span class="c-dim">[ai_tokenize_record] ×7 · Qdrant: vectors upserted</span>
+<span class="c-ok">✓</span> <span class="c-hi">Done.</span> Ready for semantic search.<span class="caret">▊</span>
+</pre>
+        </div>
+      </div>
+
+      <div class="float-badge float-badge-1">
+        <span class="badge-label">Claude.ai</span>
+        <span class="badge-value">Connector Ready</span>
+      </div>
+      <div class="float-badge float-badge-2">
+        <span class="badge-label">Deploy</span>
+        <span class="badge-value">Docker · K3s · Bare metal</span>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- What it is -->
+<section class="why">
+  <div class="section-inner">
+    <div class="section-label">WHY THIS EXISTS</div>
+    <h2 class="section-title">
+      Single-purpose MCP wrappers don't scale.<br>
+      <span class="muted">This one is built for real production.</span>
+    </h2>
+
+    <div class="why-grid">
+      <div class="why-card">
+        <div class="card-num">01</div>
+        <h3>Unified authentication</h3>
+        <p>Token-based auth across all MCP endpoints. One identity, all servers. Per-user profile isolation.</p>
+      </div>
+      <div class="why-card">
+        <div class="card-num">02</div>
+        <h3>Multi-tenant by design</h3>
+        <p>One stack, dozens of Odoo databases. Switch connections on the fly. Each user sees only their own data.</p>
+      </div>
+      <div class="why-card">
+        <div class="card-num">03</div>
+        <h3>Claude.ai connector ready</h3>
+        <p>Public HTTPS endpoint with bearer token auth. Register as a Custom Connector in Team or Enterprise.</p>
+      </div>
+      <div class="why-card">
+        <div class="card-num">04</div>
+        <h3>K3s & Docker Compose</h3>
+        <p>Kustomize overlays for dev and prod. Docker Compose for solo developers. Pick your scale.</p>
+      </div>
+      <div class="why-card">
+        <div class="card-num">05</div>
+        <h3>Browser-based terminal</h3>
+        <p>xterm.js + tmux + Claude Code in the browser. Themable, persistent sessions, auth-integrated.</p>
+      </div>
+      <div class="why-card">
+        <div class="card-num">06</div>
+        <h3>Vector store native</h3>
+        <p>Qdrant integration for semantic search across Odoo records. Ollama for local LLM inference.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Watch it work -->
+<section class="watch" id="watch">
+  <div class="section-inner">
+    <div class="section-label">WATCH IT WORK</div>
+    <h2 class="section-title">
+      Not a mockup. <span class="muted">A real session.</span>
+    </h2>
+    <p class="section-lead">
+      Live demonstrations on YouTube — Claude Code driving a production Odoo instance through the MCP gateway.
+      No scripts, no cuts, no narration tricks. Real queries, real data, real results.
+    </p>
+
+    <div class="watch-grid">
+      <div class="watch-featured">
+        <div class="video-frame">
+          <iframe
+            src="https://www.youtube-nocookie.com/embed/1zPNxUV76ws?rel=0&modestbranding=1"
+            title="Claude Code + MCP driving Odoo — live demo"
+            frameborder="0"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+            allowfullscreen
+            loading="lazy"></iframe>
+        </div>
+        <div class="video-meta">
+          <div class="video-tag">
+            <span class="live-dot"></span>
+            <span>FEATURED DEMO</span>
+          </div>
+          <h3>Claude driving production Odoo through MCP</h3>
+          <p>
+            End-to-end demonstration: natural language query → Claude plans tool calls →
+            <code>odoo-rpc-mcp</code> executes → results synthesized back as answer.
+            The kind of workflow that used to take a developer an hour.
+          </p>
+        </div>
+      </div>
+
+      <div class="watch-secondary">
+        <a href="https://www.youtube.com/watch?v=2sOAN3kbw9I" class="video-card" target="_blank" rel="noopener">
+          <div class="video-thumb">
+            <img src="https://i.ytimg.com/vi/2sOAN3kbw9I/hqdefault.jpg" alt="Second demo video thumbnail" loading="lazy">
+            <div class="video-play">
+              <svg width="20" height="22" viewBox="0 0 12 14" fill="currentColor"><path d="M12 7L0 14V0L12 7Z"/></svg>
+            </div>
+          </div>
+          <div class="video-card-meta">
+            <div class="video-card-title">More from the channel</div>
+            <div class="video-card-sub">Additional walkthrough on <strong>@DavidRosen8424-Gaming</strong> ↗</div>
+          </div>
+        </a>
+
+        <a href="https://www.youtube.com/@DavidRosen8424-Gaming" class="channel-cta" target="_blank" rel="noopener">
+          <div class="channel-cta-icon">
+            <svg width="28" height="20" viewBox="0 0 28 20" fill="currentColor"><path d="M27.4 3.1a3.5 3.5 0 0 0-2.5-2.5C22.8 0 14 0 14 0S5.2 0 3.1.6A3.5 3.5 0 0 0 .6 3.1C0 5.2 0 10 0 10s0 4.8.6 6.9a3.5 3.5 0 0 0 2.5 2.5C5.2 20 14 20 14 20s8.8 0 10.9-.6a3.5 3.5 0 0 0 2.5-2.5C28 14.8 28 10 28 10s0-4.8-.6-6.9zM11.2 14.3V5.7L18.6 10l-7.4 4.3z"/></svg>
+          </div>
+          <div class="channel-cta-text">
+            <div class="channel-cta-label">SUBSCRIBE</div>
+            <div class="channel-cta-name">@DavidRosen8424-Gaming</div>
+            <div class="channel-cta-sub">Odoo · AI · MCP demonstrations</div>
+          </div>
+          <div class="channel-cta-arrow">→</div>
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Architecture -->
+<section class="arch" id="architecture">
+  <div class="section-inner">
+    <div class="section-label">ARCHITECTURE</div>
+    <h2 class="section-title">How the stack fits together</h2>
+    <p class="section-lead">
+      Claude connects to a unified gateway. The gateway proxies to specialized MCP servers.
+      Each server is a Docker container with its own scope, tools, and authentication.
+    </p>
+
+    <div class="arch-diagram">
+      <div class="arch-row arch-row-client">
+        <div class="arch-box arch-client">
+          Claude.ai · Claude Code · Claude Desktop · IDE
+        </div>
+      </div>
+
+      <div class="arch-arrow">
+        <div class="arch-arrow-line"></div>
+        <div class="arch-arrow-label">HTTPS + Token Auth</div>
+      </div>
+
+      <div class="arch-row arch-row-gateway">
+        <div class="arch-box arch-gateway">
+          <div class="arch-box-title">Unified MCP Gateway</div>
+          <div class="arch-box-sub">server.py — routing, auth, profile isolation, shared memory</div>
+        </div>
+      </div>
+
+      <div class="arch-row arch-row-servers">
+        <div class="arch-server arch-server-primary">
+          <div class="server-icon">◆</div>
+          <div class="server-name">odoo-rpc-mcp</div>
+          <div class="server-desc">83 native Odoo tools</div>
+        </div>
+        <div class="arch-server">
+          <div class="server-icon">◇</div>
+          <div class="server-name">ee-mcp</div>
+          <div class="server-desc">Odoo Enterprise</div>
+        </div>
+        <div class="arch-server">
+          <div class="server-icon">◇</div>
+          <div class="server-name">oca-mcp</div>
+          <div class="server-desc">OCA modules</div>
+        </div>
+        <div class="arch-server">
+          <div class="server-icon">◇</div>
+          <div class="server-name">github-mcp</div>
+          <div class="server-desc">Git operations</div>
+        </div>
+        <div class="arch-server">
+          <div class="server-icon">◇</div>
+          <div class="server-name">filesystem-mcp</div>
+          <div class="server-desc">Scoped I/O</div>
+        </div>
+        <div class="arch-server">
+          <div class="server-icon">◇</div>
+          <div class="server-name">portainer-mcp</div>
+          <div class="server-desc">Docker · K8s</div>
+        </div>
+        <div class="arch-server">
+          <div class="server-icon">◇</div>
+          <div class="server-name">teams-mcp</div>
+          <div class="server-desc">MS Teams</div>
+        </div>
+        <div class="arch-server">
+          <div class="server-icon">◆</div>
+          <div class="server-name">claude-terminal</div>
+          <div class="server-desc">Browser shell</div>
+        </div>
+      </div>
+
+      <div class="arch-arrow arch-arrow-split">
+        <div class="arch-arrow-line"></div>
+      </div>
+
+      <div class="arch-row arch-row-data">
+        <div class="arch-data">
+          <div class="data-name">Odoo</div>
+          <div class="data-sub">15 · 16 · 17 · 18 · 19</div>
+        </div>
+        <div class="arch-data">
+          <div class="data-name">Qdrant</div>
+          <div class="data-sub">Vector DB</div>
+        </div>
+        <div class="arch-data">
+          <div class="data-name">Ollama</div>
+          <div class="data-sub">Local LLMs</div>
+        </div>
+        <div class="arch-data">
+          <div class="data-name">Postgres</div>
+          <div class="data-sub">State · Memory</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Servers detail -->
+<section class="servers" id="servers">
+  <div class="section-inner">
+    <div class="section-label">THE 8 MCP SERVERS</div>
+    <h2 class="section-title">Each server, one clear job.</h2>
+
+    <div class="server-list">
+
+      <article class="server-card server-card-primary">
+        <div class="server-card-head">
+          <div class="server-card-name">odoo-rpc-mcp</div>
+          <div class="server-card-badge">FLAGSHIP</div>
+        </div>
+        <p class="server-card-desc">
+          The core server. 83 native tools plus 105 proxied tools (188 total) covering every aspect of Odoo development, operations, and business workflow.
+        </p>
+        <div class="server-card-tags">
+          <span>CRUD</span>
+          <span>Web session</span>
+          <span>Reports</span>
+          <span>Attachments</span>
+          <span>Gmail</span>
+          <span>Telegram</span>
+          <span>l10n_bg</span>
+          <span>Qdrant AI</span>
+          <span>Multi-connection</span>
+          <span>Memory</span>
+          <span>SSH · Git</span>
+        </div>
+      </article>
+
+      <article class="server-card">
+        <div class="server-card-head">
+          <div class="server-card-name">ee-mcp</div>
+        </div>
+        <p class="server-card-desc">
+          Odoo Enterprise-specific tools. License validation, EE repo management, dependency analysis, conflict detection with OCA.
+        </p>
+      </article>
+
+      <article class="server-card">
+        <div class="server-card-head">
+          <div class="server-card-name">oca-mcp</div>
+        </div>
+        <p class="server-card-desc">
+          Deep integration with the OCA ecosystem. Clone, search, generate READMEs, migrate branches — the full toolkit.
+        </p>
+      </article>
+
+      <article class="server-card server-card-primary">
+        <div class="server-card-head">
+          <div class="server-card-name">claude-terminal</div>
+          <div class="server-card-badge">WEB UI</div>
+        </div>
+        <p class="server-card-desc">
+          Claude Code running in the browser. xterm.js + tmux with persistent sessions, themable UI (Catppuccin, Dracula, Tokyo Night+), authenticated WebSocket gateway.
+        </p>
+        <div class="server-card-tags">
+          <span>xterm.js</span>
+          <span>tmux</span>
+          <span>WebSocket</span>
+          <span>Themes</span>
+        </div>
+      </article>
+
+      <article class="server-card">
+        <div class="server-card-head">
+          <div class="server-card-name">github-mcp</div>
+        </div>
+        <p class="server-card-desc">
+          GitHub API wrapper. Search code, issues, PRs across all accessible repos. Full REST API passthrough.
+        </p>
+      </article>
+
+      <article class="server-card">
+        <div class="server-card-head">
+          <div class="server-card-name">portainer-mcp</div>
+        </div>
+        <p class="server-card-desc">
+          Docker and Kubernetes environment management through Portainer. Deploy, inspect, scale — with Claude as your ops agent.
+        </p>
+      </article>
+
+      <article class="server-card">
+        <div class="server-card-head">
+          <div class="server-card-name">teams-mcp</div>
+        </div>
+        <p class="server-card-desc">
+          Microsoft Teams messaging integration. Post to channels, read threads, coordinate work between Odoo and Teams.
+        </p>
+      </article>
+
+      <article class="server-card">
+        <div class="server-card-head">
+          <div class="server-card-name">filesystem-mcp</div>
+        </div>
+        <p class="server-card-desc">
+          Scoped filesystem operations. Per-user isolation, read/write quotas, safe for AI agents.
+        </p>
+      </article>
+
+    </div>
+  </div>
+</section>
+
+<!-- Use Cases -->
+<section class="use-cases" id="use-cases">
+  <div class="section-inner">
+    <div class="section-label">WHO IT'S FOR</div>
+    <h2 class="section-title">Four audiences, one stack.</h2>
+
+    <div class="use-grid">
+
+      <div class="use-card">
+        <div class="use-icon">⟨/⟩</div>
+        <h3>Odoo Developers</h3>
+        <ul>
+          <li>Live module development with Claude assisting on your running instance</li>
+          <li>RPC-based module deployment — no filesystem access needed</li>
+          <li>Multi-environment workflows — dev, staging, prod in one session</li>
+          <li>OCA contribution flows — clone, test, PR through Claude</li>
+        </ul>
+      </div>
+
+      <div class="use-card">
+        <div class="use-icon">✦</div>
+        <h3>Odoo Consultants</h3>
+        <ul>
+          <li>Manage multiple client databases from one authenticated session</li>
+          <li>Per-client memory — Claude remembers context per customer</li>
+          <li>Shared team knowledge via <code>memory_share</code></li>
+          <li>Bulgaria localization — fiscal positions, VAT, НАП tools built in</li>
+        </ul>
+      </div>
+
+      <div class="use-card">
+        <div class="use-icon">◉</div>
+        <h3>Business Users</h3>
+        <ul>
+          <li>Natural language queries over real Odoo records</li>
+          <li>Invoice extraction via vision LLMs into <code>account.move</code></li>
+          <li>Semantic search — find similar contracts, tickets, records</li>
+          <li>Email & calendar coordination across Odoo, Gmail, Teams</li>
+        </ul>
+      </div>
+
+      <div class="use-card">
+        <div class="use-icon">◆</div>
+        <h3>Platform Operators</h3>
+        <ul>
+          <li>Multi-tenant hosting — isolated endpoints per client</li>
+          <li>Billing integration — usage tracking via Cloudflare AI Gateway</li>
+          <li>White-label <code>claude-terminal</code> for your customers</li>
+          <li>Kubernetes scaling — replicas scale independently by load</li>
+        </ul>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- Quick Start / Deploy -->
+<section class="deploy" id="deploy">
+  <div class="section-inner">
+    <div class="section-label" id="quickstart">GET STARTED</div>
+    <h2 class="section-title">Three ways to deploy.</h2>
+
+    <div class="deploy-tabs">
+
+      <div class="deploy-card">
+        <div class="deploy-head">
+          <span class="deploy-num">01</span>
+          <h3>Docker Compose</h3>
+          <span class="deploy-tag">Local development</span>
+        </div>
+        <div class="deploy-code">
+<pre><span class="c-comment"># Clone & configure</span>
+<span class="c-prompt">$</span> <span class="c-cmd">git clone</span> <span class="c-str">https://github.com/rosenvladimirov/odoo-claude-mcp.git</span>
+<span class="c-prompt">$</span> <span class="c-cmd">cd</span> odoo-claude-mcp
+<span class="c-prompt">$</span> <span class="c-cmd">cp</span> .env.example .env
+<span class="c-prompt">$</span> <span class="c-cmd">nano</span> .env
+
+<span class="c-comment"># Start the stack</span>
+<span class="c-prompt">$</span> <span class="c-cmd">docker compose up -d</span>
+<span class="c-ok">✓</span> 8 services running</pre>
+        </div>
+      </div>
+
+      <div class="deploy-card deploy-card-featured">
+        <div class="deploy-head">
+          <span class="deploy-num">02</span>
+          <h3>Install script</h3>
+          <span class="deploy-tag">Quickest path</span>
+        </div>
+        <div class="deploy-code">
+<pre><span class="c-comment"># Linux / macOS</span>
+<span class="c-prompt">$</span> <span class="c-cmd">curl -fsSL</span> <span class="c-str">raw.../install.sh</span> | <span class="c-cmd">bash</span>
+
+<span class="c-comment"># Windows (PowerShell admin)</span>
+<span class="c-prompt">&gt;</span> <span class="c-cmd">iwr -useb</span> <span class="c-str">raw.../install.ps1</span> | <span class="c-cmd">iex</span>
+
+<span class="c-ok">✓</span> Docker containers pulled
+<span class="c-ok">✓</span> Env configured interactively
+<span class="c-ok">✓</span> Stack up on localhost:8084</pre>
+        </div>
+      </div>
+
+      <div class="deploy-card">
+        <div class="deploy-head">
+          <span class="deploy-num">03</span>
+          <h3>Kubernetes / K3s</h3>
+          <span class="deploy-tag">Production</span>
+        </div>
+        <div class="deploy-code">
+<pre><span class="c-comment"># Kustomize overlays in k3s/</span>
+<span class="c-prompt">$</span> <span class="c-cmd">cd</span> k3s/overlays/prod
+<span class="c-prompt">$</span> <span class="c-cmd">cp</span> .env.example .env
+<span class="c-prompt">$</span> <span class="c-cmd">cp</span> ../../base/secrets.example.yaml secrets.yaml
+
+<span class="c-comment"># Edit secrets, then deploy</span>
+<span class="c-prompt">$</span> <span class="c-cmd">kubectl apply -k .</span>
+<span class="c-ok">✓</span> Deployed with cert-manager + ingress</pre>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="connector">
+      <div class="connector-text">
+        <div class="section-label">CLAUDE.AI CONNECTOR</div>
+        <h3>Register as a Custom Connector</h3>
+        <p>
+          Once deployed with a public HTTPS endpoint, register the stack in
+          Claude.ai Settings → Connectors as a Custom Connector with bearer token auth.
+          All 188 MCP tools become available in your Claude conversations immediately.
+        </p>
+        <a href="https://github.com/rosenvladimirov/odoo-claude-mcp#-claudeai-connector" class="btn btn-ghost" target="_blank" rel="noopener">Full setup guide →</a>
+      </div>
+      <div class="connector-visual">
+        <div class="form-mock">
+          <div class="form-row">
+            <label>Custom Connector URL</label>
+            <input type="text" value="https://mcp.yourdomain.com/mcp" readonly>
+          </div>
+          <div class="form-row">
+            <label>Authentication</label>
+            <input type="text" value="Bearer ••••••••••••" readonly>
+          </div>
+          <button class="form-button">Add Connector</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Bulgaria -->
+<section class="bg-section">
+  <div class="section-inner">
+    <div class="bg-grid">
+      <div>
+        <div class="section-label">BULGARIA LOCALIZATION</div>
+        <h2 class="section-title">First-class БГ support.</h2>
+        <p class="section-lead">
+          Maintained by the OCA <code>l10n-bulgaria</code> maintainer.
+          Bulgarian-specific features are not an afterthought — they're native.
+        </p>
+        <ul class="bg-list">
+          <li><strong>НАП integration</strong> — fiscal positions, VAT tax maps, audit reports</li>
+          <li><strong>l10n_bg_* module family</strong> — complete ecosystem support</li>
+          <li><strong>Образец 1</strong> — monthly НАП declaration (Наредба №Н-13/2019)</li>
+          <li><strong>Bulgarian partner ID</strong> — UIC/ЕИК, legal forms, NACE codes</li>
+          <li><strong>Transliteration</strong> — BG ⇄ EN ⇄ GR mixin for partner names</li>
+          <li><strong>НАП справка-декларация</strong> — SQL-engine audit reports</li>
+        </ul>
+      </div>
+      <div class="bg-flag">
+        <div class="flag-stripe flag-white"></div>
+        <div class="flag-stripe flag-green"></div>
+        <div class="flag-stripe flag-red"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Maintainer -->
+<section class="maintainer">
+  <div class="section-inner">
+    <div class="maintainer-card">
+      <div class="maintainer-left">
+        <div class="section-label">MAINTAINED BY</div>
+        <h2 class="maintainer-name">Rosen Vladimirov</h2>
+        <div class="maintainer-role">Founder, BL Consulting · Odoo Silver Partner · OCA l10n-bulgaria maintainer</div>
+        <p class="maintainer-bio">
+          10+ years specializing in Odoo implementations for Bulgarian businesses.
+          Executing company: <em>Terraros Комерс ЕООД</em>. The only Odoo partner in CEE
+          with direct НАП reporting integration.
+        </p>
+        <div class="maintainer-links">
+          <a href="mailto:vladimirov.rosen@gmail.com">vladimirov.rosen@gmail.com</a>
+          <span class="dim">·</span>
+          <a href="https://github.com/rosenvladimirov" target="_blank" rel="noopener">@rosenvladimirov</a>
+          <span class="dim">·</span>
+          <a href="https://www.youtube.com/@DavidRosen8424-Gaming" target="_blank" rel="noopener">YouTube</a>
+          <span class="dim">·</span>
+          <a href="https://www.linkedin.com/in/rosen-vladimirov-a5242823/" target="_blank" rel="noopener">LinkedIn</a>
+          <span class="dim">·</span>
+          <a href="https://bl-consulting.net" target="_blank" rel="noopener">bl-consulting.net</a>
+        </div>
+      </div>
+      <div class="maintainer-right">
+        <div class="flag-mark">🇧🇬</div>
+        <div class="made-in">Made in<br>Bulgaria</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Footer -->
+<footer class="footer">
+  <div class="section-inner">
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <div class="footer-logo">
+          <span class="logo-mark">◈</span>
+          <span>odoo/claude/mcp</span>
+        </div>
+        <p>Production-grade MCP server suite for Odoo ERP</p>
+        <p class="footer-license">Licensed under AGPL-3.0 · © 2026 Rosen Vladimirov</p>
+      </div>
+      <div class="footer-col">
+        <div class="footer-col-title">Project</div>
+        <a href="https://github.com/rosenvladimirov/odoo-claude-mcp" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://www.youtube.com/@DavidRosen8424-Gaming" target="_blank" rel="noopener">YouTube demos</a>
+        <a href="https://github.com/rosenvladimirov/odoo-claude-mcp/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a>
+        <a href="https://github.com/rosenvladimirov/odoo-claude-mcp/blob/main/README_BG.md" target="_blank" rel="noopener">README (BG)</a>
+        <a href="https://github.com/rosenvladimirov/odoo-claude-mcp/issues" target="_blank" rel="noopener">Issues</a>
+      </div>
+      <div class="footer-col">
+        <div class="footer-col-title">Ecosystem</div>
+        <a href="https://www.odoo.com" target="_blank" rel="noopener">Odoo</a>
+        <a href="https://odoo-community.org" target="_blank" rel="noopener">OCA</a>
+        <a href="https://github.com/OCA/l10n-bulgaria" target="_blank" rel="noopener">l10n-bulgaria</a>
+        <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener">MCP Protocol</a>
+      </div>
+      <div class="footer-col">
+        <div class="footer-col-title">Powered by</div>
+        <a href="https://www.anthropic.com" target="_blank" rel="noopener">Anthropic · Claude</a>
+        <a href="https://qdrant.tech" target="_blank" rel="noopener">Qdrant</a>
+        <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a>
+        <a href="https://xtermjs.org" target="_blank" rel="noopener">xterm.js</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

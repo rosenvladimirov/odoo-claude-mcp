@@ -1,0 +1,3 @@
+# Disable Jekyll processing — serve files as-is
+# This file tells GitHub Pages to serve the docs/ folder as a static site
+# without running Jekyll's build process.
