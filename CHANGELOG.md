@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Web login for terminal gateway (task 7 от unified auth plan)
+- `claude-terminal/landing.html` вече съдържа login форма (Display name,
+  Odoo URL, Database, Login, Alias, API Key). При submit прави
+  `POST /api/user/register-connection`. Успех → redirect към terminal
+  с URL args, които start-session.sh обработва.
+- Non-secret полета се cache-ват в `localStorage` (`mcp_web_login_v1`),
+  API ключът винаги се въвежда ръчно за да не виси в browser storage.
+- `gateway.js` добавя whitelist proxy за избрани MCP endpoints
+  (`/api/user/register-connection`, `/health`) за да може landing-ът
+  да се обръща към MCP без CORS. `X-Forwarded-For` се пренася.
+- Env vars `MCP_HOST` (default `odoo-rpc-mcp`) и `MCP_PORT` (default
+  `8084`) конфигурират upstream-а на proxy-то.
+
 ### Changed — External terminal flow (task 5 от unified auth plan)
 - `claude-terminal/start-session.sh` вече регистрира Odoo връзката в MCP
   през новия `POST /api/user/register-connection` endpoint (бивш

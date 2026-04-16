@@ -94,6 +94,31 @@
        text-shadow: 0 1px 4px rgba(0,0,0,0.3); }
   h2 span { color: #d4b8ff; }
 
+  /* Web-login form (task 7, MCP unified auth plan) */
+  .login-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+  .login-grid label { display: flex; flex-direction: column; gap: 4px;
+                      font-size: 0.85em; color: rgba(255,255,255,0.85); }
+  .login-grid label.full { grid-column: 1 / -1; }
+  .login-grid input {
+    background: rgba(0,0,0,0.3); color: #fff; border: 1px solid rgba(255,255,255,0.15);
+    padding: 8px 12px; border-radius: 6px; font-family: inherit; font-size: 0.95em;
+  }
+  .login-grid input:focus { outline: none; border-color: #21b6b7; }
+  .login-actions { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+  .btn {
+    background: #21b6b7; color: #fff; border: none; padding: 10px 18px;
+    border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 0.9em;
+    transition: background 0.2s;
+  }
+  .btn:hover { background: #1a9d9e; }
+  .btn.secondary { background: rgba(255,255,255,0.12); }
+  .btn.secondary:hover { background: rgba(255,255,255,0.2); }
+  .login-msg { font-size: 0.9em; padding: 8px 12px; border-radius: 6px; margin-top: 12px;
+               background: rgba(0,0,0,0.3); display: none; }
+  .login-msg.ok  { display: block; color: #90ee90; border-left: 3px solid #90ee90; }
+  .login-msg.err { display: block; color: #ff9090; border-left: 3px solid #ff9090; }
+  .login-msg.info{ display: block; color: #d4b8ff; border-left: 3px solid #d4b8ff; }
+
   .footer {
     text-align: center; padding: 32px; color: rgba(255,255,255,0.5); font-size: 0.85em;
     border-top: 1px solid rgba(255,255,255,0.1); margin-top: 40px;
@@ -146,6 +171,41 @@
     <div class="ep"><span class="method key">arg</span><span class="path">ODOO_USER</span><span class="desc">Username / login (default: admin)</span></div>
     <div class="ep"><span class="method">arg</span><span class="path">ODOO_MODEL</span><span class="desc">Current model context (optional)</span></div>
     <div class="ep"><span class="method">arg</span><span class="path">ODOO_RES_ID</span><span class="desc">Current record ID (optional)</span></div>
+  </div>
+
+  <h2><span>&rsaquo;</span> Sign in</h2>
+  <div class="setup-box">
+    <p>Enter your Odoo credentials below. The server validates your API key
+    against your Odoo instance via XMLRPC, registers the connection under
+    your MCP profile, and generates a terminal link. Your inputs (minus the
+    API key) are cached in this browser's <code>localStorage</code> so
+    you don't have to retype them next time.</p>
+
+    <form id="loginForm" class="login-grid" autocomplete="off">
+      <label class="full">Display name
+        <input name="name" placeholder="e.g. Rosen" required>
+      </label>
+      <label>Odoo URL
+        <input name="url" type="url" placeholder="https://your-odoo.com" required>
+      </label>
+      <label>Database
+        <input name="db" placeholder="mydb" required>
+      </label>
+      <label>Login
+        <input name="login" placeholder="you@example.com" required>
+      </label>
+      <label>Alias (connection name)
+        <input name="alias" placeholder="raytron" required>
+      </label>
+      <label class="full">API Key
+        <input name="api_key" type="password" placeholder="Settings → Users → API Keys" required>
+      </label>
+      <div class="login-actions full">
+        <button type="submit" class="btn">Validate &amp; Open Terminal</button>
+        <button type="button" class="btn secondary" id="clearCreds">Forget saved values</button>
+      </div>
+      <div id="loginMsg" class="login-msg full"></div>
+    </form>
   </div>
 
   <div class="setup-box">
@@ -205,6 +265,101 @@
   Powered by <a href="https://claude.ai/claude-code">Claude Code</a> &amp;
   <a href="https://www.odoo.com">Odoo</a>
 </div>
+
+<script>
+// ─── Web-login flow (task 7 of MCP unified auth plan) ─────────────
+// Validates credentials against the MCP server via self-register
+// endpoint, then redirects the user to the terminal with the four
+// URL args that start-session.sh consumes. Non-secret values are
+// cached in localStorage so returning users only retype the API key.
+(function () {
+  "use strict";
+  const STORAGE_KEY = "mcp_web_login_v1";
+  const form = document.getElementById("loginForm");
+  const msgEl = document.getElementById("loginMsg");
+  const clearBtn = document.getElementById("clearCreds");
+  if (!form) return;
+
+  function setMsg(text, cls) {
+    msgEl.textContent = text;
+    msgEl.className = "login-msg full " + (cls || "info");
+  }
+  function hideMsg() { msgEl.className = "login-msg full"; msgEl.textContent = ""; }
+
+  // Load cached non-secret values
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+    ["name", "url", "db", "login", "alias"].forEach((k) => {
+      if (saved[k]) form.elements[k].value = saved[k];
+    });
+  } catch (_) { /* ignore corrupted cache */ }
+
+  clearBtn.addEventListener("click", () => {
+    localStorage.removeItem(STORAGE_KEY);
+    form.reset();
+    hideMsg();
+  });
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    hideMsg();
+    const data = {};
+    ["name", "url", "db", "login", "alias", "api_key"].forEach((k) => {
+      data[k] = (form.elements[k].value || "").trim();
+    });
+    data.active = true;
+    if (!data.api_key) { setMsg("API key is required.", "err"); return; }
+    setMsg("Validating against MCP server (XMLRPC may take a few seconds)...", "info");
+
+    let result;
+    try {
+      const resp = await fetch("/api/user/register-connection", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      result = await resp.json();
+      if (!resp.ok) {
+        const hint = result.owner ? ` (owned by: ${result.owner})` : "";
+        setMsg("✗ " + (result.error || "Registration failed") + hint, "err");
+        return;
+      }
+    } catch (err) {
+      setMsg("✗ Request failed: " + err.message, "err");
+      return;
+    }
+
+    // Persist non-secret fields for next session. API key intentionally
+    // not stored — the user retypes or pastes it each time.
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        name: data.name, url: data.url, db: data.db,
+        login: data.login, alias: data.alias,
+      }));
+    } catch (_) { /* storage unavailable, continue */ }
+
+    setMsg(
+      `✓ Registered as profile '${result.profile}' (alias=${result.alias}, uid=${result.uid}). ` +
+      "Opening terminal...",
+      "ok"
+    );
+
+    // Build terminal URL on the SAME origin (this landing is served from
+    // the terminal gateway). ttyd ?arg=K=V params are what start-session.sh
+    // reads; unified-auth headers are then set by start-session.sh into
+    // the generated .mcp.json file.
+    const base = window.location.origin.replace(/\/+$/, "");
+    const params = new URLSearchParams();
+    params.append("arg", "API_KEY=" + data.api_key);
+    params.append("arg", "ODOO_URL=" + data.url);
+    params.append("arg", "ODOO_DB=" + data.db);
+    params.append("arg", "ODOO_USER=" + data.login);
+    setTimeout(() => {
+      window.location.href = base + "/?" + params.toString();
+    }, 900);
+  });
+})();
+</script>
 
 </body>
 </html>
