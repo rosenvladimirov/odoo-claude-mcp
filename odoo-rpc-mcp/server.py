@@ -1246,13 +1246,36 @@ def _resolve_mcp_user(url: str, db: str, login: str, api_key: str) -> tuple[str,
     return None
 
 
+_XMLRPC_UA = "OdooMcpAuth/1.0 (+https://mcp.odoo-shell.space)"
+
+
+class _UATransport(xmlrpc.client.Transport):
+    """HTTP XMLRPC transport with a non-default User-Agent."""
+    user_agent = _XMLRPC_UA
+
+
+class _UASafeTransport(xmlrpc.client.SafeTransport):
+    """HTTPS XMLRPC transport with a non-default User-Agent.
+
+    Default ``Python-xmlrpc/3.x`` is blocked by Cloudflare Bot Fight Mode
+    on many Odoo deployments behind CF. A legitimate-looking UA lets
+    ``common.authenticate`` reach the origin server.
+    """
+    user_agent = _XMLRPC_UA
+
+
 def _xmlrpc_validate(url: str, db: str, login: str, api_key: str) -> int | None:
     """Validate (login, api_key) against Odoo XMLRPC. Returns uid or None."""
     try:
-        ctx = _auth_ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = _auth_ssl.CERT_NONE
-        common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", context=ctx)
+        if url.lower().startswith("https://"):
+            ctx = _auth_ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = _auth_ssl.CERT_NONE
+            transport = _UASafeTransport(context=ctx)
+        else:
+            transport = _UATransport()
+        common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common",
+                                           transport=transport)
         uid = common.authenticate(db, login, api_key, {})
         return uid if uid else None
     except Exception as e:

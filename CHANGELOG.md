@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Cloudflare Bot Fight Mode false positives
+- `odoo-rpc-mcp/server.py:_xmlrpc_validate` used the default
+  `xmlrpc.client.ServerProxy` transport, which sends
+  `User-Agent: Python-xmlrpc/3.x`. Cloudflare Bot Fight Mode blocks
+  this UA on Free-tier zones, so Odoo instances behind CF returned
+  `authenticate() == False` even with a valid key. Added
+  `_UATransport` / `_UASafeTransport` subclasses that send
+  `OdooMcpAuth/1.0 (+https://mcp.odoo-shell.space)` instead.
+  HTTP/HTTPS split is explicit — `SafeTransport` only for `https://`.
+- `claude-terminal/start-session.sh` register-connection request now
+  sends `User-Agent: ClaudeTerminalStartSession/1.0`. Without it, the
+  register call fails with 403 when MCP is fronted by Cloudflare
+  (identified during 13-connection batch test — all POSTs returned
+  Cloudflare 403 before any logic ran).
+
 ### Added — Integration test suite + plan completion (tasks 8–10)
 - `odoo-rpc-mcp/tests/test_unified_auth.sh` — 10 scenario bash test:
   register negative/positive/conflict, identify stdio-compat vs

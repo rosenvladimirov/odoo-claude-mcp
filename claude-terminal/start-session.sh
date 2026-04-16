@@ -197,7 +197,12 @@ payload = json.dumps({
 req = urllib.request.Request(
     f"{os.environ['MCP_URL']}/api/user/register-connection",
     data=payload,
-    headers={"Content-Type": "application/json"},
+    headers={
+        "Content-Type": "application/json",
+        # Custom UA: Python-urllib is blocked by Cloudflare Bot Fight Mode
+        # when the MCP server is behind CF (e.g. mcp.odoo-shell.space).
+        "User-Agent": "ClaudeTerminalStartSession/1.0",
+    },
 )
 try:
     with urllib.request.urlopen(req, timeout=10) as resp:
