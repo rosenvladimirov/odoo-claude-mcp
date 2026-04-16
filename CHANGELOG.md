@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — External terminal flow (task 5 от unified auth plan)
+- `claude-terminal/start-session.sh` вече регистрира Odoo връзката в MCP
+  през новия `POST /api/user/register-connection` endpoint (бивш
+  `/api/identify` call е премахнат — unified-auth headers правят
+  identify-а автоматичен при първата tool call).
+- `.mcp.json` за всяка терминална сесия се генерира динамично с
+  `Authorization: Bearer`, `X-Odoo-Url`, `X-Odoo-Db`, `X-Odoo-Login`
+  заглавки за `odoo-rpc` MCP service. Всеки tool call от Claude CLI
+  носи валидиращата се 4-ка, middleware-ът я resolve-ва към profile.
+- JSON payload-и за register и `.mcp.json` се build-ват през Python
+  (`json.dumps`), не през bash heredoc — избягва escaping проблеми
+  при UTF-8 имена, кавички, интервали.
+- Reference `claude-terminal/.mcp.json` обновен с `<...>` placeholders
+  за документация.
+
 ### Security — Lock memory / user_connection to validated user (task 4)
 - `_get_current_user()` docstring enforces invariant: identity never
   reads from `args`, only from ContextVar or per-session identify state.

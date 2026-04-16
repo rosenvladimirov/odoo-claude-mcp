@@ -134,18 +134,15 @@ echo ""
 if [ ! -d "$USER_DIR/.claude" ]; then
     echo "Setting up your workspace for the first time..."
     mkdir -p "$USER_DIR/.claude/projects" "$USER_DIR/workspace"
-    # Copy templates
     cp /home/claude/template/settings.json "$USER_DIR/.claude/settings.json" 2>/dev/null
-    cp /home/claude/template/.mcp.json "$USER_DIR/.mcp.json" 2>/dev/null
     cp /home/claude/template/CLAUDE.md "$USER_DIR/CLAUDE.md" 2>/dev/null
-    # Initialize empty Claude state
     echo '{}' > "$USER_DIR/.claude.json"
     echo "Workspace ready."
 fi
 
-# Always refresh rules and MCP config from templates
+# Always refresh static rules. .mcp.json is generated dynamically below
+# with unified-auth headers — do not copy a stale template over it.
 cp /home/claude/template/CLAUDE.md "$USER_DIR/CLAUDE.md" 2>/dev/null
-cp /home/claude/template/.mcp.json "$USER_DIR/.mcp.json" 2>/dev/null
 
 # ── Set per-user environment ────────────────────────────────────
 export HOME="$USER_DIR"
@@ -180,25 +177,88 @@ JSON
 SESSION_ID=$(echo "$SESSION_RESPONSE" | grep -o '"session_id":[^,}]*' | cut -d'"' -f4)
 export CLAUDE_SESSION_ID="$SESSION_ID"
 
-# ── Identify with MCP server & link shared data ──────────────
-IDENTIFY_RESPONSE=$(curl -s -X POST "${MCP_URL}/api/identify" \
-    -H "Content-Type: application/json" \
-    -d "{\"name\": \"${USER_NAME}\"}" 2>/dev/null || true)
+# ── Register connection with MCP (unified-auth, task 5) ────────
+# Bind (url, db, login, api_key) to a user profile in the MCP registry
+# so later unified-auth tool calls can resolve the caller. Payload is
+# built in Python to get proper JSON escaping for names with spaces,
+# UTF-8, quotes etc.
+export ODOO_URL ODOO_DB USER_LOGIN USER_NAME SAFE_DB API_KEY MCP_URL
+REGISTER_RESPONSE=$(python3 <<'PYEOF' 2>/dev/null || echo '{"error":"request_failed"}'
+import json, os, urllib.request
+payload = json.dumps({
+    "name":    os.environ.get("USER_NAME", "User"),
+    "alias":   os.environ.get("SAFE_DB", "default"),
+    "url":     os.environ.get("ODOO_URL", ""),
+    "db":      os.environ.get("ODOO_DB", ""),
+    "login":   os.environ.get("USER_LOGIN", ""),
+    "api_key": os.environ.get("API_KEY", ""),
+    "active":  True,
+}).encode()
+req = urllib.request.Request(
+    f"{os.environ['MCP_URL']}/api/user/register-connection",
+    data=payload,
+    headers={"Content-Type": "application/json"},
+)
+try:
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        print(resp.read().decode())
+except urllib.error.HTTPError as e:
+    print(e.read().decode())
+except Exception as e:
+    print(json.dumps({"error": str(e)}))
+PYEOF
+)
 
-MCP_PROFILE=$(echo "$IDENTIFY_RESPONSE" | grep -o '"profile":"[^"]*"' | cut -d'"' -f4)
+MCP_PROFILE=$(echo "$REGISTER_RESPONSE" | grep -o '"profile":"[^"]*"' | cut -d'"' -f4)
+MCP_OWNER=$(echo "$REGISTER_RESPONSE" | grep -o '"owner":"[^"]*"' | cut -d'"' -f4)
+if [ -n "$MCP_PROFILE" ]; then
+    echo "  MCP:      Registered as ${MCP_PROFILE} (alias=${SAFE_DB})"
+elif [ -n "$MCP_OWNER" ]; then
+    MCP_PROFILE="$MCP_OWNER"
+    echo "  MCP:      Connection bound to profile '${MCP_PROFILE}'"
+else
+    REG_ERR=$(echo "$REGISTER_RESPONSE" | grep -o '"error":"[^"]*"' | cut -d'"' -f4)
+    echo "  MCP:      Registration failed — ${REG_ERR:-unknown}"
+    MCP_PROFILE=""
+fi
+
 if [ -n "$MCP_PROFILE" ]; then
     SHARED_USER_DIR="/shared-data/users/${MCP_PROFILE}"
     SHARED_MEMORY_DIR="/shared-data/memory/users/${MCP_PROFILE}"
-    # Create symlinks in user HOME to shared MCP data
     mkdir -p "$SHARED_USER_DIR" "$SHARED_MEMORY_DIR" 2>/dev/null || true
     ln -sfn "$SHARED_USER_DIR" "$USER_DIR/mcp-data" 2>/dev/null || true
     ln -sfn "$SHARED_MEMORY_DIR" "$USER_DIR/mcp-memory" 2>/dev/null || true
-    # Also link connections.json if it exists
     if [ -f "$SHARED_USER_DIR/connections.json" ]; then
         ln -sfn "$SHARED_USER_DIR/connections.json" "$USER_DIR/.odoo_connections.json" 2>/dev/null || true
     fi
-    echo "  MCP:      Identified as ${MCP_PROFILE}"
 fi
+
+# ── Generate .mcp.json with unified-auth headers (task 5) ──────
+# Rebuild the MCP client config fresh every session so headers carry
+# the current Odoo API key, URL, DB and login. All subsequent tool
+# calls from this Claude CLI instance will authenticate as this user.
+python3 <<'MCPEOF' > "$USER_DIR/.mcp.json"
+import json, os
+cfg = {
+    "mcpServers": {
+        "odoo-rpc": {
+            "type": "http",
+            "url": f"{os.environ['MCP_URL']}/mcp",
+            "headers": {
+                "Authorization": f"Bearer {os.environ['API_KEY']}",
+                "X-Odoo-Url":    os.environ["ODOO_URL"],
+                "X-Odoo-Db":     os.environ["ODOO_DB"],
+                "X-Odoo-Login":  os.environ["USER_LOGIN"],
+            },
+        },
+        "portainer": {"type": "sse",  "url": "http://portainer-mcp:8085/sse"},
+        "github":    {"type": "http", "url": "http://github-mcp:8086/mcp"},
+        "teams":     {"type": "sse",  "url": "http://teams-mcp:8087/sse"},
+    }
+}
+print(json.dumps(cfg, indent=2))
+MCPEOF
+chmod 600 "$USER_DIR/.mcp.json"
 
 # ── Write session context ───────────────────────────────────────
 cat > "$USER_DIR/.odoo_session.json" << EOF

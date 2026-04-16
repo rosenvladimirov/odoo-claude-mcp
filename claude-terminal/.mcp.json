@@ -1,8 +1,15 @@
 {
+  "_comment": "Reference only. At runtime start-session.sh regenerates .mcp.json in each user HOME with unified-auth headers (Authorization/X-Odoo-Url/X-Odoo-Db/X-Odoo-Login) for the odoo-rpc server.",
   "mcpServers": {
     "odoo-rpc": {
       "type": "http",
-      "url": "http://odoo-rpc-mcp:8084/mcp"
+      "url": "http://odoo-rpc-mcp:8084/mcp",
+      "headers": {
+        "Authorization": "Bearer <ODOO_API_KEY>",
+        "X-Odoo-Url":    "<ODOO_URL>",
+        "X-Odoo-Db":     "<ODOO_DB>",
+        "X-Odoo-Login":  "<ODOO_LOGIN>"
+      }
     },
     "portainer": {
       "type": "sse",
