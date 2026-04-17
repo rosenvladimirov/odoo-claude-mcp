@@ -36,6 +36,10 @@ from mcp.types import TextContent, Tool
 from google_service import GoogleServiceManager
 from telegram_service import TelegramServiceManager
 
+import ai_usage_log
+import ai_vision_service
+import ai_invoice_engine
+
 # ─── MCP Proxy (client for sub-services) ────────────────────
 
 PROXY_CONFIG_FILE = Path(os.environ.get("PROXY_CONFIG_FILE", "/data/proxy_services.json"))
@@ -1104,6 +1108,107 @@ def _sanitize_name(name: str) -> str:
     while "__" in safe:
         safe = safe.replace("__", "_")
     return safe.strip("_") or "user"
+
+
+# ─── AI Invoice — tenant helpers ─────────────────────────
+
+def _ai_tenant_code(conn, override: str | None = None) -> str:
+    """Derive tenant slug from connection db, unless caller supplies one."""
+    if override:
+        return _sanitize_name(override)
+    return _sanitize_name(conn.db or conn.alias or "default")
+
+
+def _ai_tenant_credentials(tenant_code: str) -> tuple[str, str]:
+    """Return (api_key, base_url) for tenant.
+
+    Resolution order:
+      1. Per-tenant env: ANTHROPIC_API_KEY_<TENANT_UPPER>
+      2. Global env:     ANTHROPIC_API_KEY
+    Base URL (defaults to Anthropic direct):
+      1. Per-tenant env: ANTHROPIC_BASE_URL_<TENANT_UPPER>
+      2. Global env:     ANTHROPIC_BASE_URL (e.g. CF AI Gateway)
+      3. Default:        https://api.anthropic.com
+    """
+    slug = tenant_code.upper().replace("-", "_").replace(".", "_")
+    api_key = (
+        os.environ.get(f"ANTHROPIC_API_KEY_{slug}")
+        or os.environ.get("ANTHROPIC_API_KEY", "")
+    )
+    base_url = (
+        os.environ.get(f"ANTHROPIC_BASE_URL_{slug}")
+        or os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    )
+    return api_key, base_url
+
+
+def _ai_write_back_to_move(conn, move_id: int, data: dict, attachment_id: int) -> dict:
+    """Apply extracted JSON to account.move — cautious, only draft, only empty fields.
+
+    Writes to chatter always (audit trail). Attempts to fill `partner_id`,
+    `invoice_date`, `ref` if missing and the draft state permits. Does NOT
+    touch invoice_line_ids — those require unit/tax matching which belongs in
+    the skill (l10n_bg_ai_invoice_glue._skill_post_vendor_bill).
+    """
+    import json as _json
+    info: dict = {"attempted": True, "fields_written": [], "skipped": []}
+    try:
+        move_recs = conn.execute_kw(
+            "account.move", "read", [[move_id]],
+            {"fields": ["state", "move_type", "partner_id", "invoice_date", "ref"]},
+        )
+        if not move_recs:
+            info["error"] = f"move {move_id} not found"
+            return info
+        move = move_recs[0]
+        if move["state"] != "draft":
+            info["skipped"].append(f"state={move['state']} not draft")
+            return info
+
+        writes: dict = {}
+        # Partner by VAT (only fill if empty)
+        if not move.get("partner_id") and data.get("partner_vat"):
+            vat = data["partner_vat"].replace(" ", "").upper()
+            partner_ids = conn.execute_kw(
+                "res.partner", "search", [[["vat", "=", vat]]], {"limit": 1}
+            )
+            if partner_ids:
+                writes["partner_id"] = partner_ids[0]
+            else:
+                info["skipped"].append(f"partner VAT {vat} not found")
+
+        # Invoice date
+        if not move.get("invoice_date") and data.get("invoice_date"):
+            writes["invoice_date"] = data["invoice_date"]
+
+        # Vendor reference (invoice_number)
+        if not move.get("ref") and data.get("invoice_number"):
+            writes["ref"] = data["invoice_number"]
+
+        if writes:
+            conn.execute_kw("account.move", "write", [[move_id], writes])
+            info["fields_written"] = list(writes.keys())
+
+        # Always post to chatter for audit
+        try:
+            body_lines = [
+                "<b>🤖 AI Extracted Invoice Data</b>",
+                f"Attachment: #{attachment_id}",
+                "<pre style='font-size:11px;white-space:pre-wrap'>"
+                + _json.dumps(data, indent=2, ensure_ascii=False)[:3000]
+                + "</pre>",
+            ]
+            conn.execute_kw(
+                "account.move", "message_post", [[move_id]],
+                {"body": "".join(body_lines), "message_type": "comment",
+                 "subtype_xmlid": "mail.mt_note"},
+            )
+            info["chatter_posted"] = True
+        except Exception as e:  # noqa: BLE001
+            info["chatter_error"] = str(e)[:200]
+    except Exception as e:  # noqa: BLE001
+        info["error"] = f"{type(e).__name__}: {e}"
+    return info
 
 
 def _list_existing_users() -> list[str]:
@@ -2809,6 +2914,319 @@ TOOLS = [
             },
         },
     ),
+    # ── AI Invoice Extraction + Billing Ledger ────────
+    Tool(
+        name="ai_invoice_extract",
+        description=(
+            "Extract structured invoice data from an Odoo attachment via Anthropic "
+            "Vision. Auto-routes to haiku/sonnet/opus based on pages+size. Writes "
+            "extract_prefill_data back to account.move (if write_back). Logs usage "
+            "to the billing ledger with token counts + cost in millicents."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "attachment_id": {"type": "integer", "description": "ir.attachment id"},
+                "move_id": {
+                    "type": "integer",
+                    "description": "account.move id (target for write-back). 0 = skip write-back.",
+                    "default": 0,
+                },
+                "source": {
+                    "type": "string",
+                    "enum": ["upload", "gmail", "terminal", "api"],
+                    "default": "upload",
+                },
+                "source_message_id": {
+                    "type": "string",
+                    "description": "Gmail Message-ID for dedup. Only used when source='gmail'.",
+                    "default": "",
+                },
+                "model_override": {
+                    "type": "string",
+                    "description": "Force a specific model, bypassing routing. Leave empty for auto.",
+                    "default": "",
+                },
+                "write_back": {
+                    "type": "boolean",
+                    "description": "Write extracted data to account.move.extract_prefill_data.",
+                    "default": True,
+                },
+                "tenant_tier": {
+                    "type": "string",
+                    "enum": ["starter", "business", "professional", "enterprise"],
+                    "default": "business",
+                },
+            },
+            "required": ["attachment_id"],
+        },
+    ),
+    Tool(
+        name="ai_usage_log_query",
+        description=(
+            "Query the AI usage billing ledger. Filter by tenant, state, source, "
+            "date range. Returns detailed rows for audit + monthly reconciliation."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "tenant_code": {
+                    "type": "string",
+                    "description": "Tenant slug. Derived from connection if omitted.",
+                    "default": "",
+                },
+                "state": {
+                    "type": "string",
+                    "enum": ["", "success", "error", "cached", "skipped"],
+                    "default": "",
+                },
+                "source": {
+                    "type": "string",
+                    "enum": ["", "upload", "gmail", "terminal", "api"],
+                    "default": "",
+                },
+                "date_from": {
+                    "type": "string",
+                    "description": "ISO-8601 UTC (inclusive).",
+                    "default": "",
+                },
+                "date_to": {
+                    "type": "string",
+                    "description": "ISO-8601 UTC (inclusive).",
+                    "default": "",
+                },
+                "billed_only": {"type": "boolean", "default": False},
+                "limit": {"type": "integer", "default": 100},
+                "offset": {"type": "integer", "default": 0},
+            },
+        },
+    ),
+    Tool(
+        name="ai_usage_log_stats",
+        description=(
+            "Dashboard KPIs for the billing ledger: totals, per-model breakdown, "
+            "30-day timeseries, recent errors, derived metrics (cache hit rate, "
+            "avg cost per billed doc, monthly €)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "tenant_code": {
+                    "type": "string",
+                    "description": "Tenant slug. Derived from connection if omitted.",
+                    "default": "",
+                },
+                "period": {
+                    "type": "string",
+                    "enum": ["day", "week", "month", "year", "all"],
+                    "default": "month",
+                },
+            },
+        },
+    ),
+    Tool(
+        name="ai_usage_log_export",
+        description=(
+            "Export billing ledger rows as CSV for a tenant + date range. "
+            "Used for month-end invoice generation and audit trails."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "tenant_code": {
+                    "type": "string",
+                    "description": "Tenant slug. Derived from connection if omitted.",
+                    "default": "",
+                },
+                "date_from": {
+                    "type": "string",
+                    "description": "ISO-8601 UTC (inclusive).",
+                    "default": "",
+                },
+                "date_to": {
+                    "type": "string",
+                    "description": "ISO-8601 UTC (inclusive).",
+                    "default": "",
+                },
+            },
+        },
+    ),
+    # ── AI Invoice Pipeline Engine (pluggable steps) ──────
+    Tool(
+        name="ai_invoice_stack_inspect",
+        description=(
+            "Cross-layer snapshot for a single account.move: Odoo state + "
+            "attachments + extraction history + skill status + decided next_step "
+            "with blockers and hints. Read-only."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "move_id": {"type": "integer"},
+                "tenant_code": {"type": "string", "default": ""},
+            },
+            "required": ["move_id"],
+        },
+    ),
+    Tool(
+        name="ai_invoice_scan_pending",
+        description=(
+            "List vendor-bill drafts that have an attachment and no successful "
+            "extraction yet. Oldest first (FIFO). Feeds batch processing."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "tenant_code": {"type": "string", "default": ""},
+                "limit": {"type": "integer", "default": 50},
+            },
+        },
+    ),
+    Tool(
+        name="ai_invoice_pipeline_summary",
+        description=(
+            "Dashboard aggregation: counts of vendor bill moves by next_step "
+            "across the last 60 days. Use for header KPI cards."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "tenant_code": {"type": "string", "default": ""},
+            },
+        },
+    ),
+    Tool(
+        name="ai_invoice_pipeline_run",
+        description=(
+            "Execute the full registered step pipeline for one move+attachment. "
+            "Steps: probe_move → guard_already_extracted → extract_vision → "
+            "log_usage → write_back_move → invoke_posting_skill + any loaded plugins. "
+            "Returns step-by-step audit trail."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "tenant_code": {"type": "string", "default": ""},
+                "tenant_tier": {
+                    "type": "string",
+                    "enum": ["starter", "business", "professional", "enterprise"],
+                    "default": "business",
+                },
+                "move_id": {"type": "integer"},
+                "attachment_id": {
+                    "type": "integer",
+                    "description": "Specific attachment id. 0 = auto-pick from move.",
+                    "default": 0,
+                },
+                "source": {
+                    "type": "string",
+                    "enum": ["upload", "gmail", "terminal", "api", "force"],
+                    "default": "upload",
+                },
+                "source_message_id": {"type": "string", "default": ""},
+            },
+            "required": ["move_id"],
+        },
+    ),
+    Tool(
+        name="ai_invoice_pipeline_steps",
+        description=(
+            "List currently registered pipeline steps with sequence, description, "
+            "and plugin vs built-in provenance. Useful for debugging which steps "
+            "will run against a move."
+        ),
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="ai_invoice_plugins_reload",
+        description=(
+            "Reload plugin steps from the plugins directory (default "
+            "/data/plugins/ai_invoice). Called after uploading a new plugin "
+            "without restarting the server."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "plugins_dir": {
+                    "type": "string",
+                    "description": "Override default plugins directory.",
+                    "default": "",
+                },
+            },
+        },
+    ),
+    # ── Odoo-driven pipeline executor (ai.pipeline.step) ──
+    Tool(
+        name="ai_pipeline_run",
+        description=(
+            "Execute an Odoo-defined pipeline (ai.pipeline.step records for the "
+            "given pipeline name, ordered by sequence). Respects skill_id + "
+            "trigger_domain + on_error. MCP-native steps (model starts with "
+            "'mcp') are dispatched to the local registry; other steps are "
+            "invoked via RPC on the configured Odoo model.method. Writes back "
+            "last_run_state/message per step."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "pipeline": {
+                    "type": "string",
+                    "description": "Pipeline name as defined in Odoo (tokenize, post, refresh, ...).",
+                },
+                "source_model": {
+                    "type": "string",
+                    "description": "Odoo model of the triggering record (e.g. account.move).",
+                },
+                "source_id": {"type": "integer"},
+                "tenant_code": {"type": "string", "default": ""},
+                "tenant_tier": {
+                    "type": "string",
+                    "enum": ["starter", "business", "professional", "enterprise"],
+                    "default": "business",
+                },
+                "extra_ctx": {
+                    "type": "object",
+                    "description": "Additional key/value pairs merged into the runtime context.",
+                    "default": {},
+                },
+                "update_step_stats": {
+                    "type": "boolean",
+                    "description": "Write last_run_state/message back to ai.pipeline.step.",
+                    "default": True,
+                },
+            },
+            "required": ["pipeline", "source_model", "source_id"],
+        },
+    ),
+    Tool(
+        name="ai_pipeline_steps_list",
+        description=(
+            "List ai.pipeline.step records in Odoo for a given pipeline name. "
+            "Shows sequence, model.method, skill_id, on_error, last run state — "
+            "mirrors the Odoo Settings view."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "pipeline": {
+                    "type": "string",
+                    "description": "Pipeline name (tokenize/post/refresh/...)",
+                    "default": "tokenize",
+                },
+                "include_inactive": {"type": "boolean", "default": False},
+            },
+        },
+    ),
 ]
 
 
@@ -4307,6 +4725,256 @@ def _execute_tool(name: str, args: dict) -> Any:
     elif name == "ai_collection_info":
         return conn.execute_kw("ai.composite.document", "collection_stats", [])
 
+    # ── AI Invoice Extraction + Billing Ledger ────────
+    elif name == "ai_invoice_extract":
+        import base64 as _b64
+        import json as _json
+
+        attachment_id = int(args["attachment_id"])
+        move_id = int(args.get("move_id") or 0)
+        source = args.get("source", "upload")
+        source_msg_id = args.get("source_message_id") or None
+        model_override = args.get("model_override") or None
+        write_back = bool(args.get("write_back", True))
+        tenant_tier = args.get("tenant_tier", "business")
+
+        tenant_code = _ai_tenant_code(conn, args.get("tenant_code"))
+        api_key, base_url = _ai_tenant_credentials(tenant_code)
+        if not api_key:
+            return {"error": (
+                "No Anthropic API key configured. Set ANTHROPIC_API_KEY "
+                "or ANTHROPIC_API_KEY_<TENANT> env var."
+            )}
+
+        # 1. Read attachment from Odoo (datas = base64 string)
+        records = conn.execute_kw(
+            "ir.attachment", "read", [[attachment_id]],
+            {"fields": ["name", "datas", "mimetype", "file_size"]},
+        )
+        if not records:
+            return {"error": f"Attachment {attachment_id} not found"}
+        att = records[0]
+        file_bytes = _b64.b64decode(att.get("datas") or "")
+        mimetype = att.get("mimetype") or "application/pdf"
+        if not file_bytes:
+            return {"error": f"Attachment {attachment_id} has no data"}
+
+        # 2. Call vision extractor (no side effects other than HTTP)
+        result = ai_vision_service.extract_invoice(
+            file_bytes=file_bytes,
+            mimetype=mimetype,
+            api_key=api_key,
+            base_url=base_url,
+            tenant_tier=tenant_tier,
+            model_override=model_override,
+        )
+
+        # 3. Write-back to Odoo (only on success and if requested)
+        writeback_info: dict = {"attempted": False}
+        if result.state == "success" and write_back and move_id:
+            writeback_info = _ai_write_back_to_move(
+                conn, move_id, result.extracted_data or {}, attachment_id,
+            )
+
+        # 4. Log usage (always — success, cached, or error)
+        log_id = ai_usage_log.log_extraction(
+            tenant_code=tenant_code,
+            odoo_url=conn.url,
+            odoo_db=conn.db,
+            move_id=move_id or None,
+            attachment_id=attachment_id,
+            source=source,
+            source_message_id=source_msg_id if source == "gmail" else None,
+            extra={
+                "attachment_name": att.get("name"),
+                "attachment_size": att.get("file_size"),
+                "mimetype": mimetype,
+                "writeback": writeback_info,
+            },
+            **result.to_log_kwargs(),
+        )
+
+        return {
+            "ok": result.state in ("success", "cached"),
+            "state": result.state,
+            "model": result.model,
+            "pages": result.pages,
+            "tokens": {
+                "input": result.input_tokens,
+                "output": result.output_tokens,
+                "cache_read": result.cache_read_tokens,
+                "cache_creation": result.cache_creation_tokens,
+            },
+            "cost": {
+                "usd_millicents": result.cost_usd_millicents,
+                "eur_millicents": result.cost_eur_millicents,
+                "eur_display": f"€{result.cost_eur_millicents / 100_000:.4f}",
+            },
+            "duration_ms": result.duration_ms,
+            "extracted_data": result.extracted_data,
+            "writeback": writeback_info,
+            "log_id": log_id,
+            "error": result.error_message,
+        }
+
+    elif name == "ai_usage_log_query":
+        tenant_code = _ai_tenant_code(conn, args.get("tenant_code"))
+        rows = ai_usage_log.query(
+            tenant_code=tenant_code,
+            state=args.get("state") or None,
+            source=args.get("source") or None,
+            date_from=args.get("date_from") or None,
+            date_to=args.get("date_to") or None,
+            billed_only=bool(args.get("billed_only", False)),
+            limit=int(args.get("limit", 100)),
+            offset=int(args.get("offset", 0)),
+        )
+        return {"tenant_code": tenant_code, "count": len(rows), "rows": rows}
+
+    elif name == "ai_usage_log_stats":
+        tenant_code = _ai_tenant_code(conn, args.get("tenant_code"))
+        return ai_usage_log.stats(tenant_code, args.get("period", "month"))
+
+    elif name == "ai_usage_log_export":
+        tenant_code = _ai_tenant_code(conn, args.get("tenant_code"))
+        csv_data = ai_usage_log.export_csv(
+            tenant_code=tenant_code,
+            date_from=args.get("date_from") or None,
+            date_to=args.get("date_to") or None,
+        )
+        return {
+            "tenant_code": tenant_code,
+            "rows": csv_data.count("\n") - 1 if csv_data else 0,
+            "csv": csv_data,
+        }
+
+    # ── AI Invoice Pipeline Engine ────────────────────
+    elif name == "ai_invoice_stack_inspect":
+        tenant_code = _ai_tenant_code(conn, args.get("tenant_code"))
+        stack = ai_invoice_engine.inspect_stack(
+            conn=conn,
+            move_id=int(args["move_id"]),
+            tenant_code=tenant_code,
+        )
+        return stack.to_dict()
+
+    elif name == "ai_invoice_scan_pending":
+        tenant_code = _ai_tenant_code(conn, args.get("tenant_code"))
+        pending = ai_invoice_engine.scan_pending(
+            conn=conn,
+            tenant_code=tenant_code,
+            limit=int(args.get("limit", 50)),
+        )
+        return {
+            "tenant_code": tenant_code,
+            "count": len(pending),
+            "pending": pending,
+        }
+
+    elif name == "ai_invoice_pipeline_summary":
+        tenant_code = _ai_tenant_code(conn, args.get("tenant_code"))
+        return ai_invoice_engine.pipeline_summary(
+            conn=conn, tenant_code=tenant_code,
+        )
+
+    elif name == "ai_invoice_pipeline_run":
+        tenant_code = _ai_tenant_code(conn, args.get("tenant_code"))
+        tenant_tier = args.get("tenant_tier", "business")
+        api_key, base_url = _ai_tenant_credentials(tenant_code)
+        if not api_key:
+            return {"error": (
+                "No Anthropic API key configured. Set ANTHROPIC_API_KEY "
+                "or ANTHROPIC_API_KEY_<TENANT> env var."
+            )}
+        ctx = ai_invoice_engine.PipelineContext(
+            odoo_conn=conn,
+            tenant_code=tenant_code,
+            tenant_tier=tenant_tier,
+            api_key=api_key,
+            base_url=base_url,
+            move_id=int(args["move_id"]),
+            attachment_id=(int(args.get("attachment_id") or 0) or None),
+            source=args.get("source", "upload"),
+            source_message_id=args.get("source_message_id") or None,
+        )
+        run = ai_invoice_engine.run_pipeline(ctx)
+        # Strip non-JSON-serializable vision_result before returning
+        final = dict(run.final_data)
+        vr = final.pop("vision_result", None)
+        if vr:
+            final["vision_summary"] = {
+                "state": vr.state, "model": vr.model,
+                "pages": vr.pages, "duration_ms": vr.duration_ms,
+                "cost_eur_millicents": vr.cost_eur_millicents,
+            }
+        out = run.to_dict()
+        out["final_data"] = final
+        return out
+
+    elif name == "ai_invoice_pipeline_steps":
+        steps = ai_invoice_engine.registry.all()
+        return {
+            "count": len(steps),
+            "steps": [
+                {
+                    "name": s.name,
+                    "sequence": s.sequence,
+                    "description": s.description,
+                    "on_error": s.on_error,
+                    "has_applies_when": s.applies_when is not None,
+                }
+                for s in steps
+            ],
+        }
+
+    elif name == "ai_invoice_plugins_reload":
+        plugins_dir = args.get("plugins_dir") or os.environ.get(
+            "AI_INVOICE_PLUGINS_DIR", "/data/plugins/ai_invoice"
+        )
+        loaded = ai_invoice_engine.load_plugins(plugins_dir)
+        return {
+            "plugins_dir": plugins_dir,
+            "loaded": loaded,
+            "total_steps_registered": len(ai_invoice_engine.registry.names()),
+        }
+
+    # ── Odoo-driven pipeline executor ──────────────────
+    elif name == "ai_pipeline_run":
+        tenant_code = _ai_tenant_code(conn, args.get("tenant_code"))
+        api_key, base_url = _ai_tenant_credentials(tenant_code)
+        pipeline_run = ai_invoice_engine.run_odoo_pipeline(
+            conn=conn,
+            pipeline=args["pipeline"],
+            source_model=args["source_model"],
+            source_id=int(args["source_id"]),
+            tenant_code=tenant_code,
+            tenant_tier=args.get("tenant_tier", "business"),
+            api_key=api_key,
+            base_url=base_url,
+            extra_ctx=args.get("extra_ctx") or {},
+            update_step_stats=bool(args.get("update_step_stats", True)),
+        )
+        return pipeline_run.to_dict()
+
+    elif name == "ai_pipeline_steps_list":
+        domain = [["pipeline", "=", args.get("pipeline", "tokenize")]]
+        if not args.get("include_inactive"):
+            domain.append(["active", "=", True])
+        rows = conn.execute_kw(
+            "ai.pipeline.step", "search_read", [domain],
+            {"fields": [
+                "id", "name", "pipeline", "sequence",
+                "model", "method", "skill_id", "trigger_domain",
+                "on_error", "active", "module",
+                "last_run_state", "last_run_message", "last_run_date",
+            ], "order": "sequence, id"},
+        )
+        return {
+            "pipeline": args.get("pipeline", "tokenize"),
+            "count": len(rows),
+            "steps": rows,
+        }
+
     # ── Google Services ──
     elif name == "google_auth":
         if google_mgr is None:
@@ -4472,6 +5140,16 @@ def create_app():
         logger.info("Telegram: authenticated")
     else:
         logger.info("Telegram: not authenticated (call telegram_configure + telegram_auth)")
+
+    # --- AI Invoice Pipeline plugin discovery ---
+    _plugins_dir = os.environ.get(
+        "AI_INVOICE_PLUGINS_DIR", "/data/plugins/ai_invoice"
+    )
+    _loaded = ai_invoice_engine.load_plugins(_plugins_dir)
+    logger.info(
+        f"AI Invoice pipeline: {len(ai_invoice_engine.registry.names())} steps "
+        f"registered ({len(_loaded)} plugin(s) from {_plugins_dir})"
+    )
 
     # --- SSE transport (legacy, /sse + /messages/) ---
     sse_transport = SseServerTransport("/messages/")
