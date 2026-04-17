@@ -15,6 +15,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY --chmod=644 server.py .
 COPY --chmod=644 google_service.py .
 COPY --chmod=644 telegram_service.py .
+COPY --chmod=644 ai_usage_log.py .
+COPY --chmod=644 ai_vision_service.py .
+COPY --chmod=644 ai_invoice_engine.py .
 
 RUN useradd -m -s /bin/bash mcp && \
     mkdir -p /data && chown mcp:mcp /data
