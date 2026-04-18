@@ -3,6 +3,13 @@ FROM python:3.13-slim
 LABEL maintainer="BL Consulting <rosen@blconsulting.bg>"
 LABEL description="Odoo RPC MCP Server (XML-RPC/JSON-RPC)"
 
+# Tag convention (Docker Hub / registry):
+#   :latest  → :stable  → last 2.x build  (production across all tiers)
+#   :2.x.y   → semver of end-user track (maintained on branch 2.0)
+#   :next    → last 3.x build (integrator platform — preview, not production)
+#   :3.x.y   → semver of integrator track (maintained on branch 3.0)
+# Branch 2.0 is the default repo branch and source of :latest/:stable.
+
 WORKDIR /app
 
 RUN apt-get update && \

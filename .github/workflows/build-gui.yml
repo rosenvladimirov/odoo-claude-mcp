@@ -2,7 +2,7 @@ name: Build GUI (Windows + Linux)
 
 on:
   push:
-    branches: [main]
+    branches: ["2.0", "3.0"]
     paths:
       - "tools/odoo_connect_qt.py"
       - "tools/odoo_connect_qt.spec"
