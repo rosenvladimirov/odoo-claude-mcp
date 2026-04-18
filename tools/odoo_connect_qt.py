@@ -330,6 +330,30 @@ class OdooConnectWindow(QMainWindow):
         self.grp_portainer = grp_portainer
         form.addWidget(grp_portainer)
 
+        # Web Session group (cookie-based HTTP access — exports/reports/frontend)
+        grp_web = QGroupBox("Web Session")
+        grp_web.setCheckable(True)
+        grp_web.setChecked(False)
+        wl = QFormLayout()
+        self.web_url = QLineEdit("https://")
+        wl.addRow("URL:", self.web_url)
+        self.web_db = QLineEdit()
+        self.web_db.setToolTip("odoo.com = openerp, odoo.sh = your db")
+        self.web_db.setPlaceholderText("database (required)")
+        wl.addRow("Database:", self.web_db)
+        self.web_login = QLineEdit()
+        wl.addRow("Login:", self.web_login)
+        self.web_password = QLineEdit()
+        self.web_password.setEchoMode(QLineEdit.Password)
+        wl.addRow("Password:", self.web_password)
+        btn_test_web = QPushButton("Test Web Login")
+        btn_test_web.setToolTip("Authenticate via /web/session/authenticate")
+        btn_test_web.clicked.connect(self._on_test_web_session)
+        wl.addRow("", btn_test_web)
+        grp_web.setLayout(wl)
+        self.grp_web = grp_web
+        form.addWidget(grp_web)
+
         # Action buttons
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -392,6 +416,53 @@ class OdooConnectWindow(QMainWindow):
         kl.addLayout(gen_layout)
         grp_keys.setLayout(kl)
         form.addWidget(grp_keys)
+
+        # MCP Server Sync
+        grp_mcp = QGroupBox("MCP Server Sync")
+        ml = QFormLayout()
+        self.mcp_url = QLineEdit("https://mcp.odoo-shell.space")
+        ml.addRow("MCP URL:", self.mcp_url)
+        self.mcp_user = QLineEdit("Rosen")
+        ml.addRow("User name:", self.mcp_user)
+        # API Token auth (checkable sub-group)
+        sub_token = QGroupBox("API Token auth")
+        sub_token.setCheckable(True)
+        sub_token.setChecked(True)
+        tl = QFormLayout()
+        self.mcp_token = QLineEdit()
+        self.mcp_token.setEchoMode(QLineEdit.Password)
+        tl.addRow("Token:", self.mcp_token)
+        sub_token.setLayout(tl)
+        ml.addRow(sub_token)
+        self.grp_mcp_token = sub_token
+        # Web session auth (alternative)
+        sub_web = QGroupBox("Web session auth")
+        sub_web.setCheckable(True)
+        sub_web.setChecked(False)
+        wsl = QFormLayout()
+        self.mcp_web_url = QLineEdit("https://mcp.odoo-shell.space")
+        wsl.addRow("URL:", self.mcp_web_url)
+        self.mcp_web_login = QLineEdit()
+        wsl.addRow("Login:", self.mcp_web_login)
+        self.mcp_web_password = QLineEdit()
+        self.mcp_web_password.setEchoMode(QLineEdit.Password)
+        wsl.addRow("Password:", self.mcp_web_password)
+        sub_web.setLayout(wsl)
+        ml.addRow(sub_web)
+        self.grp_mcp_web = sub_web
+        # Upload / Download buttons
+        sync_btns = QHBoxLayout()
+        btn_upload = QPushButton("⬆ Upload Connections")
+        btn_upload.setToolTip("Push local connections.json to MCP server")
+        btn_upload.clicked.connect(self._on_mcp_upload)
+        sync_btns.addWidget(btn_upload)
+        btn_download = QPushButton("⬇ Download Connections")
+        btn_download.setToolTip("Pull connections from MCP server and merge locally")
+        btn_download.clicked.connect(self._on_mcp_download)
+        sync_btns.addWidget(btn_download)
+        ml.addRow(sync_btns)
+        grp_mcp.setLayout(ml)
+        form.addWidget(grp_mcp)
 
         # Save
         btn_row = QHBoxLayout()
@@ -473,6 +544,19 @@ class OdooConnectWindow(QMainWindow):
         self.entry_api_key.setText(conn.get("api_key", ""))
         self.chk_verify_ssl.setChecked(bool(conn.get("verify_ssl", True)))
 
+        web = conn.get("web", {}) or conn.get("web_session", {})
+        self.grp_web.setChecked(bool(web))
+        if web:
+            self.web_url.setText(web.get("url", ""))
+            self.web_db.setText(web.get("db", ""))
+            self.web_login.setText(web.get("login", ""))
+            self.web_password.setText(web.get("password", ""))
+        else:
+            for w in (self.web_url, self.web_db, self.web_login,
+                      self.web_password):
+                w.clear()
+            self.web_url.setText("https://")
+
         ssh = conn.get("ssh", {})
         self.grp_ssh.setChecked(bool(ssh))
         if ssh:
@@ -526,6 +610,14 @@ class OdooConnectWindow(QMainWindow):
             "url": url, "db": db, "user": user, "api_key": api_key,
             "verify_ssl": self.chk_verify_ssl.isChecked(),
         }
+
+        if self.grp_web.isChecked():
+            conn["web"] = {
+                "url": self.web_url.text().strip().rstrip("/"),
+                "db": self.web_db.text().strip(),
+                "login": self.web_login.text().strip(),
+                "password": self.web_password.text(),
+            }
 
         if self.grp_ssh.isChecked():
             host = self.ssh_host.text().strip()
@@ -645,14 +737,206 @@ class OdooConnectWindow(QMainWindow):
         profile = load_local_profile()
         self.github_token.setText(profile.get("github_token", ""))
         self.ssh_key_email.setText(profile.get("ssh_email", ""))
+        mcp = profile.get("mcp", {})
+        self.mcp_url.setText(mcp.get("url") or "https://mcp.odoo-shell.space")
+        self.mcp_user.setText(mcp.get("user") or "Rosen")
+        self.mcp_token.setText(mcp.get("token") or "")
+        self.mcp_web_url.setText(mcp.get("web_url") or self.mcp_url.text())
+        self.mcp_web_login.setText(mcp.get("web_login") or "")
+        self.mcp_web_password.setText(mcp.get("web_password") or "")
+        auth = (mcp.get("auth") or "token").lower()
+        self.grp_mcp_token.setChecked(auth == "token")
+        self.grp_mcp_web.setChecked(auth == "web")
 
     def _on_save_profile(self):
         profile = {
             "github_token": self.github_token.text().strip(),
             "ssh_email": self.ssh_key_email.text().strip(),
+            "mcp": {
+                "url": self.mcp_url.text().strip().rstrip("/"),
+                "user": self.mcp_user.text().strip(),
+                "token": self.mcp_token.text().strip(),
+                "web_url": self.mcp_web_url.text().strip().rstrip("/"),
+                "web_login": self.mcp_web_login.text().strip(),
+                "web_password": self.mcp_web_password.text(),
+                "auth": "web" if self.grp_mcp_web.isChecked() else "token",
+            },
         }
         save_local_profile(profile)
         self.statusBar().showMessage("Profile saved.", 3000)
+
+    # ── Web Session test ────────────────────────────────────────
+    def _on_test_web_session(self, *_):
+        import urllib.request, ssl
+        url = self.web_url.text().strip().rstrip("/") or self.entry_url.text().strip().rstrip("/")
+        db = self.web_db.text().strip() or self.entry_db.text().strip()
+        login = self.web_login.text().strip()
+        password = self.web_password.text()
+        if not url or not login or not password:
+            QMessageBox.warning(self, "Web Session",
+                                "URL, Login and Password are required.")
+            return
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        candidates = [d for d in [db, "openerp", "odoo"] if d]
+        seen = set()
+        last_err = None
+        for try_db in candidates:
+            if try_db in seen:
+                continue
+            seen.add(try_db)
+            try:
+                payload = json.dumps({
+                    "jsonrpc": "2.0", "method": "call", "id": 1,
+                    "params": {"db": try_db, "login": login, "password": password},
+                }).encode()
+                req = urllib.request.Request(
+                    f"{url}/web/session/authenticate", data=payload,
+                    headers={"Content-Type": "application/json",
+                             "User-Agent": "OdooConnectManager/1.0"},
+                )
+                with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+                    result = json.loads(resp.read())
+                if "error" in result:
+                    last_err = result["error"].get("data", {}).get("message",
+                        result["error"].get("message", "?"))
+                    continue
+                r = result.get("result", {})
+                uid = r.get("uid")
+                if uid:
+                    if not self.web_db.text().strip():
+                        self.web_db.setText(try_db)
+                    QMessageBox.information(self, "Web Session OK",
+                        f"Odoo {r.get('server_version','?')} — "
+                        f"{r.get('name','?')} (uid={uid}, db={try_db})")
+                    return
+            except Exception as e:  # noqa: BLE001
+                last_err = str(e)[:200]
+        QMessageBox.warning(self, "Web Session failed",
+                            f"All DB candidates failed. Last error: {last_err}")
+
+    # ── MCP Sync helpers ────────────────────────────────────────
+    def _mcp_headers(self):
+        token = self.mcp_token.text().strip()
+        h = {"Content-Type": "application/json",
+             "User-Agent": "OdooConnectManager/1.0"}
+        if token:
+            h["Authorization"] = f"Bearer {token}"
+        return h
+
+    def _mcp_use_web_session(self):
+        return self.grp_mcp_web.isChecked() and not self.grp_mcp_token.isChecked()
+
+    def _mcp_web_opener(self):
+        """Build urllib opener with session cookie from /web/session/authenticate."""
+        import urllib.request, http.cookiejar, ssl
+        url = self.mcp_web_url.text().strip().rstrip("/") or self.mcp_url.text().strip().rstrip("/")
+        login = self.mcp_web_login.text().strip()
+        password = self.mcp_web_password.text()
+        if not url or not login or not password:
+            raise RuntimeError("MCP Web Session: URL, login, password required.")
+        jar = http.cookiejar.CookieJar()
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(jar),
+            urllib.request.HTTPSHandler(context=ctx),
+        )
+        payload = json.dumps({
+            "jsonrpc": "2.0", "method": "call", "id": 1,
+            "params": {"login": login, "password": password},
+        }).encode()
+        req = urllib.request.Request(
+            f"{url}/web/session/authenticate", data=payload,
+            headers={"Content-Type": "application/json",
+                     "User-Agent": "OdooConnectManager/1.0"},
+        )
+        with opener.open(req, timeout=15) as resp:
+            result = json.loads(resp.read())
+        if "error" in result or not result.get("result", {}).get("uid"):
+            raise RuntimeError(
+                "MCP Web Session auth failed: "
+                + str(result.get("error") or result)[:200]
+            )
+        return opener
+
+    def _on_mcp_upload(self, *_):
+        import urllib.request, ssl
+        mcp_url = self.mcp_url.text().strip().rstrip("/")
+        user = self.mcp_user.text().strip()
+        if not mcp_url or not user:
+            QMessageBox.warning(self, "MCP Sync",
+                                "MCP URL and User Name are required.")
+            return
+        try:
+            payload = json.dumps({
+                "name": user, "connections": self.connections,
+            }).encode()
+            if self._mcp_use_web_session():
+                opener = self._mcp_web_opener()
+                req = urllib.request.Request(
+                    f"{mcp_url}/api/user/connections", data=payload,
+                    headers={"Content-Type": "application/json",
+                             "User-Agent": "OdooConnectManager/1.0"},
+                    method="POST",
+                )
+                with opener.open(req, timeout=15) as resp:
+                    result = json.loads(resp.read())
+            else:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                req = urllib.request.Request(
+                    f"{mcp_url}/api/user/connections", data=payload,
+                    headers=self._mcp_headers(), method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+                    result = json.loads(resp.read())
+            count = result.get("count", 0)
+            QMessageBox.information(self, "MCP Upload OK",
+                                    f"Uploaded {count} connections.")
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "MCP Upload failed", str(e)[:400])
+
+    def _on_mcp_download(self, *_):
+        import urllib.request, ssl
+        mcp_url = self.mcp_url.text().strip().rstrip("/")
+        user = self.mcp_user.text().strip()
+        if not mcp_url or not user:
+            QMessageBox.warning(self, "MCP Sync",
+                                "MCP URL and User Name are required.")
+            return
+        try:
+            api_url = f"{mcp_url}/api/user/connections?name={user}"
+            if self._mcp_use_web_session():
+                opener = self._mcp_web_opener()
+                req = urllib.request.Request(
+                    api_url,
+                    headers={"User-Agent": "OdooConnectManager/1.0"},
+                )
+                with opener.open(req, timeout=15) as resp:
+                    result = json.loads(resp.read())
+            else:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                req = urllib.request.Request(api_url, headers=self._mcp_headers())
+                with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+                    result = json.loads(resp.read())
+            remote = result.get("connections") or {}
+            if remote:
+                self.connections.update(remote)
+                save_connections(self.connections)
+                self._refresh_sidebar()
+                QMessageBox.information(self, "MCP Download OK",
+                    f"Downloaded + merged {len(remote)} connections.")
+            else:
+                QMessageBox.information(self, "MCP Download",
+                                        "No connections found on MCP server.")
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "MCP Download failed", str(e)[:400])
 
     def _refresh_ssh_keys(self):
         lines = []
