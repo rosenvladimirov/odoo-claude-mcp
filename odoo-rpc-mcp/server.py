@@ -1478,6 +1478,20 @@ def _memory_user_dir(user_name: str, create: bool = False) -> str:
     return d
 
 
+def _memory_licensed_dir(tenant_code: str, create: bool = False) -> str:
+    """Per-tenant licensed memory store.
+
+    Files here come from purchased `ai.billing.memory.pack` records
+    deployed via the admin API. Visible only to callers resolving to the
+    same tenant_code.
+    """
+    safe = _sanitize_name(tenant_code)
+    d = os.path.join(MEMORY_DIR, "licensed", safe)
+    if create:
+        os.makedirs(d, exist_ok=True)
+    return d
+
+
 def _memory_list_files(directory: str) -> list[dict]:
     """List .md files in a directory with metadata."""
     results = []
@@ -3717,6 +3731,25 @@ def _execute_tool(name: str, args: dict) -> Any:
                 result["hint"] = "Call identify(name) to see personal files"
         if scope in ("all", "shared"):
             result["shared"] = _memory_list_files(_memory_shared_dir())
+        if scope in ("all", "licensed"):
+            # Licensed memories come from purchased memory packs; resolve
+            # the tenant via the caller's Odoo context (db_name becomes
+            # tenant_code for billing lookups).
+            caller = _odoo_caller_ctx.get() if "_odoo_caller_ctx" in globals() else None
+            tenant_code = (args.get("tenant_code") or "").strip()
+            if not tenant_code and caller and caller.get("db"):
+                tenant_code = caller["db"]
+            if tenant_code:
+                result["licensed"] = _memory_list_files(
+                    _memory_licensed_dir(tenant_code),
+                )
+                result["licensed_tenant"] = tenant_code
+            else:
+                result["licensed"] = []
+                result["licensed_hint"] = (
+                    "Pass tenant_code or call through an authenticated "
+                    "Odoo connection to see licensed memories."
+                )
         return result
 
     elif name == "memory_read":
@@ -3728,6 +3761,14 @@ def _execute_tool(name: str, args: dict) -> Any:
         scope = args.get("scope", "")
         user = _get_current_user(args)
 
+        # Licensed scope uses tenant_code; resolve from auth ctx if absent.
+        def _resolve_tenant():
+            tc = (args.get("tenant_code") or "").strip()
+            if tc:
+                return tc
+            caller = _odoo_caller_ctx.get() if "_odoo_caller_ctx" in globals() else None
+            return (caller or {}).get("db") if caller else None
+
         fpath = None
         found_scope = None
         if scope == "personal" and user:
@@ -3736,13 +3777,25 @@ def _execute_tool(name: str, args: dict) -> Any:
         elif scope == "shared":
             fpath = os.path.join(_memory_shared_dir(), filename)
             found_scope = "shared"
+        elif scope == "licensed":
+            tc = _resolve_tenant()
+            if tc:
+                fpath = os.path.join(_memory_licensed_dir(tc), filename)
+                found_scope = "licensed"
         else:
-            # Search personal first, then shared
+            # Search personal → licensed → shared
             if user:
                 p = os.path.join(_memory_user_dir(user), filename)
                 if os.path.isfile(p):
                     fpath = p
                     found_scope = "personal"
+            if not fpath:
+                tc = _resolve_tenant()
+                if tc:
+                    p = os.path.join(_memory_licensed_dir(tc), filename)
+                    if os.path.isfile(p):
+                        fpath = p
+                        found_scope = "licensed"
             if not fpath:
                 p = os.path.join(_memory_shared_dir(), filename)
                 if os.path.isfile(p):
@@ -5674,6 +5727,105 @@ def create_app():
                 "aliases": list(manager.connections.keys()) if manager else [],
                 "timestamp": datetime.now().isoformat(),
             })
+            await response(scope, receive, send)
+        elif path.startswith("/admin/memory/") and scope["type"] == "http":
+            # Licensed memory admin endpoints — used by the Odoo billing
+            # module (ai.billing.memory.deployment) to push purchased
+            # memory-pack .md files into a tenant's licensed folder.
+            # Auth: shared secret in env MCP_ADMIN_TOKEN.
+            from starlette.requests import Request
+            from starlette.responses import JSONResponse
+            request = Request(scope, receive)
+            expected = os.environ.get("MCP_ADMIN_TOKEN", "")
+            provided = (request.headers.get("authorization") or "").replace(
+                "Bearer ", "", 1,
+            ).strip()
+            if not expected or provided != expected:
+                response = JSONResponse(
+                    {"error": "admin auth required"}, status_code=401,
+                )
+                await response(scope, receive, send)
+                return
+            try:
+                import base64 as _b64
+                method = scope.get("method", "")
+                if path == "/admin/memory/upload" and method == "POST":
+                    body = await request.json()
+                    tenant_code = (body.get("tenant_code") or "").strip()
+                    filename = os.path.basename(body.get("filename") or "")
+                    content_b64 = body.get("content_b64") or ""
+                    if not (tenant_code and filename and content_b64):
+                        response = JSONResponse(
+                            {"error": "tenant_code, filename, content_b64 required"},
+                            status_code=400,
+                        )
+                        await response(scope, receive, send)
+                        return
+                    if not filename.endswith(".md"):
+                        filename += ".md"
+                    try:
+                        content = _b64.b64decode(content_b64)
+                    except Exception as e:  # noqa: BLE001
+                        response = JSONResponse(
+                            {"error": f"invalid base64: {e}"}, status_code=400,
+                        )
+                        await response(scope, receive, send)
+                        return
+                    target_dir = _memory_licensed_dir(tenant_code, create=True)
+                    fpath = os.path.join(target_dir, filename)
+                    existed = os.path.isfile(fpath)
+                    with open(fpath, "wb") as f:
+                        f.write(content)
+                    response = JSONResponse({
+                        "status": "updated" if existed else "created",
+                        "tenant_code": tenant_code,
+                        "filename": filename,
+                        "size": len(content),
+                    })
+                elif path == "/admin/memory/remove" and method == "POST":
+                    body = await request.json()
+                    tenant_code = (body.get("tenant_code") or "").strip()
+                    filename = os.path.basename(body.get("filename") or "")
+                    if not (tenant_code and filename):
+                        response = JSONResponse(
+                            {"error": "tenant_code + filename required"}, status_code=400,
+                        )
+                        await response(scope, receive, send)
+                        return
+                    if not filename.endswith(".md"):
+                        filename += ".md"
+                    fpath = os.path.join(_memory_licensed_dir(tenant_code), filename)
+                    if os.path.isfile(fpath):
+                        os.remove(fpath)
+                        response = JSONResponse({"status": "removed", "filename": filename})
+                    else:
+                        response = JSONResponse(
+                            {"status": "not_found", "filename": filename},
+                            status_code=404,
+                        )
+                elif path == "/admin/memory/list" and method == "GET":
+                    qs = request.query_params
+                    tenant_code = (qs.get("tenant_code") or "").strip()
+                    if not tenant_code:
+                        response = JSONResponse(
+                            {"error": "tenant_code query param required"}, status_code=400,
+                        )
+                        await response(scope, receive, send)
+                        return
+                    files = _memory_list_files(_memory_licensed_dir(tenant_code))
+                    response = JSONResponse({
+                        "tenant_code": tenant_code,
+                        "count": len(files),
+                        "files": files,
+                    })
+                else:
+                    response = JSONResponse(
+                        {"error": f"unknown admin memory endpoint: {method} {path}"},
+                        status_code=404,
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.exception("admin/memory handler failed")
+                response = JSONResponse({"error": str(e)[:400]}, status_code=500)
             await response(scope, receive, send)
         elif path == "/api/session/register" and scope["type"] == "http" and scope.get("method") == "POST":
             from starlette.requests import Request
