@@ -444,6 +444,7 @@ class OdooConnection:
         password: str = "",
         api_key: str = "",
         protocol: str = "xmlrpc",
+        verify_ssl: bool = True,
     ):
         self.alias = alias
         self.url = url.rstrip("/")
@@ -452,12 +453,87 @@ class OdooConnection:
         self.password = password
         self.api_key = api_key
         self.protocol = protocol  # xmlrpc or jsonrpc
+        self.verify_ssl = verify_ssl
         self._uid: int | None = None
         self._auth_token: str = ""  # password or api_key
+        self._ssl_ctx_cache: "ssl.SSLContext | None" = None
 
     @property
     def auth_token(self) -> str:
         return self.api_key or self.password
+
+    # ── SSL / self-signed handling ──────────────────────────────
+    #
+    # When a client runs its own Odoo behind a self-signed cert, default
+    # Python CA verification rejects it. Rather than globally disabling
+    # verification (MITM vulnerable), we use trust-on-first-use (TOFU):
+    #   • first connect with verify_ssl=False → fetch the peer cert,
+    #     persist to /data/ssl_certs/<alias>.pem
+    #   • subsequent connects build an SSL context that trusts ONLY that
+    #     specific cert — so if the peer cert changes we fail closed
+    # This matches the MCP filestore pattern the user asked for.
+
+    def _ssl_certs_dir(self) -> Path:
+        d = Path(os.environ.get("MCP_SSL_CERTS_DIR", "/data/ssl_certs"))
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _cached_cert_path(self) -> Path:
+        safe = _sanitize_name(self.alias)
+        return self._ssl_certs_dir() / f"{safe}.pem"
+
+    def _fetch_and_cache_cert(self) -> Path:
+        """Download peer certificate chain and persist it for future use."""
+        from urllib.parse import urlparse
+        parsed = urlparse(self.url)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if not host or parsed.scheme != "https":
+            raise ValueError(
+                f"Cannot fetch cert for non-HTTPS URL: {self.url}"
+            )
+        # ssl.get_server_certificate does the TLS handshake and returns the
+        # peer's cert PEM. We wrap it in a permissive context because the
+        # whole point of fetching is that we don't yet trust anyone.
+        import ssl as _ssl
+        pem = _ssl.get_server_certificate((host, port))
+        path = self._cached_cert_path()
+        path.write_text(pem)
+        logger.info(
+            f"[{self.alias}] Cached self-signed cert from {host}:{port} → {path}"
+        )
+        return path
+
+    def _get_ssl_context(self):
+        """Return an SSL context appropriate for this connection."""
+        import ssl as _ssl
+        if self._ssl_ctx_cache is not None:
+            return self._ssl_ctx_cache
+        if self.verify_ssl:
+            ctx = _ssl.create_default_context()
+        else:
+            path = self._cached_cert_path()
+            if not path.exists():
+                try:
+                    self._fetch_and_cache_cert()
+                except Exception as e:
+                    logger.warning(
+                        f"[{self.alias}] Cert fetch failed, falling back to "
+                        f"no-verify: {e}"
+                    )
+                    ctx = _ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = _ssl.CERT_NONE
+                    self._ssl_ctx_cache = ctx
+                    return ctx
+            # Build context that trusts ONLY the cached cert (pinning).
+            ctx = _ssl.create_default_context(cafile=str(path))
+            # Self-signed certs frequently use IPs / internal names whose
+            # SAN doesn't match; disable hostname check but keep cert chain
+            # validation against our pinned cert.
+            ctx.check_hostname = False
+        self._ssl_ctx_cache = ctx
+        return ctx
 
     def authenticate(self) -> int:
         """Authenticate via XML-RPC and return uid."""
@@ -472,9 +548,12 @@ class OdooConnection:
             self._auth_token = self.password
 
         try:
+            transport = _UASafeTransport(context=self._get_ssl_context()) \
+                if self.url.startswith("https") else _UATransport()
             common = xmlrpc.client.ServerProxy(
                 f"{self.url}/xmlrpc/2/common",
                 allow_none=True,
+                transport=transport,
             )
             self._uid = common.authenticate(
                 self.db, self.username, self._auth_token, {}
@@ -507,9 +586,12 @@ class OdooConnection:
             if self.protocol == "jsonrpc":
                 return self._jsonrpc_call(model, method, args, kwargs)
             else:
+                transport = _UASafeTransport(context=self._get_ssl_context()) \
+                    if self.url.startswith("https") else _UATransport()
                 obj = xmlrpc.client.ServerProxy(
                     f"{self.url}/xmlrpc/2/object",
                     allow_none=True,
+                    transport=transport,
                 )
                 return obj.execute_kw(
                     self.db, uid, self.auth_token, model, method, args, kwargs
@@ -540,7 +622,8 @@ class OdooConnection:
             data=payload,
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        ctx = self._get_ssl_context() if self.url.startswith("https") else None
+        with urllib.request.urlopen(req, timeout=120, context=ctx) as resp:
             result = json.loads(resp.read())
 
         if "error" in result:
@@ -555,6 +638,12 @@ class OdooConnection:
             "db": self.db,
             "username": self.username,
             "protocol": self.protocol,
+            "verify_ssl": self.verify_ssl,
+            "pinned_cert": (
+                str(self._cached_cert_path())
+                if not self.verify_ssl and self._cached_cert_path().exists()
+                else ""
+            ),
             "has_api_key": bool(self.api_key),
             "has_password": bool(self.password),
         }
@@ -742,6 +831,7 @@ class ConnectionManager:
                         password=item.get("password", ""),
                         api_key=item.get("api_key", ""),
                         protocol=item.get("protocol", "xmlrpc"),
+                        verify_ssl=bool(item.get("verify_ssl", True)),
                     )
                     self.connections[conn.alias] = conn
             except Exception as e:
@@ -758,6 +848,7 @@ class ConnectionManager:
                 "db": conn.db,
                 "username": conn.username,
                 "protocol": conn.protocol,
+                "verify_ssl": conn.verify_ssl,
             }
             # Store credentials (user accepts risk for local Docker)
             if conn.password:
@@ -1546,8 +1637,50 @@ TOOLS = [
                 "password": {"type": "string", "description": "Password (or leave empty if using api_key)", "default": ""},
                 "api_key": {"type": "string", "description": "API key (Odoo 14+, alternative to password)", "default": ""},
                 "protocol": {"type": "string", "enum": ["xmlrpc", "jsonrpc"], "default": "xmlrpc"},
+                "verify_ssl": {
+                    "type": "boolean",
+                    "description": (
+                        "True = standard CA verification (default). "
+                        "False = allow self-signed. On first use the peer "
+                        "cert is fetched and pinned under "
+                        "/data/ssl_certs/<alias>.pem for subsequent calls "
+                        "(trust-on-first-use). Set False for on-prem clients "
+                        "with private CA or self-issued certs."
+                    ),
+                    "default": True,
+                },
             },
             "required": ["url", "db", "username"],
+        },
+    ),
+    Tool(
+        name="odoo_cert_info",
+        description=(
+            "Return the pinned SSL certificate details (issuer, subject, "
+            "notAfter, fingerprint) for a connection. Useful to verify which "
+            "self-signed cert MCP has trusted. Requires verify_ssl=False on "
+            "the connection."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "alias": {"type": "string", "default": "default"},
+            },
+        },
+    ),
+    Tool(
+        name="odoo_cert_refresh",
+        description=(
+            "Re-fetch the peer SSL certificate for a connection and overwrite "
+            "the pinned copy. Use after the server's self-signed cert was "
+            "rotated. Fails if the connection has verify_ssl=True (standard "
+            "CA verification does not need pinning)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "alias": {"type": "string", "default": "default"},
+            },
         },
     ),
     Tool(
@@ -3532,10 +3665,67 @@ def _execute_tool(name: str, args: dict) -> Any:
             password=args.get("password", ""),
             api_key=args.get("api_key", ""),
             protocol=args.get("protocol", "xmlrpc"),
+            verify_ssl=bool(args.get("verify_ssl", True)),
         )
-        # Test authentication
+        # Test authentication — also triggers first-time cert fetch when
+        # verify_ssl=False.
         uid = conn.authenticate()
         return {"status": "connected", "uid": uid, **conn.to_dict()}
+
+    elif name == "odoo_cert_info":
+        alias = args.get("alias", "default")
+        conn = m.get(alias)
+        if conn.verify_ssl:
+            return {
+                "error": "Connection uses standard CA verification "
+                         "(verify_ssl=True). No pinned cert.",
+                "verify_ssl": True,
+            }
+        path = conn._cached_cert_path()
+        if not path.exists():
+            return {
+                "error": f"No pinned cert yet for alias '{alias}'. "
+                         "Call authenticate first or use odoo_cert_refresh.",
+                "pinned_cert_path": str(path),
+            }
+        try:
+            import ssl as _ssl
+            pem = path.read_text()
+            import subprocess as _sub
+            out = _sub.run(
+                ["openssl", "x509", "-noout",
+                 "-subject", "-issuer", "-dates", "-fingerprint", "-sha256"],
+                input=pem, capture_output=True, text=True, timeout=10,
+            )
+            info = dict(
+                (line.split("=", 1) if "=" in line else (line, ""))
+                for line in out.stdout.strip().splitlines()
+            )
+        except Exception as e:  # noqa: BLE001
+            info = {"parse_error": str(e)[:200]}
+        return {
+            "alias": alias,
+            "pinned_cert_path": str(path),
+            "pinned_cert_size": path.stat().st_size,
+            "pem_head": pem.splitlines()[0] if pem else "",
+            "info": info,
+        }
+
+    elif name == "odoo_cert_refresh":
+        alias = args.get("alias", "default")
+        conn = m.get(alias)
+        if conn.verify_ssl:
+            return {"error": "Connection has verify_ssl=True — no cert to refresh."}
+        conn._ssl_ctx_cache = None  # clear cached context
+        try:
+            path = conn._fetch_and_cache_cert()
+            return {
+                "status": "refreshed", "alias": alias,
+                "pinned_cert_path": str(path),
+                "size": path.stat().st_size,
+            }
+        except Exception as e:  # noqa: BLE001
+            return {"error": str(e)[:400]}
 
     elif name == "odoo_disconnect":
         if SINGLE_CONNECTION:

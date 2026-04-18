@@ -281,6 +281,12 @@ class OdooConnectWindow(QMainWindow):
         self.entry_api_key = QLineEdit()
         self.entry_api_key.setEchoMode(QLineEdit.Password)
         gl.addRow("API Key:", self.entry_api_key)
+        self.chk_verify_ssl = QCheckBox(
+            "Verify SSL certificate  "
+            "(uncheck to allow self-signed — MCP pins cert on first connect)"
+        )
+        self.chk_verify_ssl.setChecked(True)
+        gl.addRow("", self.chk_verify_ssl)
         grp_server.setLayout(gl)
         form.addWidget(grp_server)
 
@@ -465,6 +471,7 @@ class OdooConnectWindow(QMainWindow):
         self.entry_db.setText(conn.get("db", ""))
         self.entry_user.setText(conn.get("user", ""))
         self.entry_api_key.setText(conn.get("api_key", ""))
+        self.chk_verify_ssl.setChecked(bool(conn.get("verify_ssl", True)))
 
         ssh = conn.get("ssh", {})
         self.grp_ssh.setChecked(bool(ssh))
@@ -515,7 +522,10 @@ class OdooConnectWindow(QMainWindow):
             QMessageBox.warning(self, "Error", "Name, URL and Database are required.")
             return
 
-        conn = {"url": url, "db": db, "user": user, "api_key": api_key}
+        conn = {
+            "url": url, "db": db, "user": user, "api_key": api_key,
+            "verify_ssl": self.chk_verify_ssl.isChecked(),
+        }
 
         if self.grp_ssh.isChecked():
             host = self.ssh_host.text().strip()
