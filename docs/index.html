@@ -33,8 +33,9 @@
       <span class="logo-text">odoo<span class="logo-dim">/</span>claude<span class="logo-dim">/</span>mcp</span>
     </a>
     <div class="nav-links">
-      <a href="#watch">Demo</a>
-      <a href="#architecture">Architecture</a>
+      <a href="#whats-new">What's new</a>
+      <a href="#tracks">Tracks</a>
+      <a href="#modules">Odoo Modules</a>
       <a href="#servers">Servers</a>
       <a href="#deploy">Deploy</a>
       <a href="https://www.youtube.com/@DavidRosen8424-Gaming" class="nav-yt" target="_blank" rel="noopener" title="YouTube channel">
@@ -55,7 +56,7 @@
     <div class="hero-content">
       <div class="hero-tag">
         <span class="dot"></span>
-        <span>Production-grade · MCP server suite · v1.0</span>
+        <span>Production-grade · MCP server suite · v2.10.0</span>
       </div>
 
       <h1 class="hero-title">
@@ -84,12 +85,12 @@
 
       <div class="hero-stats">
         <div class="stat">
-          <div class="stat-num">8</div>
+          <div class="stat-num">9</div>
           <div class="stat-label">MCP servers</div>
         </div>
         <div class="stat-divider"></div>
         <div class="stat">
-          <div class="stat-num">188</div>
+          <div class="stat-num">197+</div>
           <div class="stat-label">MCP tools</div>
         </div>
         <div class="stat-divider"></div>
@@ -354,10 +355,157 @@
   </div>
 </section>
 
+<!-- What's new in 2.10 -->
+<section class="whats-new" id="whats-new" style="padding:80px 32px;background:linear-gradient(180deg,#faf8fd 0%,#fff 100%);border-top:1px solid rgba(113,75,160,0.08);border-bottom:1px solid rgba(113,75,160,0.08);">
+  <div style="max-width:1200px;margin:0 auto;">
+    <div class="section-label" style="margin-bottom:12px;">RELEASED 2026-04-19</div>
+    <h2 class="section-title">What's new in <span style="font-family:'JetBrains Mono',monospace;color:#714BA0;">2.10.0</span></h2>
+    <p style="font-size:1.1em;color:#5C5C70;max-width:720px;margin-top:16px;">
+      Nine new tools covering multi-language content management and website snippet
+      mutation — everything your marketing team needs to translate blog posts and
+      swap banners without leaving Claude.
+    </p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;margin-top:36px;">
+      <div style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:14px;padding:22px;position:relative;">
+        <span style="position:absolute;top:-10px;right:14px;background:#21B6B7;color:#fff;font-size:0.7em;font-weight:700;padding:3px 10px;border-radius:999px;letter-spacing:0.05em;">NEW</span>
+        <div style="font-family:'JetBrains Mono',monospace;color:#714BA0;font-weight:700;margin-bottom:6px;">odoo_translate_field</div>
+        <p style="font-size:0.9em;color:#5C5C70;">Simple <code>translate=True</code> field writer — blog.post.name/subtitle/teaser, product.name, partner.name.</p>
+      </div>
+      <div style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:14px;padding:22px;position:relative;">
+        <span style="position:absolute;top:-10px;right:14px;background:#21B6B7;color:#fff;font-size:0.7em;font-weight:700;padding:3px 10px;border-radius:999px;letter-spacing:0.05em;">NEW</span>
+        <div style="font-family:'JetBrains Mono',monospace;color:#714BA0;font-weight:700;margin-bottom:6px;">odoo_translate_html</div>
+        <p style="font-size:0.9em;color:#5C5C70;">HTML/XML translate — blog.post.content, product.website_description, ir.ui.view.arch_db. Three modes: extract / terms / replace.</p>
+      </div>
+      <div style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:14px;padding:22px;position:relative;">
+        <span style="position:absolute;top:-10px;right:14px;background:#21B6B7;color:#fff;font-size:0.7em;font-weight:700;padding:3px 10px;border-radius:999px;letter-spacing:0.05em;">NEW</span>
+        <div style="font-family:'JetBrains Mono',monospace;color:#714BA0;font-weight:700;margin-bottom:6px;">odoo_website_add_snippet</div>
+        <p style="font-size:0.9em;color:#5C5C70;">Insert Odoo snippets (CTA cards, banners, content blocks) into blog posts and pages with xpath substitutions.</p>
+      </div>
+      <div style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:14px;padding:22px;position:relative;">
+        <span style="position:absolute;top:-10px;right:14px;background:#21B6B7;color:#fff;font-size:0.7em;font-weight:700;padding:3px 10px;border-radius:999px;letter-spacing:0.05em;">NEW</span>
+        <div style="font-family:'JetBrains Mono',monospace;color:#714BA0;font-weight:700;margin-bottom:6px;">odoo_website_update_snippet</div>
+        <p style="font-size:0.9em;color:#5C5C70;">Swap banner backgrounds, change titles, edit CTAs — all via xpath + CSS-property substitutions.</p>
+      </div>
+    </div>
+    <p style="margin-top:28px;">
+      <a href="https://github.com/rosenvladimirov/odoo-claude-mcp/blob/2.0/CHANGELOG.md" class="btn btn-ghost" target="_blank" rel="noopener">
+        Full changelog →
+      </a>
+    </p>
+  </div>
+</section>
+
+<!-- Two Tracks -->
+<section class="tracks-section" id="tracks" style="padding:80px 32px;">
+  <div style="max-width:1200px;margin:0 auto;">
+    <div class="section-label">TWO PARALLEL BRANCHES</div>
+    <h2 class="section-title">Which track is yours?</h2>
+    <p style="font-size:1.1em;color:#5C5C70;max-width:720px;margin-top:16px;">
+      The project ships on two branches with different audiences and release cadences.
+      Pick the one matching your role.
+    </p>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:24px;margin-top:36px;">
+
+      <div style="background:#fff;border:2px solid #714BA0;border-radius:16px;padding:32px;box-shadow:0 8px 24px rgba(78,47,117,0.12);">
+        <div style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px;background:rgba(113,75,160,0.1);color:#714BA0;font-size:0.75em;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;border-radius:999px;margin-bottom:14px;">● Production stable</div>
+        <h3 style="font-family:'Fraunces',serif;font-size:1.6em;font-weight:600;margin-bottom:6px;">Track 2.x — End Users</h3>
+        <div style="font-family:'JetBrains Mono',monospace;color:#5C5C70;font-size:0.9em;margin-bottom:16px;">branch <code>2.0</code> · docker <code>:latest</code> · <code>:stable</code> · <code>:2.x.y</code></div>
+        <p style="color:#5C5C70;font-size:0.95em;margin-bottom:18px;">Odoo end-users, accountants, Bulgarian SMEs, developers working with a single Odoo stack, content teams managing website and blog content.</p>
+        <ul style="list-style:none;padding:0;">
+          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ All 197+ MCP tools for day-to-day Odoo work</li>
+          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ Multi-language field management (auto-ZWSP)</li>
+          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ Website snippet management (banners, CTAs)</li>
+          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ Bulgaria localization (НАП, VAT, Intrastat)</li>
+          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ AI tokenizer (Qdrant + Ollama)</li>
+          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ Memory system (shared / user / licensed)</li>
+        </ul>
+        <ul style="list-style:none;margin:0;padding:0;">
+          <li style="font-size:0;"></li>
+        </ul>
+        <style>.tracks-section ul li::before{content:'';}</style>
+      </div>
+
+      <div style="background:#fff;border:2px dashed #21B6B7;border-radius:16px;padding:32px;opacity:0.95;">
+        <div style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px;background:rgba(33,182,183,0.15);color:#108686;font-size:0.75em;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;border-radius:999px;margin-bottom:14px;">◉ Preview · 3.x in development</div>
+        <h3 style="font-family:'Fraunces',serif;font-size:1.6em;font-weight:600;margin-bottom:6px;">Track 3.x — Integrators</h3>
+        <div style="font-family:'JetBrains Mono',monospace;color:#5C5C70;font-size:0.9em;margin-bottom:16px;">branch <code>3.0</code> · docker <code>:next</code> · <code>:3.x.y</code></div>
+        <p style="color:#5C5C70;font-size:0.95em;margin-bottom:18px;">Odoo implementation partners, OCA community contributors, SaaS MSPs running multiple client instances, integrator agencies deploying AI workflows to clients.</p>
+        <ul style="list-style:none;padding:0;">
+          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ Admin lifecycle tools (install / upgrade / health-check)</li>
+          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ Industry skill packs (MFG / Retail / Services)</li>
+          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ One-click demo builder (&lt; 5 min)</li>
+          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ Module dev toolkit (scaffold / lint / test)</li>
+          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ Per-tenant Portainer provisioning</li>
+          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ AES-256 encrypted config export</li>
+        </ul>
+        <p style="margin-top:18px;">
+          <a href="https://github.com/rosenvladimirov/odoo-claude-mcp/blob/2.0/docs/integrator-platform.md" class="btn btn-ghost" target="_blank" rel="noopener" style="font-size:0.9em;">Full 3.x spec →</a>
+        </p>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- Companion Odoo Modules -->
+<section class="modules-section" id="modules" style="padding:80px 32px;background:linear-gradient(180deg,#fff 0%,#faf8fd 100%);border-top:1px solid rgba(113,75,160,0.08);">
+  <div style="max-width:1200px;margin:0 auto;">
+    <div class="section-label">ODOO-SIDE INTEGRATION</div>
+    <h2 class="section-title">Companion Odoo modules.</h2>
+    <p style="font-size:1.1em;color:#5C5C70;max-width:720px;margin-top:16px;">
+      The MCP stack pairs with two Odoo modules that turn any instance into a
+      fully MCP-aware, multi-tenant, billing-ready AI workstation.
+    </p>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:24px;margin-top:36px;">
+
+      <div style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:16px;padding:32px;">
+        <div style="display:flex;align-items:start;justify-content:space-between;margin-bottom:14px;gap:12px;flex-wrap:wrap;">
+          <h3 style="font-family:'JetBrains Mono',monospace;font-size:1.05em;color:#714BA0;font-weight:700;margin:0;">l10n_bg_claude_terminal</h3>
+          <span style="font-size:0.72em;padding:3px 10px;background:rgba(34,197,94,0.15);color:#15803d;border-radius:999px;font-weight:700;">LGPL-3 · FREE</span>
+        </div>
+        <div style="font-size:1em;font-weight:600;color:#1A1A2E;margin-bottom:12px;">Odoo ↔ MCP integration</div>
+        <p style="color:#5C5C70;font-size:0.93em;margin-bottom:16px;">Exposes MCP + Claude Terminal configuration as user preferences and company settings. Works on Odoo 16, 18 and 19 — each major series on a dedicated branch.</p>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:18px;">
+          <a href="https://github.com/rosenvladimirov/l10n-bulgaria/tree/18.0/l10n_bg_claude_terminal" target="_blank" style="font-family:'JetBrains Mono',monospace;font-size:0.78em;padding:4px 10px;background:rgba(113,75,160,0.08);color:#714BA0;border-radius:6px;text-decoration:none;">Odoo 18 · 18.0.1.28.0</a>
+          <a href="https://github.com/rosenvladimirov/l10n-bulgaria/tree/19.0/l10n_bg_claude_terminal" target="_blank" style="font-family:'JetBrains Mono',monospace;font-size:0.78em;padding:4px 10px;background:rgba(113,75,160,0.08);color:#714BA0;border-radius:6px;text-decoration:none;">Odoo 19 · 19.0.1.24.0</a>
+          <a href="https://github.com/rosenvladimirov/l10n-bulgaria/tree/16.0/l10n_bg_claude_terminal" target="_blank" style="font-family:'JetBrains Mono',monospace;font-size:0.78em;padding:4px 10px;background:rgba(113,75,160,0.08);color:#714BA0;border-radius:6px;text-decoration:none;">Odoo 16</a>
+        </div>
+        <ul style="list-style:none;padding:0;margin:0;">
+          <li style="padding:4px 0 4px 18px;position:relative;font-size:0.88em;">• Per-user MCP endpoint + Bearer token</li>
+          <li style="padding:4px 0 4px 18px;position:relative;font-size:0.88em;">• Odoo RPC with verify_ssl + TOFU cert pinning</li>
+          <li style="padding:4px 0 4px 18px;position:relative;font-size:0.88em;">• 18 terminal themes + live refresh bus</li>
+          <li style="padding:4px 0 4px 18px;position:relative;font-size:0.88em;">• Test Connections + Save to MCP actions</li>
+        </ul>
+      </div>
+
+      <div style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:16px;padding:32px;">
+        <div style="display:flex;align-items:start;justify-content:space-between;margin-bottom:14px;gap:12px;flex-wrap:wrap;">
+          <h3 style="font-family:'JetBrains Mono',monospace;font-size:1.05em;color:#714BA0;font-weight:700;margin:0;">l10n_bg_ai_billing</h3>
+          <span style="font-size:0.72em;padding:3px 10px;background:rgba(234,179,8,0.15);color:#a16207;border-radius:999px;font-weight:700;">OPL-1 · PAID</span>
+        </div>
+        <div style="font-size:1em;font-weight:600;color:#1A1A2E;margin-bottom:12px;">SaaS billing + tenant provisioning</div>
+        <p style="color:#5C5C70;font-size:0.93em;margin-bottom:16px;">Enterprise billing module for hosting providers and BL Consulting tier management. Tracks per-user MCP usage, calculates bills, provisions Portainer stacks per tenant.</p>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:18px;">
+          <a href="https://github.com/rosenvladimirov/l10n-bulgaria-expert/tree/19.0/l10n_bg_ai_billing" target="_blank" style="font-family:'JetBrains Mono',monospace;font-size:0.78em;padding:4px 10px;background:rgba(113,75,160,0.08);color:#714BA0;border-radius:6px;text-decoration:none;">Odoo 19 · 19.0.1.3.0</a>
+        </div>
+        <ul style="list-style:none;padding:0;margin:0;">
+          <li style="padding:4px 0 4px 18px;position:relative;font-size:0.88em;">• 8 models: bundle / tenant / usage / invoice / skills</li>
+          <li style="padding:4px 0 4px 18px;position:relative;font-size:0.88em;">• Bundle pricing €49–599, millicents precision</li>
+          <li style="padding:4px 0 4px 18px;position:relative;font-size:0.88em;">• Portainer client + AES-256 ZIP export</li>
+          <li style="padding:4px 0 4px 18px;position:relative;font-size:0.88em;">• BG Trade Registry + sale.order auto-provision</li>
+        </ul>
+      </div>
+
+    </div>
+  </div>
+</section>
+
 <!-- Servers detail -->
 <section class="servers" id="servers">
   <div class="section-inner">
-    <div class="section-label">THE 8 MCP SERVERS</div>
+    <div class="section-label">THE 9 MCP SERVERS</div>
     <h2 class="section-title">Each server, one clear job.</h2>
 
     <div class="server-list">
@@ -588,7 +736,7 @@
         <p>
           Once deployed with a public HTTPS endpoint, register the stack in
           Claude.ai Settings → Connectors as a Custom Connector with bearer token auth.
-          All 188 MCP tools become available in your Claude conversations immediately.
+          All 197+ MCP tools become available in your Claude conversations immediately.
         </p>
         <a href="https://github.com/rosenvladimirov/odoo-claude-mcp#-claudeai-connector" class="btn btn-ghost" target="_blank" rel="noopener">Full setup guide →</a>
       </div>
