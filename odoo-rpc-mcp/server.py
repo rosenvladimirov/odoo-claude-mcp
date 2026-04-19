@@ -2080,18 +2080,26 @@ TOOLS = [
     Tool(
         name="odoo_translate_html",
         description=(
-            "Write translations for translate=html_translate / translate=xml_translate "
-            "fields (term-based HTML/XML translation). Use for: blog.post.content, "
-            "product.template.website_description, hr.job.description, "
-            "ir.ui.view.arch_db (which covers website.page), website.menu.mega_menu_content, "
-            "event.track.description, forum.forum.guidelines, etc. "
-            "Two modes: "
-            "(a) mode='terms' — translations = {lang: {source_term: translated_term, ...}} "
-            "    Each source_term must match exactly a text node in the source_lang rendering. "
-            "(b) mode='replace' — translations = {lang: full_html_or_xml_string}. "
-            "    The MCP server extracts terms from source_lang and from replacement, pairs "
-            "    them positionally, and calls update_field_translations with term map. "
-            "Errors if field.translate is not callable. Auto-detects Odoo version (v16+ required)."
+            "Write/read translations for translate=html_translate / translate=xml_translate "
+            "fields. Use for: blog.post.content, product.template.website_description, "
+            "hr.job.description, ir.ui.view.arch_db (covers website.page), "
+            "website.menu.mega_menu_content, event.track.description, "
+            "forum.forum.guidelines, res.partner.website_description. "
+            "Three modes: "
+            "(a) mode='extract' — READ-ONLY. translations arg ignored. Returns the list "
+            "    of translatable terms that Odoo's html_translate engine extracts from "
+            "    source_lang. Each term is an HTML-serialised translatable block "
+            "    (preserves inline tags like <strong>). Use this to see what must be "
+            "    translated before writing. "
+            "(b) mode='terms' — translations = {lang: {source_term: translated_term, ...}} "
+            "    Direct term map. Terms must match exactly those from mode='extract'. "
+            "    Calls update_field_translations() with JSONB payload. "
+            "(c) mode='replace' — translations = {lang: full_html_string}. "
+            "    The tool writes each language's HTML through Odoo's native ORM with "
+            "    {'lang': <code>} context. Odoo's html_translate engine aligns terms "
+            "    automatically — no manual term extraction required. This is what "
+            "    Odoo's Website editor does internally. "
+            "Errors if field.translate is not callable. Requires Odoo 16+."
         ),
         inputSchema={
             "type": "object",
@@ -2102,11 +2110,11 @@ TOOLS = [
                 "field_name": {"type": "string"},
                 "translations": {
                     "type": "object",
-                    "description": "Either {lang: {term: translation}} (mode='terms') or {lang: 'full html'} (mode='replace').",
+                    "description": "Either {lang: {term: translation}} (mode='terms') or {lang: 'full html'} (mode='replace'). Ignored for mode='extract'.",
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["terms", "replace"],
+                    "enum": ["extract", "terms", "replace"],
                     "default": "terms",
                 },
                 "source_lang": {
@@ -2118,7 +2126,7 @@ TOOLS = [
                     "default": False,
                 },
             },
-            "required": ["model", "res_id", "field_name", "translations"],
+            "required": ["model", "res_id", "field_name"],
         },
     ),
     # ── Web Session (cookie-based HTTP access) ──
@@ -4655,10 +4663,10 @@ def _execute_tool(name: str, args: dict) -> Any:
         model = args["model"]
         res_id = int(args["res_id"])
         field_name = args["field_name"]
-        translations = args["translations"]
         mode = args.get("mode", "terms")
         source_lang = args.get("source_lang", "en_US")
         dry_run = args.get("dry_run", False)
+        translations = args.get("translations") or {}
 
         finfo = _field_info(conn, model, field_name)
         kind = _field_translate_kind(finfo)
@@ -4688,6 +4696,46 @@ def _execute_tool(name: str, args: dict) -> Any:
                 "odoo_version": major,
             }
 
+        # ── Mode: extract ─────────────────────────────────────
+        # Returns the translatable terms as Odoo's html_translate engine sees
+        # them — each term is an HTML-serialised translatable block (preserves
+        # inline tags). We call get_field_translations() and read the source
+        # dict from the source_lang entry.
+        if mode == "extract":
+            try:
+                tr_tuple = conn.execute_kw(
+                    model, "get_field_translations", [[res_id], field_name], {}
+                )
+                per_lang = tr_tuple[0] if isinstance(tr_tuple, (list, tuple)) else tr_tuple
+                src_entry = None
+                for item in per_lang:
+                    if item.get("lang") == source_lang:
+                        src_entry = item
+                        break
+                if src_entry is None and per_lang:
+                    src_entry = per_lang[0]
+                terms = []
+                if src_entry:
+                    # Odoo returns keys of the term dict in 'source' (or 'value' in older APIs)
+                    src_dict = src_entry.get("source") or src_entry.get("value")
+                    if isinstance(src_dict, dict):
+                        terms = list(src_dict.keys())
+                return {
+                    "model": model, "res_id": res_id, "field": field_name,
+                    "translate": kind, "mode": "extract",
+                    "source_lang": source_lang,
+                    "terms_count": len(terms),
+                    "terms": terms,
+                    "per_lang_raw": per_lang,
+                    "odoo_version": major,
+                }
+            except Exception as e:
+                return {"error": f"extract failed: {e}", "field": field_name}
+
+        # Write modes require translations
+        if not translations:
+            return {"error": f"mode='{mode}' requires 'translations' argument"}
+
         # Validate langs
         installed_langs = conn.execute_kw(
             "res.lang", "search_read", [[["active", "=", True]]], {"fields": ["code"]},
@@ -4700,89 +4748,93 @@ def _execute_tool(name: str, args: dict) -> Any:
                 "available": sorted(installed_codes),
             }
 
-        # Build term map per mode
-        term_map_per_lang: dict[str, dict[str, str]] = {}
+        # ── Mode: terms ───────────────────────────────────────
+        # translations = {lang: {src_term: tr_term}} — direct JSONB update
         if mode == "terms":
-            # Already {lang: {src_term: tr_term}}
             for lang, terms in translations.items():
                 if not isinstance(terms, dict):
-                    return {"error": f"mode='terms' requires {{lang: {{src:tr}}}}, got {type(terms).__name__} for {lang}"}
-                term_map_per_lang[lang] = terms
-        elif mode == "replace":
-            # Extract terms from source_lang rendering + replacement, pair positionally.
-            # We use the stdlib HTMLParser (Odoo's html_translate / xml_translate
-            # uses a similar node-iteration approach internally).
-            try:
-                from html.parser import HTMLParser as _HP
-
-                class _Extract(_HP):
-                    def __init__(self):
-                        super().__init__()
-                        self.terms: list[str] = []
-                    def handle_data(self, data):
-                        t = (data or "").strip()
-                        if t:
-                            self.terms.append(t)
-
-                # Read source rendering
-                src_rec = conn.execute_kw(
-                    model, "read", [[res_id], [field_name]],
-                    {"context": {"lang": source_lang}},
-                )
-                src_html = (src_rec[0].get(field_name) or "") if src_rec else ""
-                sp = _Extract(); sp.feed(src_html)
-                src_terms = sp.terms
-
-                for lang, new_html in translations.items():
-                    if not isinstance(new_html, str):
-                        return {"error": f"mode='replace' requires {{lang: 'html'}}, got {type(new_html).__name__} for {lang}"}
-                    p = _Extract(); p.feed(new_html)
-                    new_terms = p.terms
-                    if len(src_terms) != len(new_terms):
-                        return {
-                            "error": (
-                                f"mode='replace' for lang={lang}: source has {len(src_terms)} terms "
-                                f"but replacement has {len(new_terms)}. Use mode='terms' with explicit map."
-                            ),
-                            "src_terms_count": len(src_terms),
-                            "new_terms_count": len(new_terms),
-                        }
-                    term_map_per_lang[lang] = dict(zip(src_terms, new_terms))
-            except ImportError as e:
-                return {"error": f"HTML parser import failed: {e}"}
-        else:
-            return {"error": f"Unknown mode '{mode}'. Use 'terms' or 'replace'."}
-
-        if dry_run:
+                    return {"error": f"mode='terms' requires {{lang: {{src:tr}}}}, got {type(terms).__name__} for lang={lang}"}
+            if dry_run:
+                return {
+                    "dry_run": True, "mode": "terms",
+                    "would_apply": translations,
+                    "odoo_version": major,
+                }
+            conn.execute_kw(
+                model, "update_field_translations",
+                [[res_id], field_name, translations],
+                {"source_lang": source_lang},
+            )
+            verify = conn.execute_kw(
+                model, "get_field_translations", [[res_id], field_name], {}
+            )
             return {
-                "dry_run": True,
-                "mode": mode,
-                "term_map_per_lang": term_map_per_lang,
-                "field": field_name,
-                "translate": kind,
+                "success": True,
+                "model": model, "res_id": res_id, "field": field_name,
+                "translate": kind, "mode": "terms",
+                "applied_terms_count": {lang: len(t) for lang, t in translations.items()},
+                "verified": verify[0] if isinstance(verify, (list, tuple)) else verify,
                 "odoo_version": major,
             }
 
-        # Write via update_field_translations
-        conn.execute_kw(
-            model, "update_field_translations",
-            [[res_id], field_name, term_map_per_lang],
-            {"source_lang": source_lang},
-        )
-        verify = conn.execute_kw(
-            model, "get_field_translations", [[res_id], field_name], {}
-        )
-        return {
-            "success": True,
-            "model": model,
-            "res_id": res_id,
-            "field": field_name,
-            "translate": kind,
-            "mode": mode,
-            "applied_terms_count": {lang: len(t) for lang, t in term_map_per_lang.items()},
-            "verified": verify[0] if isinstance(verify, (list, tuple)) else verify,
-            "odoo_version": major,
-        }
+        # ── Mode: replace ─────────────────────────────────────
+        # translations = {lang: full_html_string}. We write each lang's HTML
+        # via the ORM with {'lang': <code>} context. Odoo's internal
+        # html_translate / xml_translate engine extracts terms from the
+        # existing source_lang value, aligns them with the new HTML's terms,
+        # and updates the JSONB map for that language only. Other langs stay
+        # untouched. This is the same path the Website editor uses when
+        # saving a translated page — correct, no manual term extraction.
+        if mode == "replace":
+            for lang, val in translations.items():
+                if not isinstance(val, str):
+                    return {"error": f"mode='replace' requires {{lang: 'html'}}, got {type(val).__name__} for lang={lang}"}
+
+            if dry_run:
+                try:
+                    current = conn.execute_kw(
+                        model, "get_field_translations", [[res_id], field_name], {}
+                    )
+                except Exception:
+                    current = None
+                return {
+                    "dry_run": True, "mode": "replace",
+                    "would_write_per_lang": {
+                        lang: (val[:120] + "…" if len(val) > 120 else val)
+                        for lang, val in translations.items()
+                    },
+                    "current_terms": current[0] if current else None,
+                    "odoo_version": major,
+                }
+
+            applied = {}
+            for lang, new_html in translations.items():
+                try:
+                    conn.execute_kw(
+                        model, "write", [[res_id], {field_name: new_html}],
+                        {"context": {"lang": lang}},
+                    )
+                    applied[lang] = "written via ORM lang-context"
+                except Exception as e:
+                    applied[lang] = f"ERROR: {type(e).__name__}: {e}"
+
+            try:
+                verify = conn.execute_kw(
+                    model, "get_field_translations", [[res_id], field_name], {}
+                )
+                verified = verify[0] if isinstance(verify, (list, tuple)) else verify
+            except Exception:
+                verified = None
+            return {
+                "success": all("ERROR" not in v for v in applied.values()),
+                "model": model, "res_id": res_id, "field": field_name,
+                "translate": kind, "mode": "replace",
+                "applied": applied,
+                "verified": verified,
+                "odoo_version": major,
+            }
+
+        return {"error": f"Unknown mode '{mode}'. Use 'extract', 'terms', or 'replace'."}
 
     elif name == "odoo_message_post":
         model = args["model"]
