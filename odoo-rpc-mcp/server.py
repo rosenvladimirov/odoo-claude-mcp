@@ -958,6 +958,48 @@ def _conn(args: dict) -> OdooConnection:
     return _mgr().get(args.get("connection", "default"))
 
 
+def _odoo_major_version(conn: OdooConnection) -> int:
+    """Return Odoo major version as int (18, 19, 17, 16, ...). Defaults to 0 on error."""
+    try:
+        import xmlrpc.client as _xc
+        ctx = conn._get_ssl_context() if hasattr(conn, "_get_ssl_context") else None
+        url = f"{conn.url.rstrip('/')}/xmlrpc/2/common"
+        proxy = _xc.ServerProxy(url, context=ctx, allow_none=True) if ctx else _xc.ServerProxy(url, allow_none=True)
+        info = proxy.version() or {}
+        v = info.get("server_version", "0")
+        major = str(v).split(".")[0]
+        return int(major) if major.isdigit() else 0
+    except Exception:
+        return 0
+
+
+def _field_translate_kind(field_def: dict) -> str:
+    """Inspect fields_get result for one field and classify its translate attribute.
+    Returns: 'simple' | 'html' | 'xml' | 'callable' | 'none'."""
+    t = field_def.get("translate")
+    if t in (False, None, 0):
+        return "none"
+    if t is True:
+        return "simple"
+    # Sometimes the fields_get serialisation returns the translate as a string identifier
+    s = str(t).lower()
+    if "html_translate" in s:
+        return "html"
+    if "xml_translate" in s:
+        return "xml"
+    # Any other truthy value → treat as callable term-based
+    return "callable"
+
+
+def _field_info(conn: OdooConnection, model: str, field_name: str) -> dict:
+    """fields_get a single field with translate attribute. Raises ValueError if missing."""
+    attrs = ["string", "type", "translate", "help", "readonly", "store", "related"]
+    fields = conn.execute_kw(model, "fields_get", [[field_name]], {"attributes": attrs})
+    if field_name not in fields:
+        raise ValueError(f"Field '{field_name}' does not exist on model '{model}'")
+    return fields[field_name]
+
+
 # ─── Web Session Manager ─────────────────────────────────
 
 import requests as http_requests
@@ -1955,6 +1997,128 @@ TOOLS = [
                 "module": {"type": "string", "description": "Technical module name (e.g. 'account_asset')"},
             },
             "required": ["module"],
+        },
+    ),
+    # ── Translations (multi-language field writes / reads) ──
+    Tool(
+        name="odoo_list_translatable_fields",
+        description=(
+            "List all translatable fields on an Odoo model. Returns per-field: "
+            "translate type ('simple' for translate=True, 'html' for html_translate, "
+            "'xml' for xml_translate, 'callable' for other), field type, label, help. "
+            "Use this to discover which fields on blog.post, product.template, "
+            "website.page, res.partner, etc. can be translated."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string", "description": "Model name (e.g. 'blog.post', 'product.template')"},
+            },
+            "required": ["model"],
+        },
+    ),
+    Tool(
+        name="odoo_get_field_translations",
+        description=(
+            "Read current translations for a translatable field on a record. "
+            "For simple translate=True fields returns {lang: value}. "
+            "For html_translate/xml_translate fields returns {lang: {term: value}}. "
+            "Auto-detects the translate type via fields_get. Works on blog.post.content, "
+            "blog.post.name, product.template.website_description, ir.ui.view.arch_db, "
+            "any res.partner.name with translate=True, etc."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string"},
+                "res_id": {"type": "integer", "description": "Record ID"},
+                "field_name": {"type": "string"},
+            },
+            "required": ["model", "res_id", "field_name"],
+        },
+    ),
+    Tool(
+        name="odoo_translate_field",
+        description=(
+            "Write translations for a simple translate=True field (Char/Text/Selection). "
+            "Use for: blog.post.name/subtitle/teaser, product.template.name, "
+            "res.partner.name, account.account.tag.name — any short/plain field. "
+            "Format: translations = {lang_code: value, ...}. Pass value=null/'' to "
+            "remove a language's translation (falls back to source_lang). "
+            "Errors if field.translate is not True (use odoo_translate_html for HTML). "
+            "Auto-detects Odoo version: v16+ uses update_field_translations() native API, "
+            "older falls back to ir.translation."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string"},
+                "res_id": {"type": "integer"},
+                "field_name": {"type": "string"},
+                "translations": {
+                    "type": "object",
+                    "description": "Map of language code to new value: {'en_US': 'Name', 'bg_BG': 'Име', 'de_DE': 'Name'}. Supports null/empty to clear.",
+                    "additionalProperties": {"type": ["string", "null"]},
+                },
+                "source_lang": {
+                    "type": "string",
+                    "description": "Source language for fallback (default 'en_US')",
+                    "default": "en_US",
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true, only validates and reports what would change without writing",
+                    "default": False,
+                },
+            },
+            "required": ["model", "res_id", "field_name", "translations"],
+        },
+    ),
+    Tool(
+        name="odoo_translate_html",
+        description=(
+            "Write translations for translate=html_translate / translate=xml_translate "
+            "fields (term-based HTML/XML translation). Use for: blog.post.content, "
+            "product.template.website_description, hr.job.description, "
+            "ir.ui.view.arch_db (which covers website.page), website.menu.mega_menu_content, "
+            "event.track.description, forum.forum.guidelines, etc. "
+            "Two modes: "
+            "(a) mode='terms' — translations = {lang: {source_term: translated_term, ...}} "
+            "    Each source_term must match exactly a text node in the source_lang rendering. "
+            "(b) mode='replace' — translations = {lang: full_html_or_xml_string}. "
+            "    The MCP server extracts terms from source_lang and from replacement, pairs "
+            "    them positionally, and calls update_field_translations with term map. "
+            "Errors if field.translate is not callable. Auto-detects Odoo version (v16+ required)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string"},
+                "res_id": {"type": "integer"},
+                "field_name": {"type": "string"},
+                "translations": {
+                    "type": "object",
+                    "description": "Either {lang: {term: translation}} (mode='terms') or {lang: 'full html'} (mode='replace').",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["terms", "replace"],
+                    "default": "terms",
+                },
+                "source_lang": {
+                    "type": "string",
+                    "default": "en_US",
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "default": False,
+                },
+            },
+            "required": ["model", "res_id", "field_name", "translations"],
         },
     ),
     # ── Web Session (cookie-based HTTP access) ──
@@ -4301,6 +4465,324 @@ def _execute_tool(name: str, args: dict) -> Any:
             args.get("args", []),
             args.get("kwargs", {}),
         )
+
+    elif name == "odoo_list_translatable_fields":
+        model = args["model"]
+        fields = conn.execute_kw(
+            model, "fields_get", [],
+            {"attributes": ["string", "type", "translate", "help", "readonly", "store"]},
+        )
+        result = []
+        for fname, fdef in fields.items():
+            kind = _field_translate_kind(fdef)
+            if kind == "none":
+                continue
+            result.append({
+                "name": fname,
+                "type": fdef.get("type"),
+                "translate": kind,  # 'simple' | 'html' | 'xml' | 'callable'
+                "string": fdef.get("string"),
+                "help": (fdef.get("help") or "")[:200],
+                "readonly": fdef.get("readonly", False),
+                "store": fdef.get("store", True),
+            })
+        result.sort(key=lambda r: (r["translate"] != "simple", r["name"]))
+        return {"model": model, "count": len(result), "fields": result}
+
+    elif name == "odoo_get_field_translations":
+        model = args["model"]
+        res_id = int(args["res_id"])
+        field_name = args["field_name"]
+
+        finfo = _field_info(conn, model, field_name)
+        kind = _field_translate_kind(finfo)
+        if kind == "none":
+            return {
+                "error": f"Field '{field_name}' on model '{model}' is not translatable "
+                         f"(translate={finfo.get('translate')})",
+                "field": field_name,
+                "translate": kind,
+            }
+
+        major = _odoo_major_version(conn)
+        if major >= 16:
+            try:
+                translations = conn.execute_kw(
+                    model, "get_field_translations", [[res_id], field_name], {}
+                )
+                # Returns tuple (list_of_dicts_per_lang, metadata_dict)
+                return {
+                    "model": model,
+                    "res_id": res_id,
+                    "field": field_name,
+                    "translate": kind,
+                    "source_lang": (translations[1] or {}).get("translation_type"),
+                    "translations": translations[0] if isinstance(translations, (list, tuple)) else translations,
+                    "odoo_version": major,
+                }
+            except Exception as e:
+                return {"error": f"get_field_translations failed: {e}", "field": field_name}
+        else:
+            # Pre-16: read ir.translation rows
+            tr = conn.execute_kw(
+                "ir.translation", "search_read",
+                [[["name", "=", f"{model},{field_name}"], ["res_id", "=", res_id]]],
+                {"fields": ["lang", "value", "source"]},
+            )
+            return {
+                "model": model,
+                "res_id": res_id,
+                "field": field_name,
+                "translate": kind,
+                "translations": {r["lang"]: r["value"] for r in tr},
+                "odoo_version": major,
+                "api": "ir.translation (pre-16 fallback)",
+            }
+
+    elif name == "odoo_translate_field":
+        model = args["model"]
+        res_id = int(args["res_id"])
+        field_name = args["field_name"]
+        translations = args["translations"]
+        source_lang = args.get("source_lang", "en_US")
+        dry_run = args.get("dry_run", False)
+
+        finfo = _field_info(conn, model, field_name)
+        kind = _field_translate_kind(finfo)
+        if kind == "none":
+            return {
+                "error": f"Field '{field_name}' on model '{model}' is not translatable.",
+                "field": field_name,
+                "translate": kind,
+            }
+        if kind != "simple":
+            return {
+                "error": (
+                    f"Field '{field_name}' uses '{kind}' translate (HTML/XML term-based). "
+                    f"Use 'odoo_translate_html' instead."
+                ),
+                "field": field_name,
+                "translate": kind,
+            }
+
+        # Validate langs are installed
+        installed_langs = conn.execute_kw(
+            "res.lang", "search_read", [[["active", "=", True]]], {"fields": ["code", "name"]},
+        )
+        installed_codes = {l["code"] for l in installed_langs} | {"en_US"}
+        missing = sorted(set(translations.keys()) - installed_codes)
+        if missing:
+            return {
+                "error": f"Languages not active in Odoo: {missing}. Activate them first via Settings → Translations → Languages.",
+                "available": sorted(installed_codes),
+            }
+
+        if dry_run:
+            current = conn.execute_kw(
+                model, "get_field_translations", [[res_id], field_name], {}
+            ) if _odoo_major_version(conn) >= 16 else None
+            return {
+                "dry_run": True,
+                "would_apply": translations,
+                "current": current[0] if current else None,
+                "field": field_name,
+                "translate": kind,
+            }
+
+        major = _odoo_major_version(conn)
+        if major >= 16:
+            result = conn.execute_kw(
+                model, "update_field_translations",
+                [[res_id], field_name, translations],
+                {"source_lang": source_lang},
+            )
+            # Verify
+            verify = conn.execute_kw(
+                model, "get_field_translations", [[res_id], field_name], {}
+            )
+            return {
+                "success": True,
+                "model": model,
+                "res_id": res_id,
+                "field": field_name,
+                "translate": kind,
+                "applied": translations,
+                "verified": verify[0] if isinstance(verify, (list, tuple)) else verify,
+                "odoo_version": major,
+            }
+        else:
+            # Pre-16: ir.translation create/write
+            applied = {}
+            for lang, value in translations.items():
+                if lang == source_lang:
+                    # Source value — write directly
+                    conn.execute_kw(
+                        model, "write", [[res_id], {field_name: value}],
+                        {"context": {"lang": lang}},
+                    )
+                    applied[lang] = "source (written via write)"
+                    continue
+                existing = conn.execute_kw(
+                    "ir.translation", "search",
+                    [[["name", "=", f"{model},{field_name}"], ["res_id", "=", res_id], ["lang", "=", lang]]],
+                    {"limit": 1},
+                )
+                if existing:
+                    conn.execute_kw("ir.translation", "write", [existing, {"value": value}])
+                    applied[lang] = f"updated (id={existing[0]})"
+                else:
+                    new_id = conn.execute_kw("ir.translation", "create", [{
+                        "name": f"{model},{field_name}",
+                        "res_id": res_id,
+                        "lang": lang,
+                        "value": value,
+                        "type": "model",
+                        "state": "translated",
+                    }])
+                    applied[lang] = f"created (id={new_id})"
+            return {
+                "success": True,
+                "model": model,
+                "res_id": res_id,
+                "field": field_name,
+                "translate": kind,
+                "applied": applied,
+                "odoo_version": major,
+                "api": "ir.translation (pre-16 fallback)",
+            }
+
+    elif name == "odoo_translate_html":
+        model = args["model"]
+        res_id = int(args["res_id"])
+        field_name = args["field_name"]
+        translations = args["translations"]
+        mode = args.get("mode", "terms")
+        source_lang = args.get("source_lang", "en_US")
+        dry_run = args.get("dry_run", False)
+
+        finfo = _field_info(conn, model, field_name)
+        kind = _field_translate_kind(finfo)
+        if kind == "none":
+            return {
+                "error": f"Field '{field_name}' on model '{model}' is not translatable.",
+                "field": field_name,
+                "translate": kind,
+            }
+        if kind == "simple":
+            return {
+                "error": (
+                    f"Field '{field_name}' uses simple translate=True (plain string). "
+                    f"Use 'odoo_translate_field' instead."
+                ),
+                "field": field_name,
+                "translate": kind,
+            }
+
+        major = _odoo_major_version(conn)
+        if major < 16:
+            return {
+                "error": (
+                    f"HTML/XML term-based translation via update_field_translations requires Odoo 16+. "
+                    f"Detected version: {major}. Use the old ir.translation API directly via odoo_execute."
+                ),
+                "odoo_version": major,
+            }
+
+        # Validate langs
+        installed_langs = conn.execute_kw(
+            "res.lang", "search_read", [[["active", "=", True]]], {"fields": ["code"]},
+        )
+        installed_codes = {l["code"] for l in installed_langs} | {"en_US"}
+        missing = sorted(set(translations.keys()) - installed_codes)
+        if missing:
+            return {
+                "error": f"Languages not active: {missing}",
+                "available": sorted(installed_codes),
+            }
+
+        # Build term map per mode
+        term_map_per_lang: dict[str, dict[str, str]] = {}
+        if mode == "terms":
+            # Already {lang: {src_term: tr_term}}
+            for lang, terms in translations.items():
+                if not isinstance(terms, dict):
+                    return {"error": f"mode='terms' requires {{lang: {{src:tr}}}}, got {type(terms).__name__} for {lang}"}
+                term_map_per_lang[lang] = terms
+        elif mode == "replace":
+            # Extract terms from source_lang rendering + replacement, pair positionally.
+            # We use the stdlib HTMLParser (Odoo's html_translate / xml_translate
+            # uses a similar node-iteration approach internally).
+            try:
+                from html.parser import HTMLParser as _HP
+
+                class _Extract(_HP):
+                    def __init__(self):
+                        super().__init__()
+                        self.terms: list[str] = []
+                    def handle_data(self, data):
+                        t = (data or "").strip()
+                        if t:
+                            self.terms.append(t)
+
+                # Read source rendering
+                src_rec = conn.execute_kw(
+                    model, "read", [[res_id], [field_name]],
+                    {"context": {"lang": source_lang}},
+                )
+                src_html = (src_rec[0].get(field_name) or "") if src_rec else ""
+                sp = _Extract(); sp.feed(src_html)
+                src_terms = sp.terms
+
+                for lang, new_html in translations.items():
+                    if not isinstance(new_html, str):
+                        return {"error": f"mode='replace' requires {{lang: 'html'}}, got {type(new_html).__name__} for {lang}"}
+                    p = _Extract(); p.feed(new_html)
+                    new_terms = p.terms
+                    if len(src_terms) != len(new_terms):
+                        return {
+                            "error": (
+                                f"mode='replace' for lang={lang}: source has {len(src_terms)} terms "
+                                f"but replacement has {len(new_terms)}. Use mode='terms' with explicit map."
+                            ),
+                            "src_terms_count": len(src_terms),
+                            "new_terms_count": len(new_terms),
+                        }
+                    term_map_per_lang[lang] = dict(zip(src_terms, new_terms))
+            except ImportError as e:
+                return {"error": f"HTML parser import failed: {e}"}
+        else:
+            return {"error": f"Unknown mode '{mode}'. Use 'terms' or 'replace'."}
+
+        if dry_run:
+            return {
+                "dry_run": True,
+                "mode": mode,
+                "term_map_per_lang": term_map_per_lang,
+                "field": field_name,
+                "translate": kind,
+                "odoo_version": major,
+            }
+
+        # Write via update_field_translations
+        conn.execute_kw(
+            model, "update_field_translations",
+            [[res_id], field_name, term_map_per_lang],
+            {"source_lang": source_lang},
+        )
+        verify = conn.execute_kw(
+            model, "get_field_translations", [[res_id], field_name], {}
+        )
+        return {
+            "success": True,
+            "model": model,
+            "res_id": res_id,
+            "field": field_name,
+            "translate": kind,
+            "mode": mode,
+            "applied_terms_count": {lang: len(t) for lang, t in term_map_per_lang.items()},
+            "verified": verify[0] if isinstance(verify, (list, tuple)) else verify,
+            "odoo_version": major,
+        }
 
     elif name == "odoo_message_post":
         model = args["model"]
