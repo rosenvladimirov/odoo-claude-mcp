@@ -35,6 +35,7 @@
     <div class="nav-links">
       <a href="#whats-new">What's new</a>
       <a href="#tracks">Tracks</a>
+      <a href="#tools">Tools</a>
       <a href="#modules">Odoo Modules</a>
       <a href="#servers">Servers</a>
       <a href="#deploy">Deploy</a>
@@ -604,6 +605,210 @@
       </article>
 
     </div>
+  </div>
+</section>
+
+<!-- Tool Catalog -->
+<section class="tools-section" id="tools" style="padding:80px 32px;background:#faf8fd;border-top:1px solid rgba(113,75,160,0.08);">
+  <div style="max-width:1200px;margin:0 auto;">
+    <div class="section-label">ALL 197+ TOOLS · ORGANIZED BY CATEGORY</div>
+    <h2 class="section-title">Every tool Claude can call.</h2>
+    <p style="font-size:1.1em;color:#5C5C70;max-width:720px;margin-top:16px;">
+      Native Odoo RPC tools come from <code style="font-family:'JetBrains Mono',monospace;">odoo-rpc-mcp</code>.
+      Proxied infrastructure tools are exposed through the unified gateway from
+      <code style="font-family:'JetBrains Mono',monospace;">portainer-mcp</code>, <code style="font-family:'JetBrains Mono',monospace;">github-mcp</code>, <code style="font-family:'JetBrains Mono',monospace;">oca-mcp</code>, <code style="font-family:'JetBrains Mono',monospace;">ee-mcp</code>, <code style="font-family:'JetBrains Mono',monospace;">filesystem-mcp</code>.
+      All authenticated via the same Bearer token.
+    </p>
+
+    <h3 style="font-family:'Fraunces',serif;font-size:1.4em;font-weight:600;margin-top:48px;margin-bottom:18px;color:#1A1A2E;">🟣 Native Odoo tools <span style="font-size:0.7em;color:#5C5C70;font-weight:400;">· odoo-rpc-mcp</span></h3>
+    <div class="tool-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;">
+
+      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;transition:all 0.2s;">
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">⇅ CRUD &amp; Search</h4>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">14</span>
+        </div>
+        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>odoo_search</code>, <code>odoo_read</code>, <code>odoo_search_read</code>, <code>odoo_search_count</code>, <code>odoo_create</code>, <code>odoo_write</code>, <code>odoo_unlink</code>, <code>odoo_execute</code>, <code>odoo_message_post</code>, <code>odoo_refresh</code>.</p>
+        <p style="font-size:0.82em;color:#714BA0;">→ Natural language queries, bulk imports, workflow automation (action_post, action_confirm).</p>
+      </div>
+
+      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🔍 Introspection</h4>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">4</span>
+        </div>
+        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>odoo_fields_get</code>, <code>odoo_list_models</code>, <code>odoo_module_info</code>, <code>odoo_version</code>.</p>
+        <p style="font-size:0.82em;color:#714BA0;">→ "Which fields are translate?" "Where is this module installed?"</p>
+      </div>
+
+      <div class="tool-card" style="background:#fff;border:2px solid #21B6B7;border-radius:12px;padding:22px;position:relative;">
+        <span style="position:absolute;top:-10px;right:14px;background:#21B6B7;color:#fff;font-size:0.7em;font-weight:700;padding:3px 10px;border-radius:999px;">NEW 2.10</span>
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🌐 Translations</h4>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">4</span>
+        </div>
+        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>odoo_list_translatable_fields</code>, <code>odoo_get_field_translations</code>, <code>odoo_translate_field</code>, <code>odoo_translate_html</code>.</p>
+        <p style="font-size:0.82em;color:#714BA0;">→ Translate blog posts, product descriptions, website pages. 3 modes (extract / terms / replace) + auto-ZWSP fix.</p>
+      </div>
+
+      <div class="tool-card" style="background:#fff;border:2px solid #21B6B7;border-radius:12px;padding:22px;position:relative;">
+        <span style="position:absolute;top:-10px;right:14px;background:#21B6B7;color:#fff;font-size:0.7em;font-weight:700;padding:3px 10px;border-radius:999px;">NEW 2.10</span>
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🧱 Website Snippets</h4>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">5</span>
+        </div>
+        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>odoo_website_list_snippets</code>, <code>list_page_snippets</code>, <code>add_snippet</code>, <code>update_snippet</code>, <code>remove_snippet</code>.</p>
+        <p style="font-size:0.82em;color:#714BA0;">→ Swap banner backgrounds, insert CTAs, mutate blog/page HTML via xpath + CSS-property substitutions.</p>
+      </div>
+
+      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🔐 Web Session</h4>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">7</span>
+        </div>
+        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>odoo_web_login</code>, <code>web_call</code>, <code>web_read</code>, <code>web_export</code>, <code>web_report</code>, <code>web_request</code>, <code>web_logout</code>.</p>
+        <p style="font-size:0.82em;color:#714BA0;">→ Cookie-based HTTP. Works through Cloudflare — no XML-RPC endpoints needed.</p>
+      </div>
+
+      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">📎 Attachments</h4>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">4</span>
+        </div>
+        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>odoo_attachment_upload / download</code>, <code>public_access_download / image</code>.</p>
+        <p style="font-size:0.82em;color:#714BA0;">→ Binary pipeline including vision-based invoice OCR.</p>
+      </div>
+
+      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">📊 Reporting</h4>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">6</span>
+        </div>
+        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>odoo_report</code>, <code>public_access_report_{pdf,xlsx,html}</code>, <code>public_access_export_{csv,xlsx}</code>.</p>
+        <p style="font-size:0.82em;color:#714BA0;">→ PDF invoices, XLSX exports, HTML dashboards.</p>
+      </div>
+
+      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🌍 Portal &amp; Public</h4>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">8</span>
+        </div>
+        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>public_access_portal_{home,orders,invoices,purchases,tickets}</code>, <code>shop</code>, <code>sitemap</code>, <code>barcode</code>.</p>
+        <p style="font-size:0.82em;color:#714BA0;">→ Headless customer portal — orders, invoices, tickets, shop.</p>
+      </div>
+
+      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🇧🇬 Bulgaria Localization</h4>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">5</span>
+        </div>
+        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>odoo_fp_list / details / types / configure / remove_action</code>.</p>
+        <p style="font-size:0.82em;color:#714BA0;">→ Fiscal position tax action maps for НАП: protocols Art. 117, customs declarations, private usage.</p>
+      </div>
+
+      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🧠 AI Tokenizer</h4>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">5</span>
+        </div>
+        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>ai_tokenize_record / collection</code>, <code>ai_search_similar</code>, <code>ai_list_documents</code>, <code>ai_collection_info</code>.</p>
+        <p style="font-size:0.82em;color:#714BA0;">→ Qdrant vector embeddings per record. Ollama (<code>nomic-embed-text</code>) default. Semantic search.</p>
+      </div>
+
+      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">📚 Memory System</h4>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">6</span>
+        </div>
+        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>memory_read / write / list / share / pull / delete</code>.</p>
+        <p style="font-size:0.82em;color:#714BA0;">→ Three scopes: per-user, shared team, licensed memory packs. Merged on session start.</p>
+      </div>
+
+      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🔌 Connections &amp; Auth</h4>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">12</span>
+        </div>
+        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>odoo_connect</code>, <code>connections</code>, <code>cert_info</code>, <code>cert_refresh</code>, <code>user_connection_{add,list,activate,delete}</code>, <code>who_am_i</code>, <code>identify</code>.</p>
+        <p style="font-size:0.82em;color:#714BA0;">→ Multi-tenant aliases, TOFU cert pinning for self-signed, per-user profile isolation.</p>
+      </div>
+
+      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">📧 Google Workspace</h4>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">11</span>
+        </div>
+        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;">Gmail (search/read/send/labels), Calendar (list/events/CRUD), Drive (read/metadata). OAuth.</p>
+        <p style="font-size:0.82em;color:#714BA0;">→ Email triage, calendar scheduling, Drive file lookup — all from Claude.</p>
+      </div>
+
+      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">✈️ Telegram</h4>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">7</span>
+        </div>
+        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>telegram_configure / auth / auth_status / search_contacts / get_dialogs / get_messages / send_message</code>.</p>
+        <p style="font-size:0.82em;color:#714BA0;">→ Full MTProto client — user-account, not bot-API — send / read / DM / groups / channels.</p>
+      </div>
+
+      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🖥️ SSH &amp; Git</h4>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">3</span>
+        </div>
+        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>ssh_execute</code>, <code>git_remote</code>, <code>github_api</code>.</p>
+        <p style="font-size:0.82em;color:#714BA0;">→ Remote command execution with SSH agent forwarding; git metadata and GitHub API escape hatch.</p>
+      </div>
+
+    </div>
+
+    <!-- Proxied infrastructure MCPs -->
+    <h3 style="font-family:'Fraunces',serif;font-size:1.4em;font-weight:600;margin-top:56px;margin-bottom:18px;color:#1A1A2E;">🟢 Proxied infrastructure tools <span style="font-size:0.7em;color:#5C5C70;font-weight:400;">· exposed through unified gateway</span></h3>
+    <div class="tool-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;">
+
+      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">📦 OCA &amp; Enterprise</h4>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">25</span>
+        </div>
+        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;">OCA: <code>oca_search / clone_repo / clone_all / update / status / deploy / link / migrate / changelog / fix_website / gen_readme / gen_icon / gen_table / gen_requirements</code>. EE: <code>ee_search / clone / depends / modules / oca_conflicts / oca_recommend / deploy / link / unlink / license_status / token_check / update</code>.</p>
+        <p style="font-size:0.82em;color:#714BA0;">→ Clone and maintain the whole OCA constellation; EE module selection + conflict detection.</p>
+      </div>
+
+      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🐳 Portainer &amp; Docker</h4>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">30</span>
+        </div>
+        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;">Stacks (<code>list / create / update / redeploy</code>), environments, teams, users, access groups, tags, local stacks, <code>dockerProxy</code>, <code>kubernetesProxy</code>.</p>
+        <p style="font-size:0.82em;color:#714BA0;">→ Provision per-tenant MCP stacks, scale k8s, raw Docker API when needed.</p>
+      </div>
+
+      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🐙 GitHub</h4>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">36</span>
+        </div>
+        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;">Code / issue / PR / repo / user / discussion search. File contents, repo tree, commits, branches, tags, releases, gists. Actions runs + job logs.</p>
+        <p style="font-size:0.82em;color:#714BA0;">→ Powered by the official <code>ghcr.io/github/github-mcp-server</code>.</p>
+      </div>
+
+      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
+        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
+          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">📁 Filesystem</h4>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">15</span>
+        </div>
+        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>read_file / read_text_file / read_media_file / read_multiple_files</code>, <code>write_file / edit_file / move_file</code>, <code>create_directory / list_directory / directory_tree</code>, <code>search_files</code>.</p>
+        <p style="font-size:0.82em;color:#714BA0;">→ Sandboxed to <code>/repos</code> — safe AI agent filesystem operations.</p>
+      </div>
+
+    </div>
+
+    <p style="margin-top:40px;text-align:center;">
+      <a href="https://github.com/rosenvladimirov/odoo-claude-mcp/blob/2.0/README.md#-mcp-servers" class="btn btn-ghost" target="_blank" rel="noopener">
+        Full tool reference in README →
+      </a>
+    </p>
   </div>
 </section>
 
