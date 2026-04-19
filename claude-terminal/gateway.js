@@ -19,6 +19,10 @@ const MCP_PORT = parseInt(process.env.MCP_PORT || "8084", 10);
 
 // Load landing page HTML
 const LANDING_HTML = fs.readFileSync("/home/claude/landing.html", "utf-8");
+const TOOLS_HTML = (() => {
+    try { return fs.readFileSync("/home/claude/tools.html", "utf-8"); }
+    catch (_) { return null; }
+})();
 
 // Paths proxied to MCP server (landing-page web login uses this for
 // self-register + validation). Keep the list tight — we only want to
@@ -43,6 +47,25 @@ function isLandingRequest(req) {
 // ── HTTP server ────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
     if (isLandingRequest(req)) {
+        res.writeHead(200, {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-cache",
+        });
+        res.end(LANDING_HTML);
+        return;
+    }
+
+    // Serve tools.html and index.html as static docs (no auth required)
+    const docPath = (req.url.split("?")[0] || "").replace(/\/+$/, "");
+    if (req.method === "GET" && TOOLS_HTML && (docPath === "/tools.html" || docPath === "/tools")) {
+        res.writeHead(200, {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "public, max-age=300",
+        });
+        res.end(TOOLS_HTML);
+        return;
+    }
+    if (req.method === "GET" && (docPath === "/index.html" || docPath === "/index")) {
         res.writeHead(200, {
             "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "no-cache",
