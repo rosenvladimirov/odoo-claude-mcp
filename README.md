@@ -203,6 +203,93 @@ A complete **xterm.js + tmux + Claude Code** setup running in a Docker container
 
 ---
 
+## 📦 Companion Odoo Modules
+
+The MCP stack is paired with two **Odoo modules** that live in the BG
+localization repos. Together they turn any Odoo instance into a fully
+MCP-aware, multi-tenant, billing-ready AI workstation.
+
+### `l10n_bg_claude_terminal` — Odoo ↔ MCP integration (free / LGPL-3)
+
+Odoo module that exposes MCP + Claude Terminal configuration as user
+preferences and company settings. Works on **Odoo 16, 18 and 19** (each
+major series has a dedicated branch).
+
+**Repos:**
+
+- **Odoo 18**: [`OCA/l10n-bulgaria` → `l10n_bg_claude_terminal`](https://github.com/rosenvladimirov/l10n-bulgaria/tree/18.0/l10n_bg_claude_terminal) · current: **18.0.1.28.0**
+- **Odoo 19**: [`OCA/l10n-bulgaria` → `l10n_bg_claude_terminal`](https://github.com/rosenvladimirov/l10n-bulgaria/tree/19.0/l10n_bg_claude_terminal) · current: **19.0.1.24.0**
+- **Odoo 16**: same repo, branch `16.0`
+
+**What it adds to Odoo:**
+
+- Per-user **MCP endpoint + Bearer token** config (Odoo UI → Preferences)
+- Per-user **Odoo RPC connector** (URL, DB, API key, protocol,
+  `verify_ssl` flag with TOFU cert pinning)
+- Per-user **Web Session** credentials (for MCP's web session support)
+- Per-user **Anthropic API key / OAuth token** passthrough (billing
+  account or Claude Pro/Teams/Max)
+- **Telegram + Viber** MTProto / bot token config
+- **18 terminal themes** (Catppuccin, Dracula, Tokyo Night, Gruvbox, …)
+- **Claude.ai OAuth login** button → one-click auth to Claude API
+- **Live refresh bus** — MCP `odoo_create` / `odoo_write` triggers open
+  form / list views to update in real time (no full reload)
+- **Test Connections** button — smoke-tests Odoo RPC + MCP + Web Session
+  + Qdrant + Ollama in one click (sticky notifications)
+- **Save to MCP** button — register the user's Odoo alias into the MCP
+  connection store without touching `/data/connections.json` manually
+- **Dynamic XML-RPC db list** — populates the Database dropdown from
+  the Odoo instance's `list_dbs()` (multi-tenant friendly)
+
+### `l10n_bg_ai_billing` — SaaS billing module (OPL-1, paid)
+
+Odoo module for hosting providers and BL Consulting tier management.
+Tracks per-user MCP usage, calculates bills, provisions Portainer
+stacks per tenant, ships licensed memory packs.
+
+**Repo:**
+
+- **Odoo 19**: [`OCA/l10n-bulgaria-expert` → `l10n_bg_ai_billing`](https://github.com/rosenvladimirov/l10n-bulgaria-expert/tree/19.0/l10n_bg_ai_billing) · current: **19.0.1.3.0**
+
+**What it adds:**
+
+- 8 models: `ai.billing.{bundle, tenant, usage.line, invoice.batch,
+  skill.catalog, memory.pack, memory.deployment, tenant.addon}`
+- **Bundle pricing** — Starter €49 / Business €129 / Professional €299
+  / Enterprise €599 tiers with per-user / per-call / per-skill usage
+  meters
+- **Millicents precision** (\$0.00001) on usage lines — prevents the
+  30–40% rounding loss common on cent-based billing
+- **Portainer client wrapper** — `portainer.client` wizard creates a
+  per-tenant MCP stack with auto-provisioned port, env, and network
+- **AES-256 encrypted ZIP export** (via `pyzipper`) of tenant config
+  bundles for offline demos or DR backups
+- **Skill catalog** — `ai.skill` records with L1/L2/L3 disclosure tiers
+- **Memory packs** — versioned markdown playbooks distributable to
+  tenants via MCP `/admin/memory/upload` endpoint
+- **BG Trade Registry integration** — fetches EIK / VAT / legal form
+  from portal.registryagency.bg for tenant bootstrap
+- **sale.order integration** — selling a bundle SKU auto-provisions
+  the tenant + deploys memory + activates skills
+- **MCP Terminal addons** — extra per-tenant features (dedicated
+  subdomain, white-label branding)
+
+**Dependency on the MCP stack:** uses the `MCP_ADMIN_TOKEN` endpoint
+family (`/admin/memory/*`) added in `odoo-rpc-mcp` 2.8.0.
+
+### Installation order
+
+```
+l10n_bg_claude_terminal   ← every user of the MCP terminal
+       ↓
+l10n_bg_ai_billing        ← hosting providers / resellers / BL-tier ops
+```
+
+`l10n_bg_ai_billing` depends on `l10n_bg_claude_terminal` — installing
+the billing module auto-pulls the terminal integration.
+
+---
+
 ## 🚀 Quick Start
 
 ### Option 1: Docker Compose (local dev)
