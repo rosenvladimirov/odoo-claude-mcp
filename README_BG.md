@@ -61,6 +61,93 @@ Internet / Cloudflare
 
 ---
 
+## 📦 Съпътстващи Odoo модули
+
+MCP стекът работи заедно с **два Odoo модула**, които живеят в BG
+localization репозиториите. Заедно те превръщат всяка Odoo инстанция в
+пълноценна MCP-aware, мулти-тенант, billing-ready AI работна среда.
+
+### `l10n_bg_claude_terminal` — Odoo ↔ MCP интеграция (безплатен, LGPL-3)
+
+Odoo модул, който излага MCP + Claude Terminal конфигурацията като
+потребителски настройки и company settings. Работи на **Odoo 16, 18 и 19**
+(всяка основна серия е на отделен клон).
+
+**Репозитори:**
+
+- **Odoo 18**: [`l10n-bulgaria → l10n_bg_claude_terminal`](https://github.com/rosenvladimirov/l10n-bulgaria/tree/18.0/l10n_bg_claude_terminal) · актуално: **18.0.1.28.0**
+- **Odoo 19**: [`l10n-bulgaria → l10n_bg_claude_terminal`](https://github.com/rosenvladimirov/l10n-bulgaria/tree/19.0/l10n_bg_claude_terminal) · актуално: **19.0.1.24.0**
+- **Odoo 16**: същото repo, клон `16.0`
+
+**Какво добавя към Odoo:**
+
+- Per-user **MCP endpoint + Bearer токен** конфигурация (Odoo UI →
+  Преференции)
+- Per-user **Odoo RPC конектор** (URL, DB, API key, протокол,
+  `verify_ssl` flag с TOFU cert pinning за self-signed сертификати)
+- Per-user **Web Session** credentials (за MCP web session поддръжка)
+- Per-user **Anthropic API ключ / OAuth token** passthrough (API
+  billing или Claude Pro/Teams/Max)
+- **Telegram + Viber** MTProto / bot token конфигурация
+- **18 терминални теми** (Catppuccin, Dracula, Tokyo Night, Gruvbox, …)
+- **Claude.ai OAuth login** бутон → еднократен auth към Claude API
+- **Live refresh bus** — MCP `odoo_create` / `odoo_write` кара отворените
+  form / list views да се обновят в реално време (без full reload)
+- **Test Connections** бутон — smoke-тества Odoo RPC + MCP + Web Session
+  + Qdrant + Ollama с един клик (sticky notifications)
+- **Save to MCP** бутон — регистрира alias-а на потребителя в MCP
+  connection store без ръчно пипане на `/data/connections.json`
+- **Dynamic XML-RPC db list** — попълва Database dropdown-а от
+  `list_dbs()` на Odoo инстанцията (мулти-тенант съвместим)
+
+### `l10n_bg_ai_billing` — SaaS билинг модул (OPL-1, платен)
+
+Odoo модул за хостинг доставчици и BL Consulting tier management.
+Проследява per-user MCP usage, изчислява фактури, provisions Portainer
+стакове per tenant, дистрибутира licensed memory packs.
+
+**Repo:**
+
+- **Odoo 19**: [`l10n-bulgaria-expert → l10n_bg_ai_billing`](https://github.com/rosenvladimirov/l10n-bulgaria-expert/tree/19.0/l10n_bg_ai_billing) · актуално: **19.0.1.3.0**
+
+**Какво добавя:**
+
+- 8 модела: `ai.billing.{bundle, tenant, usage.line, invoice.batch,
+  skill.catalog, memory.pack, memory.deployment, tenant.addon}`
+- **Bundle pricing** — Starter €49 / Business €129 / Professional €299
+  / Enterprise €599 с per-user / per-call / per-skill usage измерители
+- **Millicents прецизност** ($0.00001) на usage линиите — предотвратява
+  30–40% загуба от rounding при cent-based билинг
+- **Portainer client wrapper** — `portainer.client` wizard създава
+  per-tenant MCP стак с auto-provisioned порт, env, мрежа
+- **AES-256 encrypted ZIP export** (чрез `pyzipper`) на tenant config
+  bundles за офлайн демота или DR backup-и
+- **Skill catalog** — `ai.skill` записи с L1/L2/L3 disclosure нива
+- **Memory packs** — versioned markdown playbooks дистрибуирани към
+  tenants чрез MCP `/admin/memory/upload` endpoint
+- **Интеграция с Търговски регистър** — сваля ЕИК / ДДС / правна форма
+  от portal.registryagency.bg за bootstrap на tenant partner
+- **sale.order интеграция** — продажбата на bundle SKU автоматично
+  provisions tenant + deploys memory + активира skills
+- **MCP Terminal addons** — допълнителни per-tenant функции (отделен
+  subdomain, white-label branding)
+
+**Зависимост от MCP стека:** използва `MCP_ADMIN_TOKEN` endpoint-ите
+(`/admin/memory/*`) добавени в `odoo-rpc-mcp` 2.8.0.
+
+### Ред на инсталация
+
+```
+l10n_bg_claude_terminal   ← всеки потребител на MCP терминала
+       ↓
+l10n_bg_ai_billing        ← хостинг доставчици / reseller-и / BL-tier ops
+```
+
+`l10n_bg_ai_billing` зависи от `l10n_bg_claude_terminal` — инсталирането
+на билинг модула автоматично изтегля терминалната интеграция.
+
+---
+
 ## Бърз старт
 
 ### 1. Клониране и конфигурация
