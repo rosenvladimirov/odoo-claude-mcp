@@ -973,21 +973,34 @@ def _odoo_major_version(conn: OdooConnection) -> int:
         return 0
 
 
-def _field_translate_kind(field_def: dict) -> str:
+def _field_translate_kind(field_def: dict, field_name: str = "") -> str:
     """Inspect fields_get result for one field and classify its translate attribute.
-    Returns: 'simple' | 'html' | 'xml' | 'callable' | 'none'."""
+    Returns: 'simple' | 'html' | 'xml' | 'callable' | 'none'.
+
+    Note: XML-RPC serialisation turns callable translate values (html_translate,
+    xml_translate) into plain True — we can't distinguish them by the attribute
+    alone. Fall back to field type + name heuristic:
+      - type 'html' → 'html'
+      - type 'text' on ir.ui.view.arch_db or similar → 'xml'
+      - otherwise → 'simple'
+    """
     t = field_def.get("translate")
     if t in (False, None, 0):
         return "none"
-    if t is True:
-        return "simple"
-    # Sometimes the fields_get serialisation returns the translate as a string identifier
+    # Try string-based detection first (works on local calls, not XML-RPC)
     s = str(t).lower()
     if "html_translate" in s:
         return "html"
     if "xml_translate" in s:
         return "xml"
-    # Any other truthy value → treat as callable term-based
+    # XML-RPC serialised to True — infer from field type + name
+    ftype = (field_def.get("type") or "").lower()
+    if ftype == "html":
+        return "html"
+    if ftype == "text" and field_name in ("arch", "arch_db", "arch_fs", "arch_base", "arch_prev"):
+        return "xml"
+    if t is True:
+        return "simple"
     return "callable"
 
 
@@ -4482,7 +4495,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         )
         result = []
         for fname, fdef in fields.items():
-            kind = _field_translate_kind(fdef)
+            kind = _field_translate_kind(fdef, fname)
             if kind == "none":
                 continue
             result.append({
@@ -4503,7 +4516,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         field_name = args["field_name"]
 
         finfo = _field_info(conn, model, field_name)
-        kind = _field_translate_kind(finfo)
+        kind = _field_translate_kind(finfo, field_name)
         if kind == "none":
             return {
                 "error": f"Field '{field_name}' on model '{model}' is not translatable "
@@ -4556,7 +4569,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         dry_run = args.get("dry_run", False)
 
         finfo = _field_info(conn, model, field_name)
-        kind = _field_translate_kind(finfo)
+        kind = _field_translate_kind(finfo, field_name)
         if kind == "none":
             return {
                 "error": f"Field '{field_name}' on model '{model}' is not translatable.",
@@ -4669,7 +4682,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         translations = args.get("translations") or {}
 
         finfo = _field_info(conn, model, field_name)
-        kind = _field_translate_kind(finfo)
+        kind = _field_translate_kind(finfo, field_name)
         if kind == "none":
             return {
                 "error": f"Field '{field_name}' on model '{model}' is not translatable.",
@@ -4698,35 +4711,47 @@ def _execute_tool(name: str, args: dict) -> Any:
 
         # ── Mode: extract ─────────────────────────────────────
         # Returns the translatable terms as Odoo's html_translate engine sees
-        # them — each term is an HTML-serialised translatable block (preserves
-        # inline tags). We call get_field_translations() and read the source
-        # dict from the source_lang entry.
+        # them. Each term is an HTML-serialised translatable block (preserves
+        # inline tags like <strong>, <a>, etc.).
+        #
+        # get_field_translations() for html_translate/xml_translate fields
+        # returns a FLAT list of per-term-per-lang entries:
+        #   [{'lang': 'en_US', 'source': 'term_1', 'value': 'term_1_or_tr'},
+        #    {'lang': 'bg_BG', 'source': 'term_1', 'value': 'bg term_1'},
+        #    {'lang': 'en_US', 'source': 'term_2', 'value': 'term_2'},
+        #    ...]
+        # Each 'source' is the canonical term (identical across langs for same
+        # term). 'value' is the lang-specific translation.
         if mode == "extract":
             try:
                 tr_tuple = conn.execute_kw(
                     model, "get_field_translations", [[res_id], field_name], {}
                 )
-                per_lang = tr_tuple[0] if isinstance(tr_tuple, (list, tuple)) else tr_tuple
-                src_entry = None
-                for item in per_lang:
-                    if item.get("lang") == source_lang:
-                        src_entry = item
-                        break
-                if src_entry is None and per_lang:
-                    src_entry = per_lang[0]
-                terms = []
-                if src_entry:
-                    # Odoo returns keys of the term dict in 'source' (or 'value' in older APIs)
-                    src_dict = src_entry.get("source") or src_entry.get("value")
-                    if isinstance(src_dict, dict):
-                        terms = list(src_dict.keys())
+                payload = tr_tuple[0] if isinstance(tr_tuple, (list, tuple)) else tr_tuple
+                seen: set = set()
+                terms: list = []
+                per_lang_counts: dict = {}
+                translations_by_lang: dict = {}
+                for item in (payload or []):
+                    if not isinstance(item, dict):
+                        continue
+                    lang = item.get("lang", "")
+                    src = item.get("source") or ""
+                    val = item.get("value")
+                    per_lang_counts[lang] = per_lang_counts.get(lang, 0) + 1
+                    if src and src not in seen:
+                        seen.add(src)
+                        terms.append(src)
+                    translations_by_lang.setdefault(lang, {})[src] = val
                 return {
                     "model": model, "res_id": res_id, "field": field_name,
                     "translate": kind, "mode": "extract",
                     "source_lang": source_lang,
                     "terms_count": len(terms),
                     "terms": terms,
-                    "per_lang_raw": per_lang,
+                    "langs_present": sorted(per_lang_counts.keys()),
+                    "per_lang_counts": per_lang_counts,
+                    "translations_by_lang": translations_by_lang,
                     "odoo_version": major,
                 }
             except Exception as e:
