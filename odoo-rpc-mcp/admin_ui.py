@@ -396,27 +396,59 @@ def _read_session(req: Request) -> dict | None:
 
 
 # ─── Odoo validation ─────────────────────────────────────────
+class _UATransport(xmlrpc.client.Transport):
+    """xmlrpc Transport with custom User-Agent — Cloudflare Bot Fight Mode blocks
+    the default 'Python-xmlrpc/3.x' UA (returns 403 before authenticate() runs)."""
+    user_agent = "OdooMcpAdmin/1.0 (+https://mcp.odoo-shell.space)"
+
+
+class _UASafeTransport(xmlrpc.client.SafeTransport):
+    """HTTPS version of _UATransport."""
+    user_agent = "OdooMcpAdmin/1.0 (+https://mcp.odoo-shell.space)"
+
+    def __init__(self, context=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._ctx = context
+
+    def make_connection(self, host):
+        # Use our SSL context (disables verify for TOFU on self-signed)
+        import http.client
+        chost, self._extra_headers, _x509 = self.get_host_info(host)
+        self._connection = host, http.client.HTTPSConnection(
+            chost, None, context=self._ctx
+        )
+        return self._connection[1]
+
+
 def _validate_odoo(url: str, db: str, login: str, password_or_key: str) -> int | None:
-    """Return uid if auth ok, None otherwise. Uses the existing _UATransport helper
-    if available in the parent module (to avoid Cloudflare bot-fight blocking)."""
+    """Return uid if auth ok, None otherwise.
+
+    Uses custom User-Agent transport to avoid Cloudflare Bot Fight Mode
+    blocking default 'Python-xmlrpc' UA (returns 403 before authenticate runs).
+    SSL verification is disabled to support self-signed certs (TOFU is handled
+    in parent MCP connection flow, but admin UI is first-contact and doesn't
+    have cert pinning yet)."""
     try:
         url = (url or "").rstrip("/")
         if not url or not db or not login or not password_or_key:
             return None
         import ssl as _ssl
         ctx = _ssl.create_default_context()
-        # Permissive for self-signed — MCP server already has verify_ssl + TOFU flow
         ctx.check_hostname = False
         ctx.verify_mode = _ssl.CERT_NONE
+        if url.startswith("https://"):
+            transport = _UASafeTransport(context=ctx)
+        else:
+            transport = _UATransport()
         proxy = xmlrpc.client.ServerProxy(
             f"{url}/xmlrpc/2/common",
             allow_none=True,
-            context=ctx,
+            transport=transport,
         )
         uid = proxy.authenticate(db, login, password_or_key, {})
         return int(uid) if uid else None
     except Exception as e:
-        _logger.warning("Odoo auth failed: %s", e)
+        _logger.warning("Odoo auth failed (url=%s db=%s login=%s): %s", url, db, login, e)
         return None
 
 
@@ -477,6 +509,8 @@ body { background: var(--bg); font-family: 'Inter', system-ui, sans-serif; }
 .btn-brand:hover { background: var(--brand-dark); color: #fff; }
 .btn-accent { background: var(--accent); color: #fff; border: none; }
 .btn-accent:hover { background: #1a9d9e; color: #fff; }
+.btn-outline-accent { border: 1px solid var(--accent); color: var(--accent); background: transparent; }
+.btn-outline-accent:hover { background: var(--accent); color: #fff; }
 .card.glass { background: rgba(255,255,255,0.95); backdrop-filter: blur(12px); }
 .navbar { background: #fff !important; border-bottom: 1px solid rgba(113,75,160,0.12); }
 .card-header.brand-bg { background: linear-gradient(135deg, var(--brand) 0%, var(--accent) 100%); color: #fff; }
@@ -808,6 +842,32 @@ async def _api_login_odoo(req: Request):
         _save_user_auth(login, au)
         _audit(login, "user_reauth_via_odoo", "", ip, ua)
 
+    # Auto-save the credentials as 'default' alias in user's connections.json
+    # so they see at least one connection immediately after setup
+    try:
+        conn_file = os.path.join(_user_dir(login), "connections.json")
+        data = {}
+        if os.path.isfile(conn_file):
+            try:
+                with open(conn_file) as _f: data = json.load(_f)
+            except (json.JSONDecodeError, OSError):
+                data = {}
+        if "default" not in data:
+            data["default"] = {
+                "url": url.rstrip("/"),
+                "db": db,
+                "user": login,
+                "api_key": password,
+                "protocol": "xmlrpc",
+                "verify_ssl": True,
+            }
+            with open(conn_file, "w") as _f:
+                json.dump(data, _f, indent=2)
+            os.chmod(conn_file, 0o600)
+            _audit(login, "connection_autosave", "default", ip, ua)
+    except Exception as _e:
+        _logger.warning("auto-save connection failed: %s", _e)
+
     sid, _c = _create_session(login, bool(au.get("admin", False)), ip, ua)
     resp = JSONResponse({"ok": True, "next": f"{ADMIN_PATH_PREFIX}/setup"})
     _set_session_cookie(resp, sid, bool(au.get("admin", False)))
@@ -927,22 +987,33 @@ async def _handle_dashboard(req: Request):
 
     conns_html = ""
     if conns:
+        def _sec_badges(cfg):
+            out = []
+            if isinstance(cfg.get("ssh"), dict) and any(cfg["ssh"].values()):
+                out.append('<span class="badge bg-info text-dark" title="SSH"><i class="bi bi-terminal"></i></span>')
+            if isinstance(cfg.get("portainer"), dict) and any(cfg["portainer"].values()):
+                out.append('<span class="badge bg-success" title="Portainer"><i class="bi bi-boxes"></i></span>')
+            if isinstance(cfg.get("web"), dict) and any(cfg["web"].values()):
+                out.append('<span class="badge bg-warning text-dark" title="Web сесия"><i class="bi bi-globe"></i></span>')
+            if isinstance(cfg.get("mcp"), dict) and any(cfg["mcp"].values()):
+                out.append('<span class="badge bg-dark" title="MCP"><i class="bi bi-hdd-network"></i></span>')
+            return " ".join(out)
         rows = []
         for alias, cfg in sorted(conns.items()):
+            badges = _sec_badges(cfg)
             rows.append(f"""
 <tr>
-  <td><code>{alias}</code></td>
-  <td class="small text-muted">{cfg.get('url','')}</td>
-  <td class="small">{cfg.get('db','')}</td>
-  <td class="small">{cfg.get('user','')}</td>
-  <td class="text-end">
-    <a href="{ADMIN_PATH_PREFIX}/connections#{alias}" class="btn btn-sm btn-outline-primary">Редактирай</a>
+  <td class="text-nowrap"><code>{alias}</code>{(' ' + badges) if badges else ''}</td>
+  <td class="small text-muted text-truncate" style="max-width: 260px;" title="{cfg.get('url','')}">{cfg.get('url','')}</td>
+  <td class="small text-truncate" style="max-width: 140px;" title="{cfg.get('db','')}">{cfg.get('db','')}</td>
+  <td class="text-end text-nowrap">
+    <a href="{ADMIN_PATH_PREFIX}/connections#{alias}" class="btn btn-sm btn-outline-primary" title="Редакция"><i class="bi bi-pencil"></i></a>
   </td>
 </tr>""")
         conns_html = f"""
 <div class="table-responsive">
-  <table class="table table-mono">
-    <thead><tr><th>Alias</th><th>URL</th><th>DB</th><th>User</th><th></th></tr></thead>
+  <table class="table table-sm align-middle mb-0">
+    <thead class="small text-muted"><tr><th>Alias</th><th>URL</th><th>DB</th><th></th></tr></thead>
     <tbody>{"".join(rows)}</tbody>
   </table>
 </div>"""
@@ -1035,90 +1106,387 @@ async def _handle_connections_page(req: Request):
     body = f"""
 {_nav(sess)}
 <div class="container py-4">
-  <h2 class="mb-1"><i class="bi bi-plug-fill"></i> Odoo връзки</h2>
-  <p class="text-muted">Вашите персонални Odoo aliasi. MCP сървърът ги ползва при извикване на <code>odoo_*</code> инструменти.</p>
+  <div class="d-flex justify-content-between align-items-center mb-2">
+    <h2 class="mb-0"><i class="bi bi-plug-fill"></i> Odoo връзки</h2>
+    <div>
+      <button class="btn btn-outline-accent btn-sm me-1" data-bs-toggle="modal" data-bs-target="#importModal">
+        <i class="bi bi-upload"></i> Import от GUI
+      </button>
+      <button class="btn btn-brand btn-sm" onclick="openEditor('','')">
+        <i class="bi bi-plus-lg"></i> Нова връзка
+      </button>
+    </div>
+  </div>
+  <p class="text-muted small">Персоналните ти aliasi. Всеки може да има Odoo, SSH, Portainer, Web сесия и MCP линк — същите секции като в десктоп GUI-то.</p>
 
-  <div class="row">
-    <div class="col-lg-5 mb-4">
-      <div class="card shadow-sm">
-        <div class="card-header brand-bg"><h5 class="mb-0">Добави нова</h5></div>
-        <div class="card-body">
-          <form id="addForm">
-            <div class="mb-2"><label class="form-label small">Alias</label><input name="alias" class="form-control" placeholder="raytron, konex-tiva…" required pattern="[a-z0-9_-]+"></div>
-            <div class="mb-2"><label class="form-label small">URL</label><input name="url" type="url" class="form-control" placeholder="https://..." required></div>
-            <div class="mb-2"><label class="form-label small">Database</label><input name="db" class="form-control" required></div>
-            <div class="mb-2"><label class="form-label small">Login (Odoo)</label><input name="user" type="email" class="form-control" required></div>
-            <div class="mb-2"><label class="form-label small">API key</label><input name="api_key" type="password" class="form-control" required></div>
-            <div class="form-check mb-3">
-              <input class="form-check-input" type="checkbox" name="verify_ssl" value="1" id="vs" checked>
-              <label class="form-check-label small" for="vs">Verify SSL certificate</label>
+  <div class="card shadow-sm">
+    <div class="card-body">
+      <div id="connList">Зареждам…</div>
+    </div>
+  </div>
+</div>
+
+<!-- Editor Modal (Add + Edit) -->
+<div class="modal fade" id="editorModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header brand-bg text-white">
+        <h5 class="modal-title"><i class="bi bi-plug-fill"></i> <span id="editorTitle">Нова връзка</span></h5>
+        <button class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <form id="connForm" autocomplete="off">
+          <input type="hidden" name="_orig_alias" id="_orig_alias">
+          <div class="mb-3">
+            <label class="form-label small fw-bold">Alias <span class="text-danger">*</span></label>
+            <input name="alias" id="fld_alias" class="form-control" required pattern="[a-z0-9_-]+" placeholder="myodoo, client-prod…">
+            <div class="form-text">Малки букви, цифри, _ и -. Ползва се за <code>odoo_connect(alias=…)</code>.</div>
+          </div>
+
+          <ul class="nav nav-tabs" role="tablist">
+            <li class="nav-item"><button type="button" class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-odoo"><i class="bi bi-database"></i> Odoo <span class="badge bg-danger ms-1">req</span></button></li>
+            <li class="nav-item"><button type="button" class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-ssh"><i class="bi bi-terminal"></i> SSH <span id="badge-ssh" class="badge bg-secondary ms-1 d-none">set</span></button></li>
+            <li class="nav-item"><button type="button" class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-port"><i class="bi bi-boxes"></i> Portainer <span id="badge-port" class="badge bg-secondary ms-1 d-none">set</span></button></li>
+            <li class="nav-item"><button type="button" class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-web"><i class="bi bi-globe"></i> Web сесия <span id="badge-web" class="badge bg-secondary ms-1 d-none">set</span></button></li>
+            <li class="nav-item"><button type="button" class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-mcp"><i class="bi bi-hdd-network"></i> MCP <span id="badge-mcp" class="badge bg-secondary ms-1 d-none">set</span></button></li>
+          </ul>
+
+          <div class="tab-content border border-top-0 rounded-bottom p-3 mb-3">
+            <!-- Odoo -->
+            <div class="tab-pane fade show active" id="tab-odoo">
+              <div class="mb-2"><label class="form-label small">URL</label>
+                <input name="url" type="url" class="form-control" placeholder="https://mycompany.odoo.com" required></div>
+              <div class="row">
+                <div class="col-md-6 mb-2"><label class="form-label small">Database</label>
+                  <input name="db" class="form-control" required></div>
+                <div class="col-md-6 mb-2"><label class="form-label small">Login</label>
+                  <input name="user" type="email" class="form-control" required></div>
+              </div>
+              <div class="mb-2"><label class="form-label small">API key</label>
+                <input name="api_key" type="password" class="form-control" placeholder="••• (оставi празно за да запазиш съществуващия)">
+                <div class="form-text">Odoo → Preferences → Account Security → New API Key</div>
+              </div>
+              <div class="form-check"><input class="form-check-input" type="checkbox" name="verify_ssl" value="1" id="fld_vs" checked>
+                <label class="form-check-label small" for="fld_vs">Verify SSL certificate</label></div>
             </div>
-            <button class="btn btn-brand w-100">Добави</button>
-          </form>
-          <div id="addMsg" class="mt-2"></div>
-        </div>
+
+            <!-- SSH -->
+            <div class="tab-pane fade" id="tab-ssh">
+              <p class="text-muted small mb-2">За <code>ssh_execute</code> и git операции. Празно = секцията не се пази.</p>
+              <div class="row">
+                <div class="col-md-8 mb-2"><label class="form-label small">Host</label>
+                  <input name="ssh.host" class="form-control" placeholder="1.2.3.4 или example.com"></div>
+                <div class="col-md-4 mb-2"><label class="form-label small">Port</label>
+                  <input name="ssh.port" type="number" class="form-control" value="22"></div>
+              </div>
+              <div class="row">
+                <div class="col-md-6 mb-2"><label class="form-label small">User</label>
+                  <input name="ssh.user" class="form-control" placeholder="root"></div>
+                <div class="col-md-6 mb-2"><label class="form-label small">Auth</label>
+                  <select name="ssh.auth" class="form-select">
+                    <option value="agent" selected>SSH agent</option>
+                    <option value="key">Identity file</option>
+                    <option value="password">Password</option>
+                  </select></div>
+              </div>
+              <div class="mb-2"><label class="form-label small">Identity file (когато Auth = key)</label>
+                <input name="ssh.identity_file" type="password" class="form-control" placeholder="/home/user/.ssh/id_ed25519"></div>
+              <div class="mb-2"><label class="form-label small">Password (когато Auth = password)</label>
+                <input name="ssh.password" type="password" class="form-control"></div>
+            </div>
+
+            <!-- Portainer -->
+            <div class="tab-pane fade" id="tab-port">
+              <p class="text-muted small mb-2">За Portainer MCP инструменти (<code>portainer__*</code>).</p>
+              <div class="mb-2"><label class="form-label small">Portainer URL</label>
+                <input name="portainer.url" type="url" class="form-control" placeholder="https://portainer.example.com"></div>
+              <div class="mb-2"><label class="form-label small">API token</label>
+                <input name="portainer.token" type="password" class="form-control" placeholder="ptr_..."></div>
+              <div class="row">
+                <div class="col-md-6 form-check ms-1">
+                  <input class="form-check-input" type="checkbox" name="portainer.ssl_verify" value="1" id="fld_ps" checked>
+                  <label class="form-check-label small" for="fld_ps">Verify SSL</label></div>
+                <div class="col-md-6 form-check ms-1">
+                  <input class="form-check-input" type="checkbox" name="portainer.read_only" value="1" id="fld_pr">
+                  <label class="form-check-label small" for="fld_pr">Read-only</label></div>
+              </div>
+            </div>
+
+            <!-- Web -->
+            <div class="tab-pane fade" id="tab-web">
+              <p class="text-muted small mb-2">За <code>odoo_web_*</code> (XLSX/export, session API). Обикновено same URL и login както Odoo, но с password вместо API key.</p>
+              <div class="mb-2"><label class="form-label small">Web URL (default: същото като Odoo URL)</label>
+                <input name="web.url" type="url" class="form-control" placeholder="https://mycompany.odoo.com"></div>
+              <div class="mb-2"><label class="form-label small">Database (default: същата)</label>
+                <input name="web.db" class="form-control"></div>
+              <div class="mb-2"><label class="form-label small">Login</label>
+                <input name="web.login" type="email" class="form-control"></div>
+              <div class="mb-2"><label class="form-label small">Password</label>
+                <input name="web.password" type="password" class="form-control"></div>
+            </div>
+
+            <!-- MCP -->
+            <div class="tab-pane fade" id="tab-mcp">
+              <p class="text-muted small mb-2">Ако тази връзка е и MCP gateway (mcp.odoo-shell.space, etc.).</p>
+              <div class="mb-2"><label class="form-label small">MCP URL</label>
+                <input name="mcp.url" type="url" class="form-control" placeholder="https://mcp.example.com"></div>
+              <div class="mb-2"><label class="form-label small">MCP token</label>
+                <input name="mcp.token" type="password" class="form-control"></div>
+            </div>
+          </div>
+
+          <div id="connMsg" class="mb-2"></div>
+          <div class="d-flex justify-content-end gap-2">
+            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Откажи</button>
+            <button type="submit" class="btn btn-brand"><i class="bi bi-save"></i> Запази</button>
+          </div>
+        </form>
       </div>
     </div>
-    <div class="col-lg-7 mb-4">
-      <div class="card shadow-sm">
-        <div class="card-body">
-          <h5 class="fw-bold">Съществуващи</h5>
-          <div id="connList">Зареждам...</div>
+  </div>
+</div>
+
+<!-- Import Modal -->
+<div class="modal fade" id="importModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header brand-bg text-white">
+        <h5 class="modal-title"><i class="bi bi-upload"></i> Импорт от локален GUI</h5>
+        <button class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small text-muted">
+          Отвори <code>~/.claude/odoo_connections/connections.json</code>, copy цялото съдържание и paste долу.
+          Поддържа dict <code>{{alias: cfg}}</code> или list <code>[{{alias, url, db, api_key, ssh, portainer, web, ...}}]</code>.
+          Nested секции (ssh/portainer/web/mcp) се запазват.
+        </p>
+        <textarea id="importJson" class="form-control font-monospace" rows="14" placeholder='{{ "teolino": {{"url":"https://erp...", "db":"...", "api_key":"...", "ssh":{{"host":"..."}}}} }}'></textarea>
+        <div class="form-check mt-3">
+          <input class="form-check-input" type="checkbox" id="replaceExisting">
+          <label class="form-check-label small" for="replaceExisting">
+            Overwrite съществуващи aliasi със същото име (default: skip)
+          </label>
         </div>
+        <div id="importMsg" class="mt-3"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Затвори</button>
+        <button class="btn btn-brand" id="doImport"><i class="bi bi-upload"></i> Импортирай</button>
       </div>
     </div>
   </div>
 </div>
 
 <script>
+const PATH = '{ADMIN_PATH_PREFIX}';
+let _csrf = null;
+async function csrf() {{
+  if (_csrf) return _csrf;
+  const j = await fetch(PATH + '/api/csrf', {{credentials:'include'}}).then(r => r.json());
+  _csrf = j.token; return _csrf;
+}}
+
+function hasSection(cfg, name) {{
+  const s = cfg[name];
+  if (!s || typeof s !== 'object') return false;
+  return Object.values(s).some(v => v !== '' && v !== false && v != null);
+}}
+
+function sectionBadges(cfg) {{
+  const badges = [];
+  if (hasSection(cfg, 'ssh')) badges.push('<span class="badge bg-info text-dark"><i class="bi bi-terminal"></i> SSH</span>');
+  if (hasSection(cfg, 'portainer')) badges.push('<span class="badge bg-success"><i class="bi bi-boxes"></i> Portainer</span>');
+  if (hasSection(cfg, 'web')) badges.push('<span class="badge bg-warning text-dark"><i class="bi bi-globe"></i> Web</span>');
+  if (hasSection(cfg, 'mcp')) badges.push('<span class="badge bg-dark"><i class="bi bi-hdd-network"></i> MCP</span>');
+  return badges.join(' ');
+}}
+
 async function loadConns() {{
-  const r = await fetch('{ADMIN_PATH_PREFIX}/api/connections', {{credentials:'include'}});
+  const r = await fetch(PATH + '/api/connections', {{credentials:'include'}});
   const j = await r.json();
   const list = document.getElementById('connList');
   if (!j.connections || !Object.keys(j.connections).length) {{
-    list.innerHTML = '<p class="text-muted small">Няма регистрирани връзки.</p>';
+    list.innerHTML = '<p class="text-muted small mb-0">Няма регистрирани връзки. Натисни <strong>Нова връзка</strong> или <strong>Import от GUI</strong>.</p>';
     return;
   }}
   let rows = '';
   for (const [alias, cfg] of Object.entries(j.connections)) {{
+    const badges = sectionBadges(cfg);
     rows += `
-      <tr id="row-${{alias}}">
-        <td><code>${{alias}}</code></td>
-        <td class="small text-muted">${{cfg.url||''}}</td>
-        <td class="small">${{cfg.db||''}}</td>
-        <td class="small">${{cfg.user||''}}</td>
-        <td class="text-end"><button class="btn btn-sm btn-outline-danger" onclick="delConn('${{alias}}')"><i class="bi bi-trash"></i></button></td>
+      <tr>
+        <td><code class="fs-6">${{alias}}</code><div class="mt-1">${{badges}}</div></td>
+        <td class="small text-muted"><div>${{cfg.url||''}}</div><div>${{cfg.db||''}} · ${{cfg.user||''}}</div></td>
+        <td class="text-end">
+          <button class="btn btn-sm btn-outline-primary" onclick="openEditor('${{alias}}','edit')"><i class="bi bi-pencil"></i> Редакция</button>
+          <button class="btn btn-sm btn-outline-danger" onclick="delConn('${{alias}}')"><i class="bi bi-trash"></i></button>
+        </td>
       </tr>`;
   }}
-  list.innerHTML = `<div class="table-responsive"><table class="table table-sm table-mono"><thead><tr><th>Alias</th><th>URL</th><th>DB</th><th>User</th><th></th></tr></thead><tbody>${{rows}}</tbody></table></div>`;
+  list.innerHTML = `<div class="table-responsive"><table class="table align-middle"><thead class="small text-muted"><tr><th>Alias / секции</th><th>Odoo</th><th></th></tr></thead><tbody>${{rows}}</tbody></table></div>`;
 }}
 
 async function delConn(alias) {{
   if (!confirm('Изтрий ' + alias + '?')) return;
-  const csrf = await fetch('{ADMIN_PATH_PREFIX}/api/csrf', {{credentials:'include'}}).then(r => r.json());
-  const r = await fetch('{ADMIN_PATH_PREFIX}/api/connections/' + encodeURIComponent(alias), {{
-    method:'DELETE', credentials:'include',
-    headers: {{'X-CSRF-Token': csrf.token}},
+  const t = await csrf();
+  const r = await fetch(PATH + '/api/connections/' + encodeURIComponent(alias), {{
+    method:'DELETE', credentials:'include', headers: {{'X-CSRF-Token': t}},
   }});
-  if (r.ok) loadConns();
-  else alert('Error: ' + r.status);
+  if (r.ok) loadConns(); else alert('Error: ' + r.status);
 }}
 
-document.getElementById('addForm').addEventListener('submit', async (e) => {{
+function clearForm() {{
+  const f = document.getElementById('connForm');
+  f.reset();
+  document.getElementById('_orig_alias').value = '';
+  document.getElementById('fld_vs').checked = true;
+  document.getElementById('fld_ps').checked = true;
+  document.getElementById('fld_pr').checked = false;
+  for (const b of ['ssh','port','web','mcp']) {{
+    document.getElementById('badge-' + b).classList.add('d-none');
+  }}
+  document.getElementById('connMsg').innerHTML = '';
+}}
+
+function fillForm(alias, cfg) {{
+  clearForm();
+  document.getElementById('_orig_alias').value = alias || '';
+  document.getElementById('fld_alias').value = alias || '';
+  document.getElementById('fld_alias').readOnly = !!alias;  // lock alias on edit
+  const set = (name, val) => {{ const el = document.querySelector(`[name="${{name}}"]`); if (el) el.value = val ?? ''; }};
+  const setCheck = (name, val) => {{ const el = document.querySelector(`[name="${{name}}"]`); if (el) el.checked = !!val; }};
+  set('url', cfg.url); set('db', cfg.db); set('user', cfg.user); set('api_key', cfg.api_key);
+  setCheck('verify_ssl', cfg.verify_ssl !== false);
+  const ssh = cfg.ssh || {{}};
+  set('ssh.host', ssh.host); set('ssh.port', ssh.port || 22); set('ssh.user', ssh.user);
+  set('ssh.auth', ssh.auth || 'agent'); set('ssh.identity_file', ssh.identity_file); set('ssh.password', ssh.password);
+  if (hasSection(cfg,'ssh')) document.getElementById('badge-ssh').classList.remove('d-none');
+  const p = cfg.portainer || {{}};
+  set('portainer.url', p.url); set('portainer.token', p.token);
+  setCheck('portainer.ssl_verify', p.ssl_verify !== false);
+  setCheck('portainer.read_only', !!p.read_only);
+  if (hasSection(cfg,'portainer')) document.getElementById('badge-port').classList.remove('d-none');
+  const w = cfg.web || {{}};
+  set('web.url', w.url); set('web.db', w.db); set('web.login', w.login); set('web.password', w.password);
+  if (hasSection(cfg,'web')) document.getElementById('badge-web').classList.remove('d-none');
+  const m = cfg.mcp || {{}};
+  set('mcp.url', m.url); set('mcp.token', m.token);
+  if (hasSection(cfg,'mcp')) document.getElementById('badge-mcp').classList.remove('d-none');
+}}
+
+async function openEditor(alias, mode) {{
+  const modal = new bootstrap.Modal(document.getElementById('editorModal'));
+  if (alias && mode === 'edit') {{
+    const r = await fetch(PATH + '/api/connections/' + encodeURIComponent(alias), {{credentials:'include'}});
+    if (!r.ok) {{ alert('Load failed'); return; }}
+    const j = await r.json();
+    document.getElementById('editorTitle').textContent = 'Редакция · ' + alias;
+    fillForm(alias, j.config || {{}});
+  }} else {{
+    clearForm();
+    document.getElementById('fld_alias').readOnly = false;
+    document.getElementById('editorTitle').textContent = 'Нова връзка';
+  }}
+  modal.show();
+  // reset to first tab
+  const firstTab = new bootstrap.Tab(document.querySelector('#editorModal .nav-link'));
+  firstTab.show();
+}}
+
+function collectForm() {{
+  const f = document.getElementById('connForm');
+  const fd = new FormData(f);
+  const payload = {{}};
+  for (const [k, v] of fd.entries()) {{
+    if (k.startsWith('_')) continue;
+    if (k.includes('.')) {{
+      const [sec, sub] = k.split('.');
+      payload[sec] = payload[sec] || {{}};
+      payload[sec][sub] = v;
+    }} else {{
+      payload[k] = v;
+    }}
+  }}
+  payload.verify_ssl = !!f.querySelector('[name="verify_ssl"]:checked');
+  if (payload.portainer) {{
+    payload.portainer.ssl_verify = !!f.querySelector('[name="portainer.ssl_verify"]:checked');
+    payload.portainer.read_only = !!f.querySelector('[name="portainer.read_only"]:checked');
+    if (payload.portainer.port) payload.portainer.port = parseInt(payload.portainer.port, 10) || undefined;
+  }}
+  if (payload.ssh && payload.ssh.port) {{
+    payload.ssh.port = parseInt(payload.ssh.port, 10) || 22;
+  }}
+  // Drop sections that are completely empty (all values falsy)
+  for (const sec of ['ssh','portainer','web','mcp']) {{
+    if (!payload[sec]) continue;
+    const anyVal = Object.entries(payload[sec]).some(([k,v]) => {{
+      if (typeof v === 'boolean') return false;  // booleans alone don't count
+      return v !== '' && v != null;
+    }});
+    if (!anyVal) delete payload[sec];
+  }}
+  return payload;
+}}
+
+document.getElementById('connForm').addEventListener('submit', async (e) => {{
   e.preventDefault();
-  const d = Object.fromEntries(new FormData(e.target));
-  d.verify_ssl = !!d.verify_ssl;
-  const csrf = await fetch('{ADMIN_PATH_PREFIX}/api/csrf', {{credentials:'include'}}).then(r => r.json());
-  const r = await fetch('{ADMIN_PATH_PREFIX}/api/connections', {{
+  const msg = document.getElementById('connMsg');
+  const origAlias = document.getElementById('_orig_alias').value;
+  const payload = collectForm();
+  const t = await csrf();
+  let r;
+  if (origAlias) {{
+    // PUT update — don't re-send alias (it's fixed)
+    delete payload.alias;
+    r = await fetch(PATH + '/api/connections/' + encodeURIComponent(origAlias), {{
+      method:'PUT', credentials:'include',
+      headers:{{'Content-Type':'application/json','X-CSRF-Token': t}},
+      body: JSON.stringify(payload),
+    }});
+  }} else {{
+    r = await fetch(PATH + '/api/connections', {{
+      method:'POST', credentials:'include',
+      headers:{{'Content-Type':'application/json','X-CSRF-Token': t}},
+      body: JSON.stringify(payload),
+    }});
+  }}
+  const j = await r.json().catch(() => ({{}}));
+  if (r.ok) {{
+    msg.className='alert alert-success small'; msg.textContent='Запазено';
+    setTimeout(() => {{
+      bootstrap.Modal.getInstance(document.getElementById('editorModal')).hide();
+      loadConns();
+    }}, 400);
+  }} else {{
+    msg.className='alert alert-danger small'; msg.textContent = j.error || ('HTTP ' + r.status);
+  }}
+}});
+
+document.getElementById('doImport').addEventListener('click', async () => {{
+  const payload = document.getElementById('importJson').value.trim();
+  const replace = document.getElementById('replaceExisting').checked;
+  const m = document.getElementById('importMsg');
+  if (!payload) {{ m.className='alert alert-warning small'; m.textContent='Paste JSON-a първо'; return; }}
+  const t = await csrf();
+  const r = await fetch(PATH + '/api/connections/import', {{
     method:'POST', credentials:'include',
-    headers:{{'Content-Type':'application/json','X-CSRF-Token': csrf.token}},
-    body: JSON.stringify(d),
+    headers:{{'Content-Type':'application/json','X-CSRF-Token': t}},
+    body: JSON.stringify({{payload, replace}}),
   }});
   const j = await r.json();
-  const m = document.getElementById('addMsg');
-  if (r.ok) {{ m.className='alert alert-success small'; m.textContent='Добавено'; e.target.reset(); loadConns(); }}
-  else {{ m.className='alert alert-danger small'; m.textContent = j.error || 'Грешка'; }}
+  if (r.ok) {{
+    m.className='alert alert-success small';
+    m.innerHTML = `✓ Added: <strong>${{j.added}}</strong>, Updated: <strong>${{j.updated}}</strong>, Skipped: <strong>${{j.skipped}}</strong> · Total: ${{j.total}}`;
+    loadConns();
+  }} else {{
+    m.className='alert alert-danger small'; m.textContent = j.error || 'Error';
+  }}
 }});
+
+// Open editor via ?edit=alias (from dashboard Редактирай link with fragment)
+(function() {{
+  const hash = (location.hash || '').replace(/^#/, '');
+  if (hash) {{ openEditor(hash, 'edit'); history.replaceState(null, '', location.pathname); }}
+}})();
 
 loadConns();
 </script>
@@ -1140,6 +1508,119 @@ def _check_csrf(req: Request, sess: dict) -> bool:
     return bool(token) and hmac.compare_digest(token, sess.get("csrf_token", ""))
 
 
+def _load_connections(login: str) -> dict:
+    conn_file = os.path.join(_user_dir(login), "connections.json")
+    if not os.path.isfile(conn_file):
+        return {}
+    try:
+        with open(conn_file) as f: return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_connections(login: str, data: dict) -> None:
+    conn_file = os.path.join(_user_dir(login), "connections.json")
+    os.makedirs(_user_dir(login), exist_ok=True)
+    with open(conn_file, "w") as f:
+        json.dump(data, f, indent=2)
+    os.chmod(conn_file, 0o600)
+
+
+_MASK = "•••"
+_SECRET_PATHS = [
+    ("api_key",),
+    ("ssh", "password"),
+    ("ssh", "identity_file"),
+    ("portainer", "token"),
+    ("web", "password"),
+    ("mcp", "token"),
+]
+
+
+def _mask_config(cfg: dict) -> dict:
+    """Return a deep copy with secret fields replaced by _MASK (but only if non-empty).
+    Empty strings stay empty so the UI can tell a blank field from a masked one."""
+    out = json.loads(json.dumps(cfg))  # deep copy
+    for path in _SECRET_PATHS:
+        node = out
+        for seg in path[:-1]:
+            if not isinstance(node, dict) or seg not in node:
+                node = None
+                break
+            node = node[seg]
+        if isinstance(node, dict):
+            key = path[-1]
+            if node.get(key):
+                node[key] = _MASK
+    return out
+
+
+def _unmask_merge(existing: dict, incoming: dict) -> dict:
+    """Merge `incoming` into a deep copy of `existing`, treating _MASK values as 'keep existing'.
+    Any explicit None or '' in incoming clears the field.
+    Unknown nested sections are dropped (whitelist only)."""
+    allowed_root = {"url","db","user","api_key","verify_ssl","protocol","http_proxy","ssh","portainer","web","mcp"}
+    allowed_ssh = {"host","port","user","auth","identity_file","password"}
+    allowed_portainer = {"url","token","ssl_verify","read_only"}
+    allowed_web = {"url","db","login","password"}
+    allowed_mcp = {"url","token"}
+
+    merged = json.loads(json.dumps(existing)) if existing else {}
+
+    def _set(dst, key, val):
+        if val == _MASK:
+            return  # keep existing
+        dst[key] = val
+
+    for k, v in incoming.items():
+        if k not in allowed_root:
+            continue
+        if k == "ssh" and isinstance(v, dict):
+            cur = merged.get("ssh") or {}
+            if not isinstance(cur, dict): cur = {}
+            for sk, sv in v.items():
+                if sk in allowed_ssh: _set(cur, sk, sv)
+            # drop section if completely empty
+            if any(str(cur.get(x, "")).strip() for x in allowed_ssh):
+                merged["ssh"] = cur
+            elif "ssh" in merged:
+                merged.pop("ssh", None)
+        elif k == "portainer" and isinstance(v, dict):
+            cur = merged.get("portainer") or {}
+            if not isinstance(cur, dict): cur = {}
+            for sk, sv in v.items():
+                if sk in allowed_portainer: _set(cur, sk, sv)
+            if any(str(cur.get(x, "")).strip() for x in allowed_portainer):
+                merged["portainer"] = cur
+            elif "portainer" in merged:
+                merged.pop("portainer", None)
+        elif k == "web" and isinstance(v, dict):
+            cur = merged.get("web") or {}
+            if not isinstance(cur, dict): cur = {}
+            for sk, sv in v.items():
+                if sk in allowed_web: _set(cur, sk, sv)
+            if any(str(cur.get(x, "")).strip() for x in allowed_web):
+                merged["web"] = cur
+            elif "web" in merged:
+                merged.pop("web", None)
+        elif k == "mcp" and isinstance(v, dict):
+            cur = merged.get("mcp") or {}
+            if not isinstance(cur, dict): cur = {}
+            for sk, sv in v.items():
+                if sk in allowed_mcp: _set(cur, sk, sv)
+            if any(str(cur.get(x, "")).strip() for x in allowed_mcp):
+                merged["mcp"] = cur
+            elif "mcp" in merged:
+                merged.pop("mcp", None)
+        elif k == "url":
+            _set(merged, "url", (v or "").rstrip("/"))
+        elif k == "verify_ssl":
+            merged["verify_ssl"] = bool(v)
+        else:
+            _set(merged, k, v)
+    return merged
+
+
 async def _api_connections(req: Request):
     gate = _gate(req)
     if gate: return gate
@@ -1147,16 +1628,9 @@ async def _api_connections(req: Request):
     if not sess:
         return JSONResponse({"error":"Unauthenticated"}, status_code=401)
     login = sess["login"]
-    conn_file = os.path.join(_user_dir(login), "connections.json")
     if req.method == "GET":
-        data = {}
-        if os.path.isfile(conn_file):
-            try:
-                with open(conn_file) as f: data = json.load(f)
-            except (json.JSONDecodeError, OSError):
-                data = {}
-        # Mask api keys in response
-        safe = {k: {**v, "api_key": "•••"} for k, v in data.items()}
+        data = _load_connections(login)
+        safe = {k: _mask_config(v) for k, v in data.items()}
         return _apply_sec_headers(JSONResponse({"connections": safe}))
     if req.method == "POST":
         if not _check_csrf(req, sess):
@@ -1168,29 +1642,19 @@ async def _api_connections(req: Request):
         alias = (body.get("alias") or "").strip().lower()
         if not alias or not alias.replace("_","").replace("-","").isalnum():
             return JSONResponse({"error":"Невалиден alias (само a-z 0-9 _ -)"}, status_code=400)
-        data = {}
-        if os.path.isfile(conn_file):
-            try:
-                with open(conn_file) as f: data = json.load(f)
-            except (json.JSONDecodeError, OSError):
-                pass
-        data[alias] = {
-            "url": (body.get("url") or "").rstrip("/"),
-            "db": body.get("db") or "",
-            "user": body.get("user") or "",
-            "api_key": body.get("api_key") or "",
-            "verify_ssl": bool(body.get("verify_ssl", True)),
-            "protocol": "xmlrpc",
-        }
-        os.makedirs(_user_dir(login), exist_ok=True)
-        with open(conn_file, "w") as f:
-            json.dump(data, f, indent=2)
-        os.chmod(conn_file, 0o600)
+        data = _load_connections(login)
+        incoming = {k: v for k, v in body.items() if k != "alias"}
+        if "protocol" not in incoming:
+            incoming["protocol"] = "xmlrpc"
+        data[alias] = _unmask_merge(data.get(alias, {}), incoming)
+        _save_connections(login, data)
         _audit(login, "connection_add", alias, _client_ip(req), req.headers.get("user-agent",""))
         return _apply_sec_headers(JSONResponse({"ok": True}))
 
 
-async def _api_connection_delete(req: Request):
+async def _api_connections_import(req: Request):
+    """Bulk import connections from pasted JSON (local GUI export).
+    Accepts either dict {alias: cfg} or list of records."""
     gate = _gate(req)
     if gate: return gate
     sess = _read_session(req)
@@ -1198,21 +1662,132 @@ async def _api_connection_delete(req: Request):
         return JSONResponse({"error":"Unauthenticated"}, status_code=401)
     if not _check_csrf(req, sess):
         return JSONResponse({"error":"CSRF failure"}, status_code=403)
-    alias = req.path_params.get("alias", "")
-    conn_file = os.path.join(_user_dir(sess["login"]), "connections.json")
-    if not os.path.isfile(conn_file):
-        return JSONResponse({"error":"No connections"}, status_code=404)
     try:
-        with open(conn_file) as f: data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        data = {}
-    if alias in data:
-        data.pop(alias)
-        with open(conn_file, "w") as f:
-            json.dump(data, f, indent=2)
-        _audit(sess["login"], "connection_delete", alias, _client_ip(req), req.headers.get("user-agent",""))
+        body = await req.json()
+    except json.JSONDecodeError:
+        return JSONResponse({"error":"Bad JSON"}, status_code=400)
+    raw = body.get("payload")
+    if not raw:
+        return JSONResponse({"error":"Empty payload"}, status_code=400)
+
+    # Accept either a string (JSON paste) or already-parsed object
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError as e:
+            return JSONResponse({"error": f"Parse: {e}"}, status_code=400)
+
+    # Normalize into {alias: cfg}
+    incoming = {}
+    if isinstance(raw, dict):
+        for alias, cfg in raw.items():
+            if not isinstance(cfg, dict):
+                continue
+            incoming[alias] = cfg
+    elif isinstance(raw, list):
+        # GUI sometimes exports as list [{"alias":.., "url":...}, ...]
+        for r in raw:
+            if not isinstance(r, dict): continue
+            alias = r.get("alias") or r.get("name")
+            if not alias: continue
+            incoming[alias] = {k:v for k,v in r.items() if k not in ("alias","name")}
+    if not incoming:
+        return JSONResponse({"error":"No valid connections in payload"}, status_code=400)
+
+    conn_file = os.path.join(_user_dir(sess["login"]), "connections.json")
+    data = {}
+    if os.path.isfile(conn_file):
+        try:
+            with open(conn_file) as f: data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            data = {}
+
+    replace = bool(body.get("replace", False))
+    added, updated, skipped = 0, 0, 0
+    for alias, cfg in incoming.items():
+        clean_alias = alias.strip().lower()
+        if not clean_alias.replace("_","").replace("-","").isalnum():
+            skipped += 1
+            continue
+        # Accept the GUI's richer format verbatim (ssh / portainer / web / mcp nested sections),
+        # normalizing a few synonym keys on the top level.
+        entry = {
+            "url": (cfg.get("url") or "").rstrip("/"),
+            "db": cfg.get("db") or cfg.get("database") or "",
+            "user": cfg.get("user") or cfg.get("username") or cfg.get("login") or "",
+            "api_key": cfg.get("api_key") or cfg.get("apikey") or "",
+            "protocol": cfg.get("protocol") or "xmlrpc",
+            "verify_ssl": bool(cfg.get("verify_ssl", True)),
+        }
+        for section in ("ssh", "portainer", "web", "mcp"):
+            if isinstance(cfg.get(section), dict):
+                entry[section] = cfg[section]
+        if cfg.get("http_proxy"):
+            entry["http_proxy"] = cfg["http_proxy"]
+        if clean_alias in data and not replace:
+            skipped += 1
+            continue
+        if clean_alias in data:
+            updated += 1
+        else:
+            added += 1
+        data[clean_alias] = entry
+
+    os.makedirs(_user_dir(sess["login"]), exist_ok=True)
+    with open(conn_file, "w") as f:
+        json.dump(data, f, indent=2)
+    os.chmod(conn_file, 0o600)
+    _audit(sess["login"], "connections_import", "", _client_ip(req), req.headers.get("user-agent",""),
+           {"added": added, "updated": updated, "skipped": skipped})
+    return _apply_sec_headers(JSONResponse({
+        "ok": True, "added": added, "updated": updated, "skipped": skipped,
+        "total": len(data),
+    }))
+
+
+async def _api_connection_crud(req: Request):
+    """GET/PUT/DELETE a single connection alias."""
+    gate = _gate(req)
+    if gate: return gate
+    sess = _read_session(req)
+    if not sess:
+        return JSONResponse({"error":"Unauthenticated"}, status_code=401)
+    alias = (req.path_params.get("alias", "") or "").strip().lower()
+    if not alias:
+        return JSONResponse({"error":"Missing alias"}, status_code=400)
+    login = sess["login"]
+    data = _load_connections(login)
+
+    if req.method == "GET":
+        if alias not in data:
+            return JSONResponse({"error":"Not found"}, status_code=404)
+        return _apply_sec_headers(JSONResponse({"alias": alias, "config": _mask_config(data[alias])}))
+
+    if req.method == "PUT":
+        if not _check_csrf(req, sess):
+            return JSONResponse({"error":"CSRF failure"}, status_code=403)
+        try:
+            body = await req.json()
+        except json.JSONDecodeError:
+            return JSONResponse({"error":"Bad request"}, status_code=400)
+        if alias not in data:
+            return JSONResponse({"error":"Not found"}, status_code=404)
+        data[alias] = _unmask_merge(data[alias], body)
+        _save_connections(login, data)
+        _audit(login, "connection_update", alias, _client_ip(req), req.headers.get("user-agent",""))
         return _apply_sec_headers(JSONResponse({"ok": True}))
-    return JSONResponse({"error":"Not found"}, status_code=404)
+
+    if req.method == "DELETE":
+        if not _check_csrf(req, sess):
+            return JSONResponse({"error":"CSRF failure"}, status_code=403)
+        if alias not in data:
+            return JSONResponse({"error":"Not found"}, status_code=404)
+        data.pop(alias)
+        _save_connections(login, data)
+        _audit(login, "connection_delete", alias, _client_ip(req), req.headers.get("user-agent",""))
+        return _apply_sec_headers(JSONResponse({"ok": True}))
+
+    return JSONResponse({"error":"Method not allowed"}, status_code=405)
 
 
 async def _handle_users_page(req: Request):
@@ -1465,7 +2040,8 @@ def get_routes() -> list:
         Route(f"{p}/api/setup-password", _api_setup_password, methods=["POST"]),
         Route(f"{p}/api/csrf", _api_csrf, methods=["GET"]),
         Route(f"{p}/api/connections", _api_connections, methods=["GET","POST"]),
-        Route(f"{p}/api/connections/{{alias}}", _api_connection_delete, methods=["DELETE"]),
+        Route(f"{p}/api/connections/import", _api_connections_import, methods=["POST"]),
+        Route(f"{p}/api/connections/{{alias}}", _api_connection_crud, methods=["GET","PUT","DELETE"]),
         Route(f"{p}/api/users", _api_users, methods=["GET","POST"]),
         Route(f"{p}/api/users/{{login}}/genkey", _api_user_genkey, methods=["POST"]),
     ]
