@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "2.10.0"
+__version__ = "2.11.0"
 
 import asyncio
 import json
@@ -6660,6 +6660,19 @@ def create_app():
             return False, None
         return _check_auth(headers), None
 
+    # ── Admin UI (optional, hidden portal) ─────────────────────
+    try:
+        import admin_ui
+        _admin_app = admin_ui.get_asgi_app()
+        if _admin_app:
+            logger.info(f"Admin UI mounted at {admin_ui.ADMIN_PATH_PREFIX}")
+    except ImportError as e:
+        _admin_app = None
+        logger.warning(f"admin_ui not available: {e}")
+    except Exception as e:
+        _admin_app = None
+        logger.error(f"admin_ui init failed: {e}")
+
     async def app(scope, receive, send):
         if scope["type"] == "lifespan":
             async with session_manager.run():
@@ -6673,6 +6686,11 @@ def create_app():
                         return
 
         path = scope.get("path", "")
+
+        # ── Admin portal dispatch (hidden) ─────────────────────
+        if _admin_app and scope["type"] == "http" and admin_ui.path_matches(path):
+            await _admin_app(scope, receive, send)
+            return
 
         # ── Debug: log all headers on /mcp requests ────────────────
         if scope["type"] == "http" and path in ("/mcp", "/oauth/token", "/oauth/authorize", "/oauth/register"):
