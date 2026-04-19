@@ -5,6 +5,9 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+permissions:
+  contents: write  # needed by softprops/action-gh-release to create/attach GitHub Releases
+
 jobs:
   build-windows:
     runs-on: windows-latest
