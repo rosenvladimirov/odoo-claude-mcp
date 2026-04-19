@@ -1,1066 +1,1269 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Odoo Claude MCP — Production-grade MCP server suite for Odoo ERP</title>
-<meta name="description" content="Self-hosted Model Context Protocol server suite that connects Claude, Claude Code, and MCP clients to Odoo, GitHub, Kubernetes, and more.">
-<meta name="author" content="Rosen Vladimirov — BL Consulting">
-
-<!-- Open Graph -->
-<meta property="og:title" content="Odoo Claude MCP">
-<meta property="og:description" content="Turn any Odoo instance into a first-class citizen in the Claude ecosystem.">
-<meta property="og:type" content="website">
-<meta property="og:url" content="https://rosenvladimirov.github.io/odoo-claude-mcp/">
-
-<!-- Fonts -->
+<meta charset="utf-8">
+<title>Odoo · Claude · MCP — Production-grade MCP server suite</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=JetBrains+Mono:wght@400;500;700&family=Inter+Tight:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&family=Geist:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 
-<link rel="stylesheet" href="assets/style.css">
+<script>
+const TWEAKS = /*EDITMODE-BEGIN*/{
+  "palette": "paper",
+  "density": "comfortable",
+  "showGrid": true,
+  "accent": "indigo"
+}/*EDITMODE-END*/;
+</script>
+
+<style>
+  :root{
+    --paper: oklch(0.968 0.012 85);
+    --paper-2: oklch(0.945 0.015 82);
+    --ink: oklch(0.18 0.012 60);
+    --ink-2: oklch(0.35 0.010 60);
+    --ink-3: oklch(0.55 0.008 60);
+    --rule: oklch(0.18 0.012 60 / 0.14);
+    --rule-strong: oklch(0.18 0.012 60 / 0.28);
+    --accent: oklch(0.58 0.19 25);
+    --accent-ink: oklch(0.98 0.005 85);
+    --ok: oklch(0.55 0.12 150);
+    --warn: oklch(0.72 0.14 75);
+    --chip: oklch(0.92 0.015 80);
+    --term-bg: oklch(0.17 0.014 260);
+    --term-ink: oklch(0.92 0.01 90);
+    --term-dim: oklch(0.62 0.008 90);
+    --term-green: oklch(0.78 0.16 145);
+    --term-accent: oklch(0.78 0.14 55);
+    --term-mauve: oklch(0.78 0.11 310);
+  }
+  [data-palette="ink"]{
+    --paper: oklch(0.14 0.01 260);
+    --paper-2: oklch(0.17 0.012 260);
+    --ink: oklch(0.96 0.005 90);
+    --ink-2: oklch(0.78 0.008 90);
+    --ink-3: oklch(0.60 0.008 90);
+    --rule: oklch(0.96 0.005 90 / 0.14);
+    --rule-strong: oklch(0.96 0.005 90 / 0.28);
+    --chip: oklch(0.22 0.012 260);
+  }
+  [data-palette="moss"]{
+    --paper: oklch(0.96 0.015 120);
+    --accent: oklch(0.48 0.13 145);
+  }
+  [data-accent="indigo"]{ --accent: oklch(0.52 0.17 265); }
+  [data-accent="amber"]{ --accent: oklch(0.72 0.16 70); }
+  [data-accent="moss"]{ --accent: oklch(0.52 0.13 145); }
+
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--paper);color:var(--ink);font-family:"Geist",ui-sans-serif,system-ui;font-feature-settings:"ss01","cv11"}
+  body{overflow-x:hidden}
+  .mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-feature-settings:"calt","ss01"}
+  .serif{font-family:"Instrument Serif",ui-serif,Georgia,serif;font-weight:400;letter-spacing:-.015em}
+
+  /* grid overlay tweak */
+  body[data-showgrid="true"]::before{
+    content:"";position:fixed;inset:0;pointer-events:none;z-index:9999;
+    background-image:
+      linear-gradient(to right, oklch(0.58 0.19 25 / 0.08) 1px, transparent 1px);
+    background-size:calc((100vw - 96px)/12) 100%;
+    margin:0 48px;
+  }
+
+  /* shell */
+  .shell{max-width:1400px;margin:0 auto;padding:0 48px;position:relative}
+  @media(max-width:900px){.shell{padding:0 20px}}
+
+  /* top strip */
+  .ticker{border-bottom:1px solid var(--rule);overflow:hidden;background:var(--paper)}
+  .ticker-inner{display:flex;gap:48px;padding:10px 0;white-space:nowrap;animation:tick 60s linear infinite;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)}
+  .ticker-inner b{color:var(--ink);font-weight:500}
+  @keyframes tick{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+
+  /* nav */
+  nav.top{display:flex;align-items:center;justify-content:space-between;padding:18px 0;border-bottom:1px solid var(--rule);position:sticky;top:0;background:color-mix(in oklch, var(--paper) 92%, transparent);backdrop-filter:blur(12px);z-index:50}
+  .brand{display:flex;align-items:center;gap:10px;font-size:14px;letter-spacing:-.01em}
+  .brand .mark{width:24px;height:24px;border:1px solid var(--ink);border-radius:50%;position:relative;display:grid;place-items:center}
+  .brand .mark::before,.brand .mark::after{content:"";position:absolute;background:var(--ink)}
+  .brand .mark::before{width:10px;height:1.5px}
+  .brand .mark::after{width:1.5px;height:10px}
+  .brand .slash{color:var(--ink-3)}
+  .brand .accent{color:var(--accent);font-weight:500}
+  .navlinks{display:flex;gap:28px;font-size:13px;color:var(--ink-2)}
+  .navlinks a{color:inherit;text-decoration:none}
+  .navlinks a:hover{color:var(--accent)}
+  .nav-cta{display:flex;gap:10px;align-items:center}
+  @media(max-width:820px){.navlinks{display:none}}
+
+  .btn{display:inline-flex;align-items:center;gap:8px;padding:9px 14px;border:1px solid var(--rule-strong);border-radius:999px;background:transparent;color:var(--ink);font:500 12.5px/1 "Geist";letter-spacing:.01em;cursor:pointer;transition:.15s}
+  .btn:hover{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+  .btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+  .btn.primary:hover{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+  .btn .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px color-mix(in oklch, var(--accent) 30%, transparent)}
+
+  /* hero */
+  .hero{padding:72px 0 40px;border-bottom:1px solid var(--rule);position:relative}
+  .hero-meta{display:flex;gap:24px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin-bottom:36px}
+  .hero-meta span::before{content:"§ ";color:var(--accent)}
+  .hero h1{font-family:"Instrument Serif";font-weight:400;font-size:clamp(56px,8vw,128px);line-height:.92;letter-spacing:-.03em;max-width:14ch}
+  .hero h1 em{font-style:italic;color:var(--accent)}
+  .hero h1 .sub{display:block;font-family:"Geist";font-weight:400;font-size:.18em;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-3);margin-top:28px;max-width:48ch;line-height:1.5}
+  .hero-grid{display:grid;grid-template-columns:1.4fr 1fr;gap:48px;align-items:end;margin-top:56px}
+  @media(max-width:1000px){.hero-grid{grid-template-columns:1fr}}
+  .hero-para{font-size:17px;line-height:1.55;color:var(--ink-2);max-width:52ch}
+  .hero-para b{color:var(--ink);font-weight:500}
+  .hero-cta{display:flex;gap:10px;flex-wrap:wrap;margin-top:24px}
+
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);margin-top:56px}
+  .kpi{padding:22px 20px;border-right:1px solid var(--rule)}
+  .kpi:last-child{border-right:none}
+  .kpi .n{font-family:"Instrument Serif";font-size:52px;letter-spacing:-.02em;line-height:1}
+  .kpi .n sup{font-size:.4em;vertical-align:top;margin-left:4px;color:var(--accent)}
+  .kpi .l{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin-top:10px}
+  @media(max-width:820px){.kpis{grid-template-columns:repeat(2,1fr)}.kpi:nth-child(2){border-right:none}.kpi:nth-child(1),.kpi:nth-child(2){border-bottom:1px solid var(--rule)}}
+
+  /* terminal */
+  .terminal{background:var(--term-bg);color:var(--term-ink);border-radius:14px;overflow:hidden;font-family:"JetBrains Mono";font-size:13px;line-height:1.7;box-shadow:0 30px 80px -30px oklch(0 0 0 / .35), 0 1px 0 oklch(1 0 0 / .06) inset}
+  .term-chrome{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid oklch(1 0 0 / .07);background:oklch(0 0 0 / .2)}
+  .term-dots{display:flex;gap:6px}
+  .term-dots i{width:11px;height:11px;border-radius:50%;background:oklch(0.60 0.15 25)}
+  .term-dots i:nth-child(2){background:oklch(0.78 0.13 85)}
+  .term-dots i:nth-child(3){background:oklch(0.72 0.14 145)}
+  .term-title{font-size:11px;color:var(--term-dim);letter-spacing:.08em;flex:1;text-align:center}
+  .term-badge{font-size:10px;padding:2px 8px;border-radius:4px;background:oklch(1 0 0 / .08);color:var(--term-dim);letter-spacing:.1em}
+  .term-body{padding:20px 22px;min-height:380px}
+  .term-body .prompt{color:var(--term-green)}
+  .term-body .flag{color:var(--term-accent)}
+  .term-body .dim{color:var(--term-dim)}
+  .term-body .ok{color:var(--term-green)}
+  .term-body .mauve{color:var(--term-mauve)}
+  .term-body .tool{color:var(--term-accent);background:oklch(1 0 0 / .05);padding:1px 6px;border-radius:3px}
+  .caret::after{content:"▊";color:var(--term-green);animation:blink 1.1s steps(2) infinite}
+  @keyframes blink{50%{opacity:0}}
+  .term-input{display:flex;gap:10px;padding:10px 18px;border-top:1px solid oklch(1 0 0 / .07);background:oklch(0 0 0 / .2)}
+  .term-input span{color:var(--term-green)}
+  .term-input input{flex:1;background:none;border:none;outline:none;color:var(--term-ink);font:inherit}
+
+  .term-tabs{display:flex;gap:2px;padding:0 12px;background:oklch(0 0 0 / .25);border-bottom:1px solid oklch(1 0 0 / .06)}
+  .term-tabs button{background:none;border:none;color:var(--term-dim);font:500 11px/1 "JetBrains Mono";padding:10px 14px;cursor:pointer;letter-spacing:.04em;border-bottom:2px solid transparent;margin-bottom:-1px}
+  .term-tabs button.on{color:var(--term-ink);border-color:var(--term-accent)}
+
+  /* section system */
+  section.block{padding:88px 0;border-bottom:1px solid var(--rule);position:relative}
+  .eyebrow{display:flex;align-items:center;gap:12px;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3);margin-bottom:20px}
+  .eyebrow .num{color:var(--accent);font-family:"JetBrains Mono";font-weight:500}
+  .eyebrow .line{flex:1;height:1px;background:var(--rule);max-width:160px}
+  h2.display{font-family:"Instrument Serif";font-weight:400;font-size:clamp(40px,5.5vw,80px);line-height:1;letter-spacing:-.025em;max-width:18ch}
+  h2.display em{color:var(--accent);font-style:italic}
+  .lede{font-size:16px;line-height:1.55;color:var(--ink-2);max-width:58ch;margin-top:22px}
+
+  /* reasons grid */
+  .reasons{display:grid;grid-template-columns:repeat(3,1fr);gap:0;margin-top:56px;border-top:1px solid var(--rule);border-left:1px solid var(--rule)}
+  .reason{padding:28px;border-right:1px solid var(--rule);border-bottom:1px solid var(--rule);min-height:260px;display:flex;flex-direction:column;gap:14px;position:relative;transition:background .2s}
+  .reason:hover{background:var(--paper-2)}
+  .reason .idx{font-family:"JetBrains Mono";font-size:11px;color:var(--accent);letter-spacing:.1em}
+  .reason h3{font-family:"Instrument Serif";font-size:26px;line-height:1.1;letter-spacing:-.01em}
+  .reason p{font-size:13.5px;line-height:1.55;color:var(--ink-2)}
+  .reason .pattern{position:absolute;top:20px;right:20px;width:36px;height:36px;opacity:.4}
+  @media(max-width:980px){.reasons{grid-template-columns:repeat(2,1fr)}}
+  @media(max-width:620px){.reasons{grid-template-columns:1fr}}
+
+  /* architecture diagram */
+  .arch{margin-top:56px;padding:40px 32px;border:1px solid var(--rule-strong);border-radius:16px;background:var(--paper-2)}
+  .arch-row{display:flex;justify-content:center;gap:12px;margin-bottom:18px;flex-wrap:wrap}
+  .arch-pill{padding:10px 18px;border:1px solid var(--rule-strong);border-radius:999px;font:500 12px/1 "Geist";background:var(--paper);letter-spacing:.01em}
+  .arch-pill.gateway{background:var(--ink);color:var(--paper);border-color:var(--ink);padding:14px 26px;font-size:13.5px;display:flex;align-items:center;gap:10px}
+  .arch-pill.gateway .pulse{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pulse 1.8s ease infinite}
+  @keyframes pulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.5);opacity:.6}}
+  .arch-servers{display:grid;grid-template-columns:repeat(8,1fr);gap:8px;margin:20px 0}
+  @media(max-width:900px){.arch-servers{grid-template-columns:repeat(4,1fr)}}
+  @media(max-width:520px){.arch-servers{grid-template-columns:repeat(2,1fr)}}
+  .arch-node{padding:14px 10px;border:1px solid var(--rule-strong);border-radius:10px;background:var(--paper);text-align:center;font-size:11px;position:relative;cursor:pointer;transition:.15s}
+  .arch-node:hover{background:var(--ink);color:var(--paper);border-color:var(--ink);transform:translateY(-2px)}
+  .arch-node.flagship{border-width:2px;border-color:var(--accent)}
+  .arch-node .n{display:block;font-family:"JetBrains Mono";font-size:11.5px;font-weight:500;margin-bottom:4px;letter-spacing:-.01em}
+  .arch-node .t{font-size:10px;color:var(--ink-3);letter-spacing:.04em}
+  .arch-node:hover .t{color:var(--paper)}
+  .arch-connectors{display:flex;justify-content:center;gap:10px;flex-wrap:wrap;margin-top:22px;padding-top:22px;border-top:1px dashed var(--rule-strong)}
+  .arch-conn{font:500 11px/1 "JetBrains Mono";color:var(--ink-3);padding:8px 14px;background:var(--paper);border-radius:6px;letter-spacing:.04em}
+  .arch-wire{display:flex;justify-content:center;margin:6px 0}
+  .arch-wire svg{opacity:.4}
+
+  /* tools catalog */
+  .tools-head{display:flex;justify-content:space-between;align-items:end;gap:40px;flex-wrap:wrap}
+  .tool-filters{display:flex;gap:6px;flex-wrap:wrap;margin-top:32px}
+  .tool-filters button{font:500 11px/1 "JetBrains Mono";letter-spacing:.04em;padding:8px 12px;border:1px solid var(--rule-strong);border-radius:999px;background:transparent;color:var(--ink-2);cursor:pointer;transition:.15s}
+  .tool-filters button:hover{color:var(--ink)}
+  .tool-filters button.on{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+  .tools{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--rule);border:1px solid var(--rule);margin-top:32px}
+  @media(max-width:980px){.tools{grid-template-columns:repeat(2,1fr)}}
+  @media(max-width:620px){.tools{grid-template-columns:1fr}}
+  .tool-card{padding:22px;background:var(--paper);display:flex;flex-direction:column;gap:10px;position:relative;transition:.15s}
+  .tool-card:hover{background:var(--paper-2)}
+  .tool-card .row1{display:flex;justify-content:space-between;align-items:center}
+  .tool-card .glyph{font-size:18px}
+  .tool-card .count{font:500 11px/1 "JetBrains Mono";background:var(--chip);padding:4px 8px;border-radius:4px}
+  .tool-card.newish .count{background:var(--accent);color:var(--accent-ink)}
+  .tool-card h4{font-family:"Instrument Serif";font-size:22px;line-height:1.05}
+  .tool-card .toks{display:flex;gap:4px;flex-wrap:wrap;margin-top:4px}
+  .tool-card .tok{font:500 10.5px/1 "JetBrains Mono";padding:3px 6px;border:1px solid var(--rule);border-radius:4px;color:var(--ink-2);background:var(--paper-2)}
+  .tool-card .desc{font-size:12.5px;line-height:1.5;color:var(--ink-3);margin-top:auto}
+  .tool-card .new-flag{position:absolute;top:14px;right:14px;font:500 9px/1 "JetBrains Mono";padding:3px 6px;background:var(--accent);color:var(--accent-ink);border-radius:3px;letter-spacing:.08em;display:none}
+  .tool-card.newish .new-flag{display:block}
+
+  /* tracks split */
+  .tracks{display:grid;grid-template-columns:1fr 1fr;gap:0;margin-top:56px;border:1px solid var(--rule-strong);border-radius:16px;overflow:hidden}
+  @media(max-width:860px){.tracks{grid-template-columns:1fr}}
+  .track{padding:36px;position:relative;background:var(--paper)}
+  .track + .track{border-left:1px solid var(--rule-strong)}
+  @media(max-width:860px){.track + .track{border-left:none;border-top:1px solid var(--rule-strong)}}
+  .track.preview{background:var(--paper-2)}
+  .track .tag{display:inline-flex;align-items:center;gap:6px;font:500 11px/1 "JetBrains Mono";padding:6px 10px;border-radius:999px;background:var(--chip);letter-spacing:.04em}
+  .track.stable .tag::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--ok)}
+  .track.preview .tag::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--warn)}
+  .track h3{font-family:"Instrument Serif";font-size:44px;line-height:1;margin:18px 0 10px;letter-spacing:-.015em}
+  .track h3 em{color:var(--accent);font-style:italic}
+  .track .branch-meta{font:500 11.5px/1.4 "JetBrains Mono";color:var(--ink-3);margin-bottom:22px}
+  .track .for{font-size:13.5px;line-height:1.55;color:var(--ink-2);margin-bottom:24px;padding-bottom:22px;border-bottom:1px solid var(--rule)}
+  .track ul{list-style:none;display:flex;flex-direction:column;gap:12px}
+  .track li{font-size:13.5px;line-height:1.45;color:var(--ink);display:flex;gap:12px}
+  .track li::before{content:"→";color:var(--accent);flex:0 0 auto;font-family:"JetBrains Mono"}
+
+  /* changelog */
+  .changelog{margin-top:48px;display:grid;grid-template-columns:240px 1fr;gap:48px}
+  @media(max-width:780px){.changelog{grid-template-columns:1fr}}
+  .changelog .meta{font:500 12px/1.6 "JetBrains Mono";color:var(--ink-3)}
+  .changelog .meta b{display:block;color:var(--accent);font-size:16px;margin-bottom:6px}
+  .changelog .items{display:grid;grid-template-columns:repeat(2,1fr);gap:0;border-top:1px solid var(--rule);border-left:1px solid var(--rule)}
+  @media(max-width:600px){.changelog .items{grid-template-columns:1fr}}
+  .ci{padding:22px;border-right:1px solid var(--rule);border-bottom:1px solid var(--rule)}
+  .ci .k{font:500 11px/1 "JetBrains Mono";color:var(--accent);letter-spacing:.1em;margin-bottom:10px}
+  .ci h4{font-family:"JetBrains Mono";font-size:15px;font-weight:500;margin-bottom:8px}
+  .ci p{font-size:12.5px;line-height:1.55;color:var(--ink-2)}
+
+  /* deploy */
+  .deploy{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;margin-top:56px}
+  @media(max-width:900px){.deploy{grid-template-columns:1fr}}
+  .dcard{border:1px solid var(--rule-strong);border-radius:14px;overflow:hidden;background:var(--paper);display:flex;flex-direction:column}
+  .dcard header{padding:22px 22px 18px;border-bottom:1px solid var(--rule);display:flex;justify-content:space-between;align-items:start;gap:12px}
+  .dcard header .idx{font:500 11px/1 "JetBrains Mono";color:var(--accent);letter-spacing:.1em}
+  .dcard header h4{font-family:"Instrument Serif";font-size:28px;line-height:1;margin-top:8px}
+  .dcard header small{font-size:11.5px;color:var(--ink-3);letter-spacing:.04em;display:block;margin-top:8px}
+  .dcard pre{flex:1;background:var(--term-bg);color:var(--term-ink);padding:22px;font-family:"JetBrains Mono";font-size:12px;line-height:1.7;overflow-x:auto;margin:0}
+  .dcard pre .c{color:var(--term-dim)}
+  .dcard pre .g{color:var(--term-green)}
+  .dcard pre .a{color:var(--term-accent)}
+
+  /* audiences */
+  .auds{display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin-top:56px;border-top:1px solid var(--rule);border-left:1px solid var(--rule)}
+  @media(max-width:900px){.auds{grid-template-columns:repeat(2,1fr)}}
+  @media(max-width:560px){.auds{grid-template-columns:1fr}}
+  .aud{padding:28px;border-right:1px solid var(--rule);border-bottom:1px solid var(--rule);display:flex;flex-direction:column;gap:14px}
+  .aud .sym{font-family:"Instrument Serif";font-size:42px;line-height:1;color:var(--accent)}
+  .aud h4{font-family:"Instrument Serif";font-size:22px;line-height:1.1}
+  .aud ul{list-style:none;display:flex;flex-direction:column;gap:8px;font-size:12.5px;line-height:1.5;color:var(--ink-2)}
+  .aud li{padding-left:16px;position:relative}
+  .aud li::before{content:"·";position:absolute;left:4px;color:var(--accent);font-weight:700}
+
+  /* footer + BG */
+  .bgloc{display:grid;grid-template-columns:1.2fr 1fr;gap:64px;align-items:start}
+  @media(max-width:860px){.bgloc{grid-template-columns:1fr}}
+  .bgloc ul{list-style:none;display:flex;flex-direction:column;gap:14px;margin-top:32px}
+  .bgloc li{font-size:14px;line-height:1.5;color:var(--ink-2);padding-bottom:14px;border-bottom:1px solid var(--rule);display:grid;grid-template-columns:200px 1fr;gap:24px}
+  .bgloc li b{color:var(--ink);font-weight:500;font-family:"JetBrains Mono";font-size:12.5px;letter-spacing:.01em}
+
+  .maintainer{display:grid;grid-template-columns:1fr 1.2fr;gap:48px;align-items:center;padding:56px 0}
+  @media(max-width:820px){.maintainer{grid-template-columns:1fr}}
+  .portrait{aspect-ratio:1/1.2;border:1px solid var(--rule-strong);border-radius:8px;position:relative;overflow:hidden;background:
+    repeating-linear-gradient(135deg, var(--paper-2), var(--paper-2) 6px, var(--paper) 6px, var(--paper) 12px);
+    display:grid;place-items:center}
+  .portrait .ph{font:500 11px/1.4 "JetBrains Mono";color:var(--ink-3);text-align:center;padding:12px;background:var(--paper);border:1px solid var(--rule);letter-spacing:.06em}
+
+  footer{padding:64px 0 40px;border-top:1px solid var(--rule-strong)}
+  .foot-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:40px;margin-bottom:48px}
+  @media(max-width:820px){.foot-grid{grid-template-columns:1fr 1fr}}
+  .foot-grid h5{font:500 11px/1 "JetBrains Mono";letter-spacing:.1em;color:var(--ink-3);text-transform:uppercase;margin-bottom:18px}
+  .foot-grid ul{list-style:none;display:flex;flex-direction:column;gap:10px}
+  .foot-grid a{color:var(--ink-2);text-decoration:none;font-size:13.5px}
+  .foot-grid a:hover{color:var(--accent)}
+  .foot-bot{padding-top:32px;border-top:1px solid var(--rule);display:flex;justify-content:space-between;flex-wrap:wrap;gap:20px;font-size:12px;color:var(--ink-3);font-family:"JetBrains Mono"}
+
+  /* tweaks panel */
+  .tweaks-panel{position:fixed;bottom:24px;right:24px;width:260px;background:var(--paper);border:1px solid var(--rule-strong);border-radius:12px;padding:16px;z-index:200;box-shadow:0 20px 50px -20px oklch(0 0 0 / .3);display:none}
+  .tweaks-panel.on{display:block}
+  .tweaks-panel h6{font:500 11px/1 "JetBrains Mono";letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);margin-bottom:14px;display:flex;justify-content:space-between;align-items:center}
+  .tweaks-panel h6 .accent{color:var(--accent)}
+  .tw-row{margin-bottom:14px}
+  .tw-row label{display:block;font-size:11px;color:var(--ink-3);margin-bottom:6px;letter-spacing:.04em;text-transform:uppercase}
+  .tw-row .seg{display:flex;border:1px solid var(--rule-strong);border-radius:8px;overflow:hidden}
+  .tw-row .seg button{flex:1;background:transparent;border:none;padding:8px 4px;font:500 11px/1 "JetBrains Mono";color:var(--ink-2);cursor:pointer}
+  .tw-row .seg button.on{background:var(--ink);color:var(--paper)}
+
+  /* headline-watch row */
+  .watch-split{display:grid;grid-template-columns:1.3fr 1fr;gap:48px;align-items:center;margin-top:56px}
+  @media(max-width:900px){.watch-split{grid-template-columns:1fr}}
+  .video-card{aspect-ratio:16/10;border-radius:14px;border:1px solid var(--rule-strong);background:var(--paper-2);position:relative;overflow:hidden;cursor:pointer;transition:.2s}
+  .video-card:hover{transform:translateY(-2px);box-shadow:0 20px 50px -20px oklch(0 0 0 / .3)}
+  .video-card .strip{position:absolute;inset:0;background:
+    repeating-linear-gradient(135deg, var(--paper-2) 0 10px, var(--paper) 10px 20px);
+    opacity:.6}
+  .video-card .label{position:absolute;top:18px;left:18px;font:500 11px/1 "JetBrains Mono";color:var(--ink-3);letter-spacing:.1em}
+  .video-card .play{position:absolute;inset:0;display:grid;place-items:center}
+  .video-card .play .btn-play{width:86px;height:86px;border-radius:50%;border:1px solid var(--rule-strong);background:var(--paper);display:grid;place-items:center;transition:.2s}
+  .video-card:hover .btn-play{background:var(--accent);border-color:var(--accent)}
+  .video-card:hover .btn-play .tri{border-left-color:var(--accent-ink)}
+  .video-card .tri{width:0;height:0;border:12px solid transparent;border-left:18px solid var(--ink);margin-left:5px}
+  .video-card .caption{position:absolute;bottom:18px;left:18px;right:18px;display:flex;justify-content:space-between;font:500 11px/1 "JetBrains Mono";color:var(--ink-2);letter-spacing:.04em}
+
+  /* pull-quote */
+  .pull{font-family:"Instrument Serif";font-size:clamp(32px,3.5vw,52px);line-height:1.15;letter-spacing:-.015em;max-width:28ch;margin:80px auto;text-align:center;padding:0 20px}
+  .pull em{color:var(--accent);font-style:italic}
+  .pull .attrib{display:block;font-family:"Geist";font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin-top:24px}
+
+  /* modules */
+  .modules{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:48px}
+  @media(max-width:820px){.modules{grid-template-columns:1fr}}
+  .mod{border:1px solid var(--rule-strong);border-radius:14px;padding:28px;background:var(--paper);display:flex;flex-direction:column;gap:18px;position:relative;overflow:hidden}
+  .mod.paid{background:var(--paper-2)}
+  .mod::before{content:"";position:absolute;top:0;left:0;width:100%;height:3px;background:var(--accent)}
+  .mod.paid::before{background:var(--ink)}
+  .mod-head{display:flex;justify-content:space-between;align-items:start;gap:12px}
+  .mod h3{font-family:"JetBrains Mono";font-weight:500;font-size:18px}
+  .mod .lic{font:500 10px/1 "JetBrains Mono";padding:4px 8px;border-radius:3px;background:var(--chip);color:var(--ink-2);letter-spacing:.08em;display:flex;gap:6px}
+  .mod .lic.free{background:color-mix(in oklch, var(--ok) 20%, var(--paper)); color:var(--ink)}
+  .mod .lic.paid{background:var(--ink);color:var(--paper)}
+  .mod .caption{font-size:13.5px;line-height:1.55;color:var(--ink-2)}
+  .mod ul{list-style:none;display:flex;flex-direction:column;gap:8px;font-size:13px;line-height:1.45;color:var(--ink-2);padding-top:18px;border-top:1px solid var(--rule)}
+  .mod ul li::before{content:"•";color:var(--accent);margin-right:10px}
+  .mod .branches{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  .mod .branch{font:500 11px/1 "JetBrains Mono";padding:5px 10px;border:1px solid var(--rule-strong);border-radius:999px;background:var(--paper);cursor:pointer}
+  .mod .branch:hover{border-color:var(--accent);color:var(--accent)}
+
+  /* accent underline link */
+  .link{color:var(--ink);border-bottom:1px solid var(--rule-strong);transition:.15s;padding-bottom:1px;text-decoration:none}
+  .link:hover{color:var(--accent);border-color:var(--accent)}
+</style>
 </head>
-<body>
+<body data-palette="paper" data-showgrid="false" data-accent="cinnabar">
 
-<!-- Grain overlay -->
-<div class="grain"></div>
+<!-- Ticker -->
+<div class="ticker">
+  <div class="ticker-inner mono">
+    <span><b>v2.10.0</b> · shipped 2026-04-19</span>
+    <span><b>197+</b> MCP tools</span>
+    <span>Odoo 15 → 19</span>
+    <span><b>AGPL-3</b> · self-hosted</span>
+    <span><b>9</b> MCP servers</span>
+    <span>Production-grade</span>
+    <span><b>Claude.ai</b> connector ready</span>
+    <span>l10n_bg native</span>
+    <span>Qdrant · Ollama</span>
+    <span><b>v2.10.0</b> · shipped 2026-04-19</span>
+    <span><b>197+</b> MCP tools</span>
+    <span>Odoo 15 → 19</span>
+    <span><b>AGPL-3</b> · self-hosted</span>
+    <span><b>9</b> MCP servers</span>
+    <span>Production-grade</span>
+    <span><b>Claude.ai</b> connector ready</span>
+    <span>l10n_bg native</span>
+    <span>Qdrant · Ollama</span>
+  </div>
+</div>
 
-<!-- Navigation -->
-<nav class="nav">
-  <div class="nav-inner">
-    <a href="#" class="nav-logo">
-      <span class="logo-mark">◈</span>
-      <span class="logo-text">odoo<span class="logo-dim">/</span>claude<span class="logo-dim">/</span>mcp</span>
-    </a>
-    <div class="nav-links">
-      <a href="#whats-new">What's new</a>
+<!-- Nav -->
+<div class="shell">
+  <nav class="top">
+    <div class="brand mono">
+      <span class="mark"></span>
+      <span>odoo<span class="slash">/</span>claude<span class="slash">/</span><span class="accent">mcp</span></span>
+    </div>
+    <div class="navlinks mono">
+      <a href="#whats-new">Release</a>
       <a href="#tracks">Tracks</a>
       <a href="#tools">Tools</a>
-      <a href="#modules">Odoo Modules</a>
-      <a href="#servers">Servers</a>
+      <a href="#modules">Modules</a>
       <a href="#deploy">Deploy</a>
-      <a href="https://www.youtube.com/@DavidRosen8424-Gaming" class="nav-yt" target="_blank" rel="noopener" title="YouTube channel">
-        <svg width="18" height="13" viewBox="0 0 28 20" fill="currentColor"><path d="M27.4 3.1a3.5 3.5 0 0 0-2.5-2.5C22.8 0 14 0 14 0S5.2 0 3.1.6A3.5 3.5 0 0 0 .6 3.1C0 5.2 0 10 0 10s0 4.8.6 6.9a3.5 3.5 0 0 0 2.5 2.5C5.2 20 14 20 14 20s8.8 0 10.9-.6a3.5 3.5 0 0 0 2.5-2.5C28 14.8 28 10 28 10s0-4.8-.6-6.9zM11.2 14.3V5.7L18.6 10l-7.4 4.3z"/></svg>
-      </a>
-      <a href="https://github.com/rosenvladimirov/odoo-claude-mcp" class="nav-github" target="_blank" rel="noopener">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
-        GitHub
-      </a>
+      <a href="#maintainer">Maintainer</a>
     </div>
-  </div>
-</nav>
+    <div class="nav-cta">
+      <button class="btn" onclick="document.getElementById('watch').scrollIntoView({behavior:'smooth'})">Watch demo</button>
+      <button class="btn primary"><span class="dot"></span> GitHub</button>
+    </div>
+  </nav>
 
-<!-- Hero -->
-<section class="hero">
-  <div class="hero-grid">
+  <!-- Hero -->
+  <header class="hero">
+    <div class="hero-meta mono">
+      <span>Production-grade</span>
+      <span>MCP server suite</span>
+      <span>v2.10.0</span>
+      <span>Sofia · БГ</span>
+    </div>
+    <h1>
+      Turn your Odoo<br>
+      into a <em>Claude</em><br>
+      native citizen.
+      <span class="sub">A self-hosted Model Context Protocol server suite that connects Claude, Claude Code, and any MCP-compatible client to Odoo ERP, GitHub, filesystems, Kubernetes, Microsoft Teams, and a browser-based terminal — all through a unified, authenticated gateway.</span>
+    </h1>
 
-    <div class="hero-content">
-      <div class="hero-tag">
-        <span class="dot"></span>
-        <span>Production-grade · MCP server suite · v2.10.0</span>
+    <div class="hero-grid">
+      <div>
+        <p class="hero-para">Single-purpose MCP wrappers don't scale. This one is built for <b>real production</b>: token-based auth across all endpoints, one identity / all servers, per-user profile isolation, and multi-tenant switching between dozens of Odoo databases on the fly.</p>
+        <div class="hero-cta">
+          <button class="btn primary"><span class="dot"></span> Clone the stack</button>
+          <button class="btn">Read the spec →</button>
+          <button class="btn">197+ tools ref</button>
+        </div>
       </div>
 
-      <h1 class="hero-title">
-        <span class="title-line">Turn your Odoo</span>
-        <span class="title-line">into a <em>Claude</em></span>
-        <span class="title-line">native citizen.</span>
-      </h1>
-
-      <p class="hero-lead">
-        A self-hosted Model Context Protocol server suite that connects
-        <strong>Claude</strong>, <strong>Claude Code</strong>, and any MCP-compatible client
-        to <strong>Odoo ERP</strong>, GitHub, filesystems, Kubernetes, Microsoft Teams,
-        and a browser-based Claude Code terminal — all through a unified, authenticated gateway.
-      </p>
-
-      <div class="hero-cta">
-        <a href="https://github.com/rosenvladimirov/odoo-claude-mcp" class="btn btn-primary" target="_blank" rel="noopener">
-          <span>View on GitHub</span>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 17L17 7M17 7H7M17 7V17"/></svg>
-        </a>
-        <a href="#watch" class="btn btn-ghost btn-play">
-          <svg width="12" height="14" viewBox="0 0 12 14" fill="currentColor"><path d="M12 7L0 14V0L12 7Z"/></svg>
-          <span>Watch demo</span>
-        </a>
-      </div>
-
-      <div class="hero-stats">
-        <div class="stat">
-          <div class="stat-num">9</div>
-          <div class="stat-label">MCP servers</div>
+      <!-- Terminal -->
+      <div class="terminal" id="terminal">
+        <div class="term-chrome">
+          <div class="term-dots"><i></i><i></i><i></i></div>
+          <div class="term-title mono">claude · rosen@mcp-gateway · bash</div>
+          <div class="term-badge mono">LIVE</div>
         </div>
-        <div class="stat-divider"></div>
-        <div class="stat">
-          <div class="stat-num">197+</div>
-          <div class="stat-label">MCP tools</div>
+        <div class="term-tabs">
+          <button class="on" data-tab="connect">connect</button>
+          <button data-tab="query">query</button>
+          <button data-tab="ai">ai-tokenize</button>
+          <button data-tab="translate">translate</button>
         </div>
-        <div class="stat-divider"></div>
-        <div class="stat">
-          <div class="stat-num">15→19</div>
-          <div class="stat-label">Odoo versions</div>
-        </div>
-        <div class="stat-divider"></div>
-        <div class="stat">
-          <div class="stat-num">AGPL-3</div>
-          <div class="stat-label">Open source</div>
-        </div>
+        <div class="term-body" id="term-body"></div>
+        <form class="term-input mono" id="term-form">
+          <span>$</span>
+          <input id="term-in" placeholder='try: "show unpaid invoices over €5000"' autocomplete="off">
+        </form>
       </div>
     </div>
 
-    <div class="hero-visual">
-      <div class="terminal">
-        <div class="terminal-chrome">
-          <span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span>
-          <span class="terminal-title">claude-terminal · bash</span>
-        </div>
-        <div class="terminal-body">
-<pre><span class="c-prompt">$</span> <span class="c-cmd">claude mcp add odoo-mcp</span> \
-    <span class="c-flag">--url</span> <span class="c-str">https://mcp.yourdomain.com/mcp</span> \
-    <span class="c-flag">--header</span> <span class="c-str">"Authorization: Bearer $TOKEN"</span>
-
-<span class="c-ok">✓</span> Connected to <span class="c-hi">odoo-mcp</span> (80 tools loaded)
-<span class="c-ok">✓</span> Profile: <span class="c-hi">rosen</span> · 13 Odoo connections
-
-<span class="c-prompt">&gt;</span> <span class="c-user">search our unpaid invoices over €5,000</span>
-
-<span class="c-dim">[odoo_search_read]</span> account.move
-<span class="c-dim">Found 7 records · Total: €42,380.50</span>
-
-<span class="c-prompt">&gt;</span> <span class="c-user">tokenize and index them with ai_tokenize_record</span>
-
-<span class="c-dim">[ai_tokenize_record] ×7 · Qdrant: vectors upserted</span>
-<span class="c-ok">✓</span> <span class="c-hi">Done.</span> Ready for semantic search.<span class="caret">▊</span>
-</pre>
-        </div>
-      </div>
-
-      <div class="float-badge float-badge-1">
-        <span class="badge-label">Claude.ai</span>
-        <span class="badge-value">Connector Ready</span>
-      </div>
-      <div class="float-badge float-badge-2">
-        <span class="badge-label">Deploy</span>
-        <span class="badge-value">Docker · K3s · Bare metal</span>
-      </div>
+    <div class="kpis">
+      <div class="kpi"><div class="n">9<sup>★</sup></div><div class="l">MCP servers</div></div>
+      <div class="kpi"><div class="n">197<sup>+</sup></div><div class="l">MCP tools</div></div>
+      <div class="kpi"><div class="n">15→19</div><div class="l">Odoo versions</div></div>
+      <div class="kpi"><div class="n">AGPL-3</div><div class="l">Open source</div></div>
     </div>
+  </header>
+</div>
 
-  </div>
-</section>
+<!-- Why -->
+<div class="shell">
+<section class="block" id="why">
+  <div class="eyebrow mono"><span class="num">01</span><span>Why this exists</span><span class="line"></span></div>
+  <h2 class="display">Single-purpose MCP wrappers<br>don't scale. <em>This one</em> is built<br>for real production.</h2>
+  <p class="lede">Nine specialized servers behind one authenticated gateway. Unified identity, multi-tenant by design, vector-store native. Deploy on bare metal, Docker Compose, or K3s — scale without re-authenticating.</p>
 
-<!-- What it is -->
-<section class="why">
-  <div class="section-inner">
-    <div class="section-label">WHY THIS EXISTS</div>
-    <h2 class="section-title">
-      Single-purpose MCP wrappers don't scale.<br>
-      <span class="muted">This one is built for real production.</span>
-    </h2>
-
-    <div class="why-grid">
-      <div class="why-card">
-        <div class="card-num">01</div>
-        <h3>Unified authentication</h3>
-        <p>Token-based auth across all MCP endpoints. One identity, all servers. Per-user profile isolation.</p>
-      </div>
-      <div class="why-card">
-        <div class="card-num">02</div>
-        <h3>Multi-tenant by design</h3>
-        <p>One stack, dozens of Odoo databases. Switch connections on the fly. Each user sees only their own data.</p>
-      </div>
-      <div class="why-card">
-        <div class="card-num">03</div>
-        <h3>Claude.ai connector ready</h3>
-        <p>Public HTTPS endpoint with bearer token auth. Register as a Custom Connector in Team or Enterprise.</p>
-      </div>
-      <div class="why-card">
-        <div class="card-num">04</div>
-        <h3>K3s & Docker Compose</h3>
-        <p>Kustomize overlays for dev and prod. Docker Compose for solo developers. Pick your scale.</p>
-      </div>
-      <div class="why-card">
-        <div class="card-num">05</div>
-        <h3>Browser-based terminal</h3>
-        <p>xterm.js + tmux + Claude Code in the browser. Themable, persistent sessions, auth-integrated.</p>
-      </div>
-      <div class="why-card">
-        <div class="card-num">06</div>
-        <h3>Vector store native</h3>
-        <p>Qdrant integration for semantic search across Odoo records. Ollama for local LLM inference.</p>
-      </div>
+  <div class="reasons">
+    <div class="reason">
+      <span class="idx mono">01 / 06</span>
+      <h3>Unified authentication</h3>
+      <p>Token-based auth across all MCP endpoints. One identity, all servers, with per-user profile isolation persisted at the gateway.</p>
+      <svg class="pattern" viewBox="0 0 40 40" fill="none"><circle cx="20" cy="20" r="18" stroke="currentColor"/><circle cx="20" cy="20" r="10" stroke="currentColor"/><circle cx="20" cy="20" r="2" fill="currentColor"/></svg>
+    </div>
+    <div class="reason">
+      <span class="idx mono">02 / 06</span>
+      <h3>Multi-tenant by design</h3>
+      <p>One stack, dozens of Odoo databases. Switch connections on the fly. Each user sees only their own data, always.</p>
+      <svg class="pattern" viewBox="0 0 40 40" fill="none"><rect x="6" y="6" width="12" height="12" stroke="currentColor"/><rect x="22" y="6" width="12" height="12" stroke="currentColor"/><rect x="6" y="22" width="12" height="12" stroke="currentColor"/><rect x="22" y="22" width="12" height="12" stroke="currentColor"/></svg>
+    </div>
+    <div class="reason">
+      <span class="idx mono">03 / 06</span>
+      <h3>Claude.ai connector ready</h3>
+      <p>Public HTTPS endpoint with Bearer token auth. Register as a Custom Connector in Team or Enterprise — done in minutes.</p>
+      <svg class="pattern" viewBox="0 0 40 40" fill="none"><path d="M6 20 H34 M20 6 V34" stroke="currentColor"/><circle cx="20" cy="20" r="4" fill="currentColor"/></svg>
+    </div>
+    <div class="reason">
+      <span class="idx mono">04 / 06</span>
+      <h3>K3s & Docker Compose</h3>
+      <p>Kustomize overlays for dev and prod. Docker Compose for solo developers. Pick your scale and upgrade when ready.</p>
+      <svg class="pattern" viewBox="0 0 40 40" fill="none"><polygon points="20,4 34,12 34,28 20,36 6,28 6,12" stroke="currentColor"/><path d="M20 4 V36 M6 12 L34 28 M34 12 L6 28" stroke="currentColor"/></svg>
+    </div>
+    <div class="reason">
+      <span class="idx mono">05 / 06</span>
+      <h3>Browser-based terminal</h3>
+      <p>xterm.js + tmux + Claude Code in the browser. Themable UI (Catppuccin, Dracula, Tokyo Night+), persistent sessions, auth-integrated WebSocket.</p>
+      <svg class="pattern" viewBox="0 0 40 40" fill="none"><rect x="4" y="8" width="32" height="24" rx="2" stroke="currentColor"/><path d="M10 18 L14 22 L10 26 M18 26 H26" stroke="currentColor"/></svg>
+    </div>
+    <div class="reason">
+      <span class="idx mono">06 / 06</span>
+      <h3>Vector store native</h3>
+      <p>Qdrant integration for semantic search across Odoo records. Ollama (nomic-embed-text) default for local LLM inference.</p>
+      <svg class="pattern" viewBox="0 0 40 40" fill="none"><path d="M8 20 C8 13 13 8 20 8 S32 13 32 20 27 32 20 32 8 27 8 20 Z" stroke="currentColor"/><path d="M14 20 H26 M20 14 V26 M14 14 L26 26 M26 14 L14 26" stroke="currentColor" stroke-width=".5"/></svg>
     </div>
   </div>
 </section>
+</div>
 
-<!-- Watch it work -->
-<section class="watch" id="watch">
-  <div class="section-inner">
-    <div class="section-label">WATCH IT WORK</div>
-    <h2 class="section-title">
-      Not a mockup. <span class="muted">A real session.</span>
-    </h2>
-    <p class="section-lead">
-      Live demonstrations on YouTube — Claude Code driving a production Odoo instance through the MCP gateway.
-      No scripts, no cuts, no narration tricks. Real queries, real data, real results.
-    </p>
+<!-- Watch / Demo -->
+<div class="shell">
+<section class="block" id="watch">
+  <div class="eyebrow mono"><span class="num">02</span><span>Watch it work</span><span class="line"></span></div>
+  <h2 class="display">Not a mockup.<br>A <em>real session</em>.</h2>
+  <p class="lede">Live demonstrations on YouTube — Claude Code driving a production Odoo instance through the MCP gateway. No scripts, no cuts, no narration tricks. Real queries, real data, real results.</p>
 
-    <div class="watch-grid">
-      <div class="watch-featured">
-        <div class="video-frame">
-          <iframe
-            src="https://www.youtube-nocookie.com/embed/1zPNxUV76ws?rel=0&modestbranding=1"
-            title="Claude Code + MCP driving Odoo — live demo"
-            frameborder="0"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-            allowfullscreen
-            loading="lazy"></iframe>
-        </div>
-        <div class="video-meta">
-          <div class="video-tag">
-            <span class="live-dot"></span>
-            <span>FEATURED DEMO</span>
-          </div>
-          <h3>Claude driving production Odoo through MCP</h3>
-          <p>
-            End-to-end demonstration: natural language query → Claude plans tool calls →
-            <code>odoo-rpc-mcp</code> executes → results synthesized back as answer.
-            The kind of workflow that used to take a developer an hour.
-          </p>
-        </div>
-      </div>
-
-      <div class="watch-secondary">
-        <a href="https://www.youtube.com/watch?v=2sOAN3kbw9I" class="video-card" target="_blank" rel="noopener">
-          <div class="video-thumb">
-            <img src="https://i.ytimg.com/vi/2sOAN3kbw9I/hqdefault.jpg" alt="Second demo video thumbnail" loading="lazy">
-            <div class="video-play">
-              <svg width="20" height="22" viewBox="0 0 12 14" fill="currentColor"><path d="M12 7L0 14V0L12 7Z"/></svg>
-            </div>
-          </div>
-          <div class="video-card-meta">
-            <div class="video-card-title">More from the channel</div>
-            <div class="video-card-sub">Additional walkthrough on <strong>@DavidRosen8424-Gaming</strong> ↗</div>
-          </div>
-        </a>
-
-        <a href="https://www.youtube.com/@DavidRosen8424-Gaming" class="channel-cta" target="_blank" rel="noopener">
-          <div class="channel-cta-icon">
-            <svg width="28" height="20" viewBox="0 0 28 20" fill="currentColor"><path d="M27.4 3.1a3.5 3.5 0 0 0-2.5-2.5C22.8 0 14 0 14 0S5.2 0 3.1.6A3.5 3.5 0 0 0 .6 3.1C0 5.2 0 10 0 10s0 4.8.6 6.9a3.5 3.5 0 0 0 2.5 2.5C5.2 20 14 20 14 20s8.8 0 10.9-.6a3.5 3.5 0 0 0 2.5-2.5C28 14.8 28 10 28 10s0-4.8-.6-6.9zM11.2 14.3V5.7L18.6 10l-7.4 4.3z"/></svg>
-          </div>
-          <div class="channel-cta-text">
-            <div class="channel-cta-label">SUBSCRIBE</div>
-            <div class="channel-cta-name">@DavidRosen8424-Gaming</div>
-            <div class="channel-cta-sub">Odoo · AI · MCP demonstrations</div>
-          </div>
-          <div class="channel-cta-arrow">→</div>
-        </a>
-      </div>
+  <div class="watch-split">
+    <div class="video-card" onclick="window.open('https://www.youtube.com/@DavidRosen8424-Gaming','_blank')">
+      <div class="strip"></div>
+      <span class="label mono">FEATURED · YOUTUBE</span>
+      <div class="play"><div class="btn-play"><div class="tri"></div></div></div>
+      <div class="caption"><span>@DavidRosen8424-Gaming</span><span>12:04</span></div>
+    </div>
+    <div>
+      <p class="mono" style="font-size:11px;letter-spacing:.1em;color:var(--accent);margin-bottom:14px">FEATURED DEMO</p>
+      <h3 class="serif" style="font-size:32px;line-height:1.05;margin-bottom:16px">Claude driving<br>production Odoo<br>through MCP.</h3>
+      <p style="font-size:14.5px;line-height:1.55;color:var(--ink-2);margin-bottom:24px">Natural language query → Claude plans tool calls → <span class="mono" style="background:var(--chip);padding:2px 6px;border-radius:3px;font-size:12px">odoo-rpc-mcp</span> executes → results synthesized back as answer. The kind of workflow that used to take a developer an hour.</p>
+      <button class="btn">Subscribe to channel →</button>
     </div>
   </div>
 </section>
+</div>
+
+<div class="pull">Nine servers. <em>One gateway.</em> Every tool Claude can call, authenticated once.</div>
 
 <!-- Architecture -->
-<section class="arch" id="architecture">
-  <div class="section-inner">
-    <div class="section-label">ARCHITECTURE</div>
-    <h2 class="section-title">How the stack fits together</h2>
-    <p class="section-lead">
-      Claude connects to a unified gateway. The gateway proxies to specialized MCP servers.
-      Each server is a Docker container with its own scope, tools, and authentication.
-    </p>
+<div class="shell">
+<section class="block" id="architecture">
+  <div class="eyebrow mono"><span class="num">03</span><span>Architecture</span><span class="line"></span></div>
+  <h2 class="display">How the stack<br><em>fits together</em>.</h2>
+  <p class="lede">Claude connects to a unified gateway. The gateway proxies to specialized MCP servers. Each server is a Docker container with its own scope, tools, and authentication.</p>
 
-    <div class="arch-diagram">
-      <div class="arch-row arch-row-client">
-        <div class="arch-box arch-client">
-          Claude.ai · Claude Code · Claude Desktop · IDE
-        </div>
+  <div class="arch">
+    <div class="arch-row">
+      <div class="arch-pill mono">Claude.ai</div>
+      <div class="arch-pill mono">Claude Code</div>
+      <div class="arch-pill mono">Claude Desktop</div>
+      <div class="arch-pill mono">IDE</div>
+    </div>
+    <div class="arch-wire">
+      <svg width="280" height="40" viewBox="0 0 280 40" fill="none">
+        <path d="M10 5 L140 35 L270 5" stroke="currentColor" stroke-dasharray="3 3"/>
+        <text x="140" y="22" text-anchor="middle" font-family="JetBrains Mono" font-size="10" fill="currentColor">HTTPS · Bearer</text>
+      </svg>
+    </div>
+    <div class="arch-row">
+      <div class="arch-pill gateway mono"><span class="pulse"></span>Unified MCP Gateway · server.py</div>
+    </div>
+    <div class="arch-wire">
+      <svg width="400" height="30" viewBox="0 0 400 30" fill="none">
+        <path d="M200 2 L40 28 M200 2 L140 28 M200 2 L240 28 M200 2 L360 28" stroke="currentColor" stroke-width=".6" opacity=".4"/>
+      </svg>
+    </div>
+    <div class="arch-servers">
+      <div class="arch-node flagship"><span class="n">odoo-rpc-mcp</span><span class="t">83 native tools</span></div>
+      <div class="arch-node"><span class="n">ee-mcp</span><span class="t">Odoo Enterprise</span></div>
+      <div class="arch-node"><span class="n">oca-mcp</span><span class="t">OCA modules</span></div>
+      <div class="arch-node"><span class="n">github-mcp</span><span class="t">Git operations</span></div>
+      <div class="arch-node"><span class="n">filesystem</span><span class="t">Scoped I/O</span></div>
+      <div class="arch-node"><span class="n">portainer</span><span class="t">Docker · K8s</span></div>
+      <div class="arch-node"><span class="n">teams-mcp</span><span class="t">MS Teams</span></div>
+      <div class="arch-node flagship"><span class="n">claude-terminal</span><span class="t">Browser shell</span></div>
+    </div>
+    <div class="arch-connectors">
+      <div class="arch-conn">Odoo 15 · 16 · 17 · 18 · 19</div>
+      <div class="arch-conn">Qdrant · vector DB</div>
+      <div class="arch-conn">Ollama · local LLMs</div>
+      <div class="arch-conn">Postgres · state · memory</div>
+    </div>
+  </div>
+</section>
+</div>
+
+<!-- What's new -->
+<div class="shell">
+<section class="block" id="whats-new">
+  <div class="eyebrow mono"><span class="num">04</span><span>What's new</span><span class="line"></span></div>
+  <h2 class="display">Released 2026-04-19.<br><em>2.10.0</em> ships multi-language<br>and snippet mutation.</h2>
+
+  <div class="changelog">
+    <div class="meta">
+      <b>2.10.0</b>
+      Nine new tools<br>
+      Multi-language content<br>
+      Website snippet mutation<br><br>
+      For marketing teams that translate blog posts and swap banners without leaving Claude.
+    </div>
+    <div class="items">
+      <div class="ci">
+        <div class="k">NEW · tool</div>
+        <h4>odoo_translate_field</h4>
+        <p>Simple <span class="mono" style="background:var(--chip);padding:1px 5px;border-radius:3px;font-size:11.5px">translate=True</span> field writer — blog.post.name / subtitle / teaser, product.name, partner.name.</p>
       </div>
-
-      <div class="arch-arrow">
-        <div class="arch-arrow-line"></div>
-        <div class="arch-arrow-label">HTTPS + Token Auth</div>
+      <div class="ci">
+        <div class="k">NEW · tool</div>
+        <h4>odoo_translate_html</h4>
+        <p>HTML/XML translate — blog.post.content, product.website_description, ir.ui.view.arch_db. Three modes: extract / terms / replace.</p>
       </div>
-
-      <div class="arch-row arch-row-gateway">
-        <div class="arch-box arch-gateway">
-          <div class="arch-box-title">Unified MCP Gateway</div>
-          <div class="arch-box-sub">server.py — routing, auth, profile isolation, shared memory</div>
-        </div>
+      <div class="ci">
+        <div class="k">NEW · tool</div>
+        <h4>odoo_website_add_snippet</h4>
+        <p>Insert Odoo snippets (CTA cards, banners, content blocks) into blog posts and pages with xpath substitutions.</p>
       </div>
-
-      <div class="arch-row arch-row-servers">
-        <div class="arch-server arch-server-primary">
-          <div class="server-icon">◆</div>
-          <div class="server-name">odoo-rpc-mcp</div>
-          <div class="server-desc">83 native Odoo tools</div>
-        </div>
-        <div class="arch-server">
-          <div class="server-icon">◇</div>
-          <div class="server-name">ee-mcp</div>
-          <div class="server-desc">Odoo Enterprise</div>
-        </div>
-        <div class="arch-server">
-          <div class="server-icon">◇</div>
-          <div class="server-name">oca-mcp</div>
-          <div class="server-desc">OCA modules</div>
-        </div>
-        <div class="arch-server">
-          <div class="server-icon">◇</div>
-          <div class="server-name">github-mcp</div>
-          <div class="server-desc">Git operations</div>
-        </div>
-        <div class="arch-server">
-          <div class="server-icon">◇</div>
-          <div class="server-name">filesystem-mcp</div>
-          <div class="server-desc">Scoped I/O</div>
-        </div>
-        <div class="arch-server">
-          <div class="server-icon">◇</div>
-          <div class="server-name">portainer-mcp</div>
-          <div class="server-desc">Docker · K8s</div>
-        </div>
-        <div class="arch-server">
-          <div class="server-icon">◇</div>
-          <div class="server-name">teams-mcp</div>
-          <div class="server-desc">MS Teams</div>
-        </div>
-        <div class="arch-server">
-          <div class="server-icon">◆</div>
-          <div class="server-name">claude-terminal</div>
-          <div class="server-desc">Browser shell</div>
-        </div>
-      </div>
-
-      <div class="arch-arrow arch-arrow-split">
-        <div class="arch-arrow-line"></div>
-      </div>
-
-      <div class="arch-row arch-row-data">
-        <div class="arch-data">
-          <div class="data-name">Odoo</div>
-          <div class="data-sub">15 · 16 · 17 · 18 · 19</div>
-        </div>
-        <div class="arch-data">
-          <div class="data-name">Qdrant</div>
-          <div class="data-sub">Vector DB</div>
-        </div>
-        <div class="arch-data">
-          <div class="data-name">Ollama</div>
-          <div class="data-sub">Local LLMs</div>
-        </div>
-        <div class="arch-data">
-          <div class="data-name">Postgres</div>
-          <div class="data-sub">State · Memory</div>
-        </div>
+      <div class="ci">
+        <div class="k">NEW · tool</div>
+        <h4>odoo_website_update_snippet</h4>
+        <p>Swap banner backgrounds, change titles, edit CTAs — all via xpath + CSS-property substitutions.</p>
       </div>
     </div>
   </div>
 </section>
+</div>
 
-<!-- What's new in 2.10 -->
-<section class="whats-new" id="whats-new" style="padding:80px 32px;background:linear-gradient(180deg,#faf8fd 0%,#fff 100%);border-top:1px solid rgba(113,75,160,0.08);border-bottom:1px solid rgba(113,75,160,0.08);">
-  <div style="max-width:1200px;margin:0 auto;">
-    <div class="section-label" style="margin-bottom:12px;">RELEASED 2026-04-19</div>
-    <h2 class="section-title">What's new in <span style="font-family:'JetBrains Mono',monospace;color:#714BA0;">2.10.0</span></h2>
-    <p style="font-size:1.1em;color:#5C5C70;max-width:720px;margin-top:16px;">
-      Nine new tools covering multi-language content management and website snippet
-      mutation — everything your marketing team needs to translate blog posts and
-      swap banners without leaving Claude.
-    </p>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;margin-top:36px;">
-      <div style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:14px;padding:22px;position:relative;">
-        <span style="position:absolute;top:-10px;right:14px;background:#21B6B7;color:#fff;font-size:0.7em;font-weight:700;padding:3px 10px;border-radius:999px;letter-spacing:0.05em;">NEW</span>
-        <div style="font-family:'JetBrains Mono',monospace;color:#714BA0;font-weight:700;margin-bottom:6px;">odoo_translate_field</div>
-        <p style="font-size:0.9em;color:#5C5C70;">Simple <code>translate=True</code> field writer — blog.post.name/subtitle/teaser, product.name, partner.name.</p>
-      </div>
-      <div style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:14px;padding:22px;position:relative;">
-        <span style="position:absolute;top:-10px;right:14px;background:#21B6B7;color:#fff;font-size:0.7em;font-weight:700;padding:3px 10px;border-radius:999px;letter-spacing:0.05em;">NEW</span>
-        <div style="font-family:'JetBrains Mono',monospace;color:#714BA0;font-weight:700;margin-bottom:6px;">odoo_translate_html</div>
-        <p style="font-size:0.9em;color:#5C5C70;">HTML/XML translate — blog.post.content, product.website_description, ir.ui.view.arch_db. Three modes: extract / terms / replace.</p>
-      </div>
-      <div style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:14px;padding:22px;position:relative;">
-        <span style="position:absolute;top:-10px;right:14px;background:#21B6B7;color:#fff;font-size:0.7em;font-weight:700;padding:3px 10px;border-radius:999px;letter-spacing:0.05em;">NEW</span>
-        <div style="font-family:'JetBrains Mono',monospace;color:#714BA0;font-weight:700;margin-bottom:6px;">odoo_website_add_snippet</div>
-        <p style="font-size:0.9em;color:#5C5C70;">Insert Odoo snippets (CTA cards, banners, content blocks) into blog posts and pages with xpath substitutions.</p>
-      </div>
-      <div style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:14px;padding:22px;position:relative;">
-        <span style="position:absolute;top:-10px;right:14px;background:#21B6B7;color:#fff;font-size:0.7em;font-weight:700;padding:3px 10px;border-radius:999px;letter-spacing:0.05em;">NEW</span>
-        <div style="font-family:'JetBrains Mono',monospace;color:#714BA0;font-weight:700;margin-bottom:6px;">odoo_website_update_snippet</div>
-        <p style="font-size:0.9em;color:#5C5C70;">Swap banner backgrounds, change titles, edit CTAs — all via xpath + CSS-property substitutions.</p>
-      </div>
+<!-- Tracks -->
+<div class="shell">
+<section class="block" id="tracks">
+  <div class="eyebrow mono"><span class="num">05</span><span>Two parallel branches</span><span class="line"></span></div>
+  <h2 class="display">Which track<br><em>is yours</em>?</h2>
+  <p class="lede">The project ships on two branches with different audiences and release cadences. Pick the one matching your role.</p>
+
+  <div class="tracks">
+    <div class="track stable">
+      <span class="tag mono">Production stable</span>
+      <h3>Track <em>2.x</em><br>End Users</h3>
+      <div class="branch-meta">branch 2.0 · docker :latest · :stable · :2.x.y</div>
+      <p class="for">Odoo end-users, accountants, Bulgarian SMEs, developers working with a single Odoo stack, content teams managing website and blog content.</p>
+      <ul>
+        <li>All 197+ MCP tools for day-to-day Odoo work</li>
+        <li>Multi-language field management (auto-ZWSP)</li>
+        <li>Website snippet management (banners, CTAs)</li>
+        <li>Bulgaria localization (НАП, VAT, Intrastat)</li>
+        <li>AI tokenizer (Qdrant + Ollama)</li>
+        <li>Memory system (shared / user / licensed)</li>
+      </ul>
     </div>
-    <p style="margin-top:28px;">
-      <a href="https://github.com/rosenvladimirov/odoo-claude-mcp/blob/2.0/CHANGELOG.md" class="btn btn-ghost" target="_blank" rel="noopener">
-        Full changelog →
-      </a>
-    </p>
-  </div>
-</section>
-
-<!-- Two Tracks -->
-<section class="tracks-section" id="tracks" style="padding:80px 32px;">
-  <div style="max-width:1200px;margin:0 auto;">
-    <div class="section-label">TWO PARALLEL BRANCHES</div>
-    <h2 class="section-title">Which track is yours?</h2>
-    <p style="font-size:1.1em;color:#5C5C70;max-width:720px;margin-top:16px;">
-      The project ships on two branches with different audiences and release cadences.
-      Pick the one matching your role.
-    </p>
-
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:24px;margin-top:36px;">
-
-      <div style="background:#fff;border:2px solid #714BA0;border-radius:16px;padding:32px;box-shadow:0 8px 24px rgba(78,47,117,0.12);">
-        <div style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px;background:rgba(113,75,160,0.1);color:#714BA0;font-size:0.75em;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;border-radius:999px;margin-bottom:14px;">● Production stable</div>
-        <h3 style="font-family:'Fraunces',serif;font-size:1.6em;font-weight:600;margin-bottom:6px;">Track 2.x — End Users</h3>
-        <div style="font-family:'JetBrains Mono',monospace;color:#5C5C70;font-size:0.9em;margin-bottom:16px;">branch <code>2.0</code> · docker <code>:latest</code> · <code>:stable</code> · <code>:2.x.y</code></div>
-        <p style="color:#5C5C70;font-size:0.95em;margin-bottom:18px;">Odoo end-users, accountants, Bulgarian SMEs, developers working with a single Odoo stack, content teams managing website and blog content.</p>
-        <ul style="list-style:none;padding:0;">
-          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ All 197+ MCP tools for day-to-day Odoo work</li>
-          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ Multi-language field management (auto-ZWSP)</li>
-          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ Website snippet management (banners, CTAs)</li>
-          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ Bulgaria localization (НАП, VAT, Intrastat)</li>
-          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ AI tokenizer (Qdrant + Ollama)</li>
-          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ Memory system (shared / user / licensed)</li>
-        </ul>
-        <ul style="list-style:none;margin:0;padding:0;">
-          <li style="font-size:0;"></li>
-        </ul>
-        <style>.tracks-section ul li::before{content:'';}</style>
-      </div>
-
-      <div style="background:#fff;border:2px dashed #21B6B7;border-radius:16px;padding:32px;opacity:0.95;">
-        <div style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px;background:rgba(33,182,183,0.15);color:#108686;font-size:0.75em;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;border-radius:999px;margin-bottom:14px;">◉ Preview · 3.x in development</div>
-        <h3 style="font-family:'Fraunces',serif;font-size:1.6em;font-weight:600;margin-bottom:6px;">Track 3.x — Integrators</h3>
-        <div style="font-family:'JetBrains Mono',monospace;color:#5C5C70;font-size:0.9em;margin-bottom:16px;">branch <code>3.0</code> · docker <code>:next</code> · <code>:3.x.y</code></div>
-        <p style="color:#5C5C70;font-size:0.95em;margin-bottom:18px;">Odoo implementation partners, OCA community contributors, SaaS MSPs running multiple client instances, integrator agencies deploying AI workflows to clients.</p>
-        <ul style="list-style:none;padding:0;">
-          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ Admin lifecycle tools (install / upgrade / health-check)</li>
-          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ Industry skill packs (MFG / Retail / Services)</li>
-          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ One-click demo builder (&lt; 5 min)</li>
-          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ Module dev toolkit (scaffold / lint / test)</li>
-          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ Per-tenant Portainer provisioning</li>
-          <li style="padding:6px 0 6px 22px;position:relative;font-size:0.92em;">→ AES-256 encrypted config export</li>
-        </ul>
-        <p style="margin-top:18px;">
-          <a href="https://github.com/rosenvladimirov/odoo-claude-mcp/blob/2.0/docs/integrator-platform.md" class="btn btn-ghost" target="_blank" rel="noopener" style="font-size:0.9em;">Full 3.x spec →</a>
-        </p>
-      </div>
-
+    <div class="track preview">
+      <span class="tag mono">Preview · 3.x in development</span>
+      <h3>Track <em>3.x</em><br>Integrators</h3>
+      <div class="branch-meta">branch 3.0 · docker :next · :3.x.y</div>
+      <p class="for">Odoo implementation partners, OCA community contributors, SaaS MSPs running multiple client instances, integrator agencies deploying AI workflows.</p>
+      <ul>
+        <li>Admin lifecycle (install / upgrade / health-check)</li>
+        <li>Industry skill packs (MFG / Retail / Services)</li>
+        <li>One-click demo builder (&lt; 5 min)</li>
+        <li>Module dev toolkit (scaffold / lint / test)</li>
+        <li>Per-tenant Portainer provisioning</li>
+        <li>AES-256 encrypted config export</li>
+      </ul>
     </div>
   </div>
 </section>
+</div>
 
-<!-- Companion Odoo Modules -->
-<section class="modules-section" id="modules" style="padding:80px 32px;background:linear-gradient(180deg,#fff 0%,#faf8fd 100%);border-top:1px solid rgba(113,75,160,0.08);">
-  <div style="max-width:1200px;margin:0 auto;">
-    <div class="section-label">ODOO-SIDE INTEGRATION</div>
-    <h2 class="section-title">Companion Odoo modules.</h2>
-    <p style="font-size:1.1em;color:#5C5C70;max-width:720px;margin-top:16px;">
-      The MCP stack pairs with two Odoo modules that turn any instance into a
-      fully MCP-aware, multi-tenant, billing-ready AI workstation.
-    </p>
+<!-- Modules -->
+<div class="shell">
+<section class="block" id="modules">
+  <div class="eyebrow mono"><span class="num">06</span><span>Odoo-side integration</span><span class="line"></span></div>
+  <h2 class="display">Companion <em>Odoo</em> modules.</h2>
+  <p class="lede">The MCP stack pairs with two Odoo modules that turn any instance into a fully MCP-aware, multi-tenant, billing-ready AI workstation.</p>
 
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:24px;margin-top:36px;">
-
-      <div style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:16px;padding:32px;">
-        <div style="display:flex;align-items:start;justify-content:space-between;margin-bottom:14px;gap:12px;flex-wrap:wrap;">
-          <h3 style="font-family:'JetBrains Mono',monospace;font-size:1.05em;color:#714BA0;font-weight:700;margin:0;">l10n_bg_claude_terminal</h3>
-          <span style="font-size:0.72em;padding:3px 10px;background:rgba(34,197,94,0.15);color:#15803d;border-radius:999px;font-weight:700;">LGPL-3 · FREE</span>
+  <div class="modules">
+    <div class="mod">
+      <div class="mod-head">
+        <div>
+          <span class="mono" style="font-size:11px;color:var(--ink-3);letter-spacing:.1em">ODOO ↔ MCP INTEGRATION</span>
+          <h3 style="margin-top:8px">l10n_bg_claude_terminal</h3>
         </div>
-        <div style="font-size:1em;font-weight:600;color:#1A1A2E;margin-bottom:12px;">Odoo ↔ MCP integration</div>
-        <p style="color:#5C5C70;font-size:0.93em;margin-bottom:16px;">Exposes MCP + Claude Terminal configuration as user preferences and company settings. Works on Odoo 16, 18 and 19 — each major series on a dedicated branch.</p>
-        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:18px;">
-          <a href="https://github.com/rosenvladimirov/l10n-bulgaria/tree/18.0/l10n_bg_claude_terminal" target="_blank" style="font-family:'JetBrains Mono',monospace;font-size:0.78em;padding:4px 10px;background:rgba(113,75,160,0.08);color:#714BA0;border-radius:6px;text-decoration:none;">Odoo 18 · 18.0.1.28.0</a>
-          <a href="https://github.com/rosenvladimirov/l10n-bulgaria/tree/19.0/l10n_bg_claude_terminal" target="_blank" style="font-family:'JetBrains Mono',monospace;font-size:0.78em;padding:4px 10px;background:rgba(113,75,160,0.08);color:#714BA0;border-radius:6px;text-decoration:none;">Odoo 19 · 19.0.1.24.0</a>
-          <a href="https://github.com/rosenvladimirov/l10n-bulgaria/tree/16.0/l10n_bg_claude_terminal" target="_blank" style="font-family:'JetBrains Mono',monospace;font-size:0.78em;padding:4px 10px;background:rgba(113,75,160,0.08);color:#714BA0;border-radius:6px;text-decoration:none;">Odoo 16</a>
-        </div>
-        <ul style="list-style:none;padding:0;margin:0;">
-          <li style="padding:4px 0 4px 18px;position:relative;font-size:0.88em;">• Per-user MCP endpoint + Bearer token</li>
-          <li style="padding:4px 0 4px 18px;position:relative;font-size:0.88em;">• Odoo RPC with verify_ssl + TOFU cert pinning</li>
-          <li style="padding:4px 0 4px 18px;position:relative;font-size:0.88em;">• 18 terminal themes + live refresh bus</li>
-          <li style="padding:4px 0 4px 18px;position:relative;font-size:0.88em;">• Test Connections + Save to MCP actions</li>
-        </ul>
+        <span class="lic free mono">LGPL-3 · FREE</span>
       </div>
-
-      <div style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:16px;padding:32px;">
-        <div style="display:flex;align-items:start;justify-content:space-between;margin-bottom:14px;gap:12px;flex-wrap:wrap;">
-          <h3 style="font-family:'JetBrains Mono',monospace;font-size:1.05em;color:#714BA0;font-weight:700;margin:0;">l10n_bg_ai_billing</h3>
-          <span style="font-size:0.72em;padding:3px 10px;background:rgba(234,179,8,0.15);color:#a16207;border-radius:999px;font-weight:700;">OPL-1 · PAID</span>
-        </div>
-        <div style="font-size:1em;font-weight:600;color:#1A1A2E;margin-bottom:12px;">SaaS billing + tenant provisioning</div>
-        <p style="color:#5C5C70;font-size:0.93em;margin-bottom:16px;">Enterprise billing module for hosting providers and BL Consulting tier management. Tracks per-user MCP usage, calculates bills, provisions Portainer stacks per tenant.</p>
-        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:18px;">
-          <a href="https://github.com/rosenvladimirov/l10n-bulgaria-expert/tree/19.0/l10n_bg_ai_billing" target="_blank" style="font-family:'JetBrains Mono',monospace;font-size:0.78em;padding:4px 10px;background:rgba(113,75,160,0.08);color:#714BA0;border-radius:6px;text-decoration:none;">Odoo 19 · 19.0.1.3.0</a>
-        </div>
-        <ul style="list-style:none;padding:0;margin:0;">
-          <li style="padding:4px 0 4px 18px;position:relative;font-size:0.88em;">• 8 models: bundle / tenant / usage / invoice / skills</li>
-          <li style="padding:4px 0 4px 18px;position:relative;font-size:0.88em;">• Bundle pricing €49–599, millicents precision</li>
-          <li style="padding:4px 0 4px 18px;position:relative;font-size:0.88em;">• Portainer client + AES-256 ZIP export</li>
-          <li style="padding:4px 0 4px 18px;position:relative;font-size:0.88em;">• BG Trade Registry + sale.order auto-provision</li>
-        </ul>
+      <p class="caption">Exposes MCP + Claude Terminal configuration as user preferences and company settings. Works on Odoo 16, 18 and 19 — each major series on a dedicated branch.</p>
+      <ul>
+        <li>Per-user MCP endpoint + Bearer token</li>
+        <li>Odoo RPC with verify_ssl + TOFU cert pinning</li>
+        <li>18 terminal themes + live refresh bus</li>
+        <li>Test Connections + Save to MCP actions</li>
+      </ul>
+      <div class="branches">
+        <span class="branch mono">Odoo 18 · 18.0.1.28.0</span>
+        <span class="branch mono">Odoo 19 · 19.0.1.24.0</span>
+        <span class="branch mono">Odoo 16</span>
       </div>
-
     </div>
-  </div>
-</section>
-
-<!-- Servers detail -->
-<section class="servers" id="servers">
-  <div class="section-inner">
-    <div class="section-label">THE 9 MCP SERVERS</div>
-    <h2 class="section-title">Each server, one clear job.</h2>
-
-    <div class="server-list">
-
-      <article class="server-card server-card-primary">
-        <div class="server-card-head">
-          <div class="server-card-name">odoo-rpc-mcp</div>
-          <div class="server-card-badge">FLAGSHIP</div>
+    <div class="mod paid">
+      <div class="mod-head">
+        <div>
+          <span class="mono" style="font-size:11px;color:var(--ink-3);letter-spacing:.1em">SAAS BILLING · PROVISIONING</span>
+          <h3 style="margin-top:8px">l10n_bg_ai_billing</h3>
         </div>
-        <p class="server-card-desc">
-          The core server. 83 native tools plus 105 proxied tools (188 total) covering every aspect of Odoo development, operations, and business workflow.
-        </p>
-        <div class="server-card-tags">
-          <span>CRUD</span>
-          <span>Web session</span>
-          <span>Reports</span>
-          <span>Attachments</span>
-          <span>Gmail</span>
-          <span>Telegram</span>
-          <span>l10n_bg</span>
-          <span>Qdrant AI</span>
-          <span>Multi-connection</span>
-          <span>Memory</span>
-          <span>SSH · Git</span>
-        </div>
-      </article>
-
-      <article class="server-card">
-        <div class="server-card-head">
-          <div class="server-card-name">ee-mcp</div>
-        </div>
-        <p class="server-card-desc">
-          Odoo Enterprise-specific tools. License validation, EE repo management, dependency analysis, conflict detection with OCA.
-        </p>
-      </article>
-
-      <article class="server-card">
-        <div class="server-card-head">
-          <div class="server-card-name">oca-mcp</div>
-        </div>
-        <p class="server-card-desc">
-          Deep integration with the OCA ecosystem. Clone, search, generate READMEs, migrate branches — the full toolkit.
-        </p>
-      </article>
-
-      <article class="server-card server-card-primary">
-        <div class="server-card-head">
-          <div class="server-card-name">claude-terminal</div>
-          <div class="server-card-badge">WEB UI</div>
-        </div>
-        <p class="server-card-desc">
-          Claude Code running in the browser. xterm.js + tmux with persistent sessions, themable UI (Catppuccin, Dracula, Tokyo Night+), authenticated WebSocket gateway.
-        </p>
-        <div class="server-card-tags">
-          <span>xterm.js</span>
-          <span>tmux</span>
-          <span>WebSocket</span>
-          <span>Themes</span>
-        </div>
-      </article>
-
-      <article class="server-card">
-        <div class="server-card-head">
-          <div class="server-card-name">github-mcp</div>
-        </div>
-        <p class="server-card-desc">
-          GitHub API wrapper. Search code, issues, PRs across all accessible repos. Full REST API passthrough.
-        </p>
-      </article>
-
-      <article class="server-card">
-        <div class="server-card-head">
-          <div class="server-card-name">portainer-mcp</div>
-        </div>
-        <p class="server-card-desc">
-          Docker and Kubernetes environment management through Portainer. Deploy, inspect, scale — with Claude as your ops agent.
-        </p>
-      </article>
-
-      <article class="server-card">
-        <div class="server-card-head">
-          <div class="server-card-name">teams-mcp</div>
-        </div>
-        <p class="server-card-desc">
-          Microsoft Teams messaging integration. Post to channels, read threads, coordinate work between Odoo and Teams.
-        </p>
-      </article>
-
-      <article class="server-card">
-        <div class="server-card-head">
-          <div class="server-card-name">filesystem-mcp</div>
-        </div>
-        <p class="server-card-desc">
-          Scoped filesystem operations. Per-user isolation, read/write quotas, safe for AI agents.
-        </p>
-      </article>
-
-    </div>
-  </div>
-</section>
-
-<!-- Tool Catalog -->
-<section class="tools-section" id="tools" style="padding:80px 32px;background:#faf8fd;border-top:1px solid rgba(113,75,160,0.08);">
-  <div style="max-width:1200px;margin:0 auto;">
-    <div class="section-label">ALL 197+ TOOLS · ORGANIZED BY CATEGORY</div>
-    <h2 class="section-title">Every tool Claude can call.</h2>
-    <p style="font-size:1.1em;color:#5C5C70;max-width:720px;margin-top:16px;">
-      Native Odoo RPC tools come from <code style="font-family:'JetBrains Mono',monospace;">odoo-rpc-mcp</code>.
-      Proxied infrastructure tools are exposed through the unified gateway from
-      <code style="font-family:'JetBrains Mono',monospace;">portainer-mcp</code>, <code style="font-family:'JetBrains Mono',monospace;">github-mcp</code>, <code style="font-family:'JetBrains Mono',monospace;">oca-mcp</code>, <code style="font-family:'JetBrains Mono',monospace;">ee-mcp</code>, <code style="font-family:'JetBrains Mono',monospace;">filesystem-mcp</code>.
-      All authenticated via the same Bearer token.
-    </p>
-
-    <h3 style="font-family:'Fraunces',serif;font-size:1.4em;font-weight:600;margin-top:48px;margin-bottom:18px;color:#1A1A2E;">🟣 Native Odoo tools <span style="font-size:0.7em;color:#5C5C70;font-weight:400;">· odoo-rpc-mcp</span></h3>
-    <div class="tool-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;">
-
-      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;transition:all 0.2s;">
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
-          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">⇅ CRUD &amp; Search</h4>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">14</span>
-        </div>
-        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>odoo_search</code>, <code>odoo_read</code>, <code>odoo_search_read</code>, <code>odoo_search_count</code>, <code>odoo_create</code>, <code>odoo_write</code>, <code>odoo_unlink</code>, <code>odoo_execute</code>, <code>odoo_message_post</code>, <code>odoo_refresh</code>.</p>
-        <p style="font-size:0.82em;color:#714BA0;">→ Natural language queries, bulk imports, workflow automation (action_post, action_confirm).</p>
+        <span class="lic paid mono">OPL-1 · PAID</span>
       </div>
-
-      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
-          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🔍 Introspection</h4>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">4</span>
-        </div>
-        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>odoo_fields_get</code>, <code>odoo_list_models</code>, <code>odoo_module_info</code>, <code>odoo_version</code>.</p>
-        <p style="font-size:0.82em;color:#714BA0;">→ "Which fields are translate?" "Where is this module installed?"</p>
-      </div>
-
-      <div class="tool-card" style="background:#fff;border:2px solid #21B6B7;border-radius:12px;padding:22px;position:relative;">
-        <span style="position:absolute;top:-10px;right:14px;background:#21B6B7;color:#fff;font-size:0.7em;font-weight:700;padding:3px 10px;border-radius:999px;">NEW 2.10</span>
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
-          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🌐 Translations</h4>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">4</span>
-        </div>
-        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>odoo_list_translatable_fields</code>, <code>odoo_get_field_translations</code>, <code>odoo_translate_field</code>, <code>odoo_translate_html</code>.</p>
-        <p style="font-size:0.82em;color:#714BA0;">→ Translate blog posts, product descriptions, website pages. 3 modes (extract / terms / replace) + auto-ZWSP fix.</p>
-      </div>
-
-      <div class="tool-card" style="background:#fff;border:2px solid #21B6B7;border-radius:12px;padding:22px;position:relative;">
-        <span style="position:absolute;top:-10px;right:14px;background:#21B6B7;color:#fff;font-size:0.7em;font-weight:700;padding:3px 10px;border-radius:999px;">NEW 2.10</span>
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
-          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🧱 Website Snippets</h4>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">5</span>
-        </div>
-        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>odoo_website_list_snippets</code>, <code>list_page_snippets</code>, <code>add_snippet</code>, <code>update_snippet</code>, <code>remove_snippet</code>.</p>
-        <p style="font-size:0.82em;color:#714BA0;">→ Swap banner backgrounds, insert CTAs, mutate blog/page HTML via xpath + CSS-property substitutions.</p>
-      </div>
-
-      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
-          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🔐 Web Session</h4>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">7</span>
-        </div>
-        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>odoo_web_login</code>, <code>web_call</code>, <code>web_read</code>, <code>web_export</code>, <code>web_report</code>, <code>web_request</code>, <code>web_logout</code>.</p>
-        <p style="font-size:0.82em;color:#714BA0;">→ Cookie-based HTTP. Works through Cloudflare — no XML-RPC endpoints needed.</p>
-      </div>
-
-      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
-          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">📎 Attachments</h4>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">4</span>
-        </div>
-        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>odoo_attachment_upload / download</code>, <code>public_access_download / image</code>.</p>
-        <p style="font-size:0.82em;color:#714BA0;">→ Binary pipeline including vision-based invoice OCR.</p>
-      </div>
-
-      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
-          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">📊 Reporting</h4>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">6</span>
-        </div>
-        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>odoo_report</code>, <code>public_access_report_{pdf,xlsx,html}</code>, <code>public_access_export_{csv,xlsx}</code>.</p>
-        <p style="font-size:0.82em;color:#714BA0;">→ PDF invoices, XLSX exports, HTML dashboards.</p>
-      </div>
-
-      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
-          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🌍 Portal &amp; Public</h4>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">8</span>
-        </div>
-        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>public_access_portal_{home,orders,invoices,purchases,tickets}</code>, <code>shop</code>, <code>sitemap</code>, <code>barcode</code>.</p>
-        <p style="font-size:0.82em;color:#714BA0;">→ Headless customer portal — orders, invoices, tickets, shop.</p>
-      </div>
-
-      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
-          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🇧🇬 Bulgaria Localization</h4>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">5</span>
-        </div>
-        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>odoo_fp_list / details / types / configure / remove_action</code>.</p>
-        <p style="font-size:0.82em;color:#714BA0;">→ Fiscal position tax action maps for НАП: protocols Art. 117, customs declarations, private usage.</p>
-      </div>
-
-      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
-          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🧠 AI Tokenizer</h4>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">5</span>
-        </div>
-        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>ai_tokenize_record / collection</code>, <code>ai_search_similar</code>, <code>ai_list_documents</code>, <code>ai_collection_info</code>.</p>
-        <p style="font-size:0.82em;color:#714BA0;">→ Qdrant vector embeddings per record. Ollama (<code>nomic-embed-text</code>) default. Semantic search.</p>
-      </div>
-
-      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
-          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">📚 Memory System</h4>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">6</span>
-        </div>
-        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>memory_read / write / list / share / pull / delete</code>.</p>
-        <p style="font-size:0.82em;color:#714BA0;">→ Three scopes: per-user, shared team, licensed memory packs. Merged on session start.</p>
-      </div>
-
-      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
-          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🔌 Connections &amp; Auth</h4>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">12</span>
-        </div>
-        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>odoo_connect</code>, <code>connections</code>, <code>cert_info</code>, <code>cert_refresh</code>, <code>user_connection_{add,list,activate,delete}</code>, <code>who_am_i</code>, <code>identify</code>.</p>
-        <p style="font-size:0.82em;color:#714BA0;">→ Multi-tenant aliases, TOFU cert pinning for self-signed, per-user profile isolation.</p>
-      </div>
-
-      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
-          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">📧 Google Workspace</h4>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">11</span>
-        </div>
-        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;">Gmail (search/read/send/labels), Calendar (list/events/CRUD), Drive (read/metadata). OAuth.</p>
-        <p style="font-size:0.82em;color:#714BA0;">→ Email triage, calendar scheduling, Drive file lookup — all from Claude.</p>
-      </div>
-
-      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
-          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">✈️ Telegram</h4>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">7</span>
-        </div>
-        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>telegram_configure / auth / auth_status / search_contacts / get_dialogs / get_messages / send_message</code>.</p>
-        <p style="font-size:0.82em;color:#714BA0;">→ Full MTProto client — user-account, not bot-API — send / read / DM / groups / channels.</p>
-      </div>
-
-      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
-          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🖥️ SSH &amp; Git</h4>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">3</span>
-        </div>
-        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>ssh_execute</code>, <code>git_remote</code>, <code>github_api</code>.</p>
-        <p style="font-size:0.82em;color:#714BA0;">→ Remote command execution with SSH agent forwarding; git metadata and GitHub API escape hatch.</p>
-      </div>
-
-    </div>
-
-    <!-- Proxied infrastructure MCPs -->
-    <h3 style="font-family:'Fraunces',serif;font-size:1.4em;font-weight:600;margin-top:56px;margin-bottom:18px;color:#1A1A2E;">🟢 Proxied infrastructure tools <span style="font-size:0.7em;color:#5C5C70;font-weight:400;">· exposed through unified gateway</span></h3>
-    <div class="tool-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;">
-
-      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
-          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">📦 OCA &amp; Enterprise</h4>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">25</span>
-        </div>
-        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;">OCA: <code>oca_search / clone_repo / clone_all / update / status / deploy / link / migrate / changelog / fix_website / gen_readme / gen_icon / gen_table / gen_requirements</code>. EE: <code>ee_search / clone / depends / modules / oca_conflicts / oca_recommend / deploy / link / unlink / license_status / token_check / update</code>.</p>
-        <p style="font-size:0.82em;color:#714BA0;">→ Clone and maintain the whole OCA constellation; EE module selection + conflict detection.</p>
-      </div>
-
-      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
-          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🐳 Portainer &amp; Docker</h4>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">30</span>
-        </div>
-        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;">Stacks (<code>list / create / update / redeploy</code>), environments, teams, users, access groups, tags, local stacks, <code>dockerProxy</code>, <code>kubernetesProxy</code>.</p>
-        <p style="font-size:0.82em;color:#714BA0;">→ Provision per-tenant MCP stacks, scale k8s, raw Docker API when needed.</p>
-      </div>
-
-      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
-          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">🐙 GitHub</h4>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">36</span>
-        </div>
-        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;">Code / issue / PR / repo / user / discussion search. File contents, repo tree, commits, branches, tags, releases, gists. Actions runs + job logs.</p>
-        <p style="font-size:0.82em;color:#714BA0;">→ Powered by the official <code>ghcr.io/github/github-mcp-server</code>.</p>
-      </div>
-
-      <div class="tool-card" style="background:#fff;border:1px solid rgba(113,75,160,0.15);border-radius:12px;padding:22px;">
-        <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px;">
-          <h4 style="font-family:'Fraunces',serif;font-size:1.1em;color:#1A1A2E;">📁 Filesystem</h4>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:0.78em;color:#714BA0;font-weight:600;">15</span>
-        </div>
-        <p style="font-size:0.88em;color:#5C5C70;line-height:1.6;margin-bottom:10px;"><code>read_file / read_text_file / read_media_file / read_multiple_files</code>, <code>write_file / edit_file / move_file</code>, <code>create_directory / list_directory / directory_tree</code>, <code>search_files</code>.</p>
-        <p style="font-size:0.82em;color:#714BA0;">→ Sandboxed to <code>/repos</code> — safe AI agent filesystem operations.</p>
-      </div>
-
-    </div>
-
-    <p style="margin-top:40px;text-align:center;">
-      <a href="https://github.com/rosenvladimirov/odoo-claude-mcp/blob/2.0/README.md#-mcp-servers" class="btn btn-ghost" target="_blank" rel="noopener">
-        Full tool reference in README →
-      </a>
-    </p>
-  </div>
-</section>
-
-<!-- Use Cases -->
-<section class="use-cases" id="use-cases">
-  <div class="section-inner">
-    <div class="section-label">WHO IT'S FOR</div>
-    <h2 class="section-title">Four audiences, one stack.</h2>
-
-    <div class="use-grid">
-
-      <div class="use-card">
-        <div class="use-icon">⟨/⟩</div>
-        <h3>Odoo Developers</h3>
-        <ul>
-          <li>Live module development with Claude assisting on your running instance</li>
-          <li>RPC-based module deployment — no filesystem access needed</li>
-          <li>Multi-environment workflows — dev, staging, prod in one session</li>
-          <li>OCA contribution flows — clone, test, PR through Claude</li>
-        </ul>
-      </div>
-
-      <div class="use-card">
-        <div class="use-icon">✦</div>
-        <h3>Odoo Consultants</h3>
-        <ul>
-          <li>Manage multiple client databases from one authenticated session</li>
-          <li>Per-client memory — Claude remembers context per customer</li>
-          <li>Shared team knowledge via <code>memory_share</code></li>
-          <li>Bulgaria localization — fiscal positions, VAT, НАП tools built in</li>
-        </ul>
-      </div>
-
-      <div class="use-card">
-        <div class="use-icon">◉</div>
-        <h3>Business Users</h3>
-        <ul>
-          <li>Natural language queries over real Odoo records</li>
-          <li>Invoice extraction via vision LLMs into <code>account.move</code></li>
-          <li>Semantic search — find similar contracts, tickets, records</li>
-          <li>Email & calendar coordination across Odoo, Gmail, Teams</li>
-        </ul>
-      </div>
-
-      <div class="use-card">
-        <div class="use-icon">◆</div>
-        <h3>Platform Operators</h3>
-        <ul>
-          <li>Multi-tenant hosting — isolated endpoints per client</li>
-          <li>Billing integration — usage tracking via Cloudflare AI Gateway</li>
-          <li>White-label <code>claude-terminal</code> for your customers</li>
-          <li>Kubernetes scaling — replicas scale independently by load</li>
-        </ul>
-      </div>
-
-    </div>
-  </div>
-</section>
-
-<!-- Quick Start / Deploy -->
-<section class="deploy" id="deploy">
-  <div class="section-inner">
-    <div class="section-label" id="quickstart">GET STARTED</div>
-    <h2 class="section-title">Three ways to deploy.</h2>
-
-    <div class="deploy-tabs">
-
-      <div class="deploy-card">
-        <div class="deploy-head">
-          <span class="deploy-num">01</span>
-          <h3>Docker Compose</h3>
-          <span class="deploy-tag">Local development</span>
-        </div>
-        <div class="deploy-code">
-<pre><span class="c-comment"># Clone & configure</span>
-<span class="c-prompt">$</span> <span class="c-cmd">git clone</span> <span class="c-str">https://github.com/rosenvladimirov/odoo-claude-mcp.git</span>
-<span class="c-prompt">$</span> <span class="c-cmd">cd</span> odoo-claude-mcp
-<span class="c-prompt">$</span> <span class="c-cmd">cp</span> .env.example .env
-<span class="c-prompt">$</span> <span class="c-cmd">nano</span> .env
-
-<span class="c-comment"># Start the stack</span>
-<span class="c-prompt">$</span> <span class="c-cmd">docker compose up -d</span>
-<span class="c-ok">✓</span> 8 services running</pre>
-        </div>
-      </div>
-
-      <div class="deploy-card deploy-card-featured">
-        <div class="deploy-head">
-          <span class="deploy-num">02</span>
-          <h3>Install script</h3>
-          <span class="deploy-tag">Quickest path</span>
-        </div>
-        <div class="deploy-code">
-<pre><span class="c-comment"># Linux / macOS</span>
-<span class="c-prompt">$</span> <span class="c-cmd">curl -fsSL</span> <span class="c-str">raw.../install.sh</span> | <span class="c-cmd">bash</span>
-
-<span class="c-comment"># Windows (PowerShell admin)</span>
-<span class="c-prompt">&gt;</span> <span class="c-cmd">iwr -useb</span> <span class="c-str">raw.../install.ps1</span> | <span class="c-cmd">iex</span>
-
-<span class="c-ok">✓</span> Docker containers pulled
-<span class="c-ok">✓</span> Env configured interactively
-<span class="c-ok">✓</span> Stack up on localhost:8084</pre>
-        </div>
-      </div>
-
-      <div class="deploy-card">
-        <div class="deploy-head">
-          <span class="deploy-num">03</span>
-          <h3>Kubernetes / K3s</h3>
-          <span class="deploy-tag">Production</span>
-        </div>
-        <div class="deploy-code">
-<pre><span class="c-comment"># Kustomize overlays in k3s/</span>
-<span class="c-prompt">$</span> <span class="c-cmd">cd</span> k3s/overlays/prod
-<span class="c-prompt">$</span> <span class="c-cmd">cp</span> .env.example .env
-<span class="c-prompt">$</span> <span class="c-cmd">cp</span> ../../base/secrets.example.yaml secrets.yaml
-
-<span class="c-comment"># Edit secrets, then deploy</span>
-<span class="c-prompt">$</span> <span class="c-cmd">kubectl apply -k .</span>
-<span class="c-ok">✓</span> Deployed with cert-manager + ingress</pre>
-        </div>
-      </div>
-
-    </div>
-
-    <div class="connector">
-      <div class="connector-text">
-        <div class="section-label">CLAUDE.AI CONNECTOR</div>
-        <h3>Register as a Custom Connector</h3>
-        <p>
-          Once deployed with a public HTTPS endpoint, register the stack in
-          Claude.ai Settings → Connectors as a Custom Connector with bearer token auth.
-          All 197+ MCP tools become available in your Claude conversations immediately.
-        </p>
-        <a href="https://github.com/rosenvladimirov/odoo-claude-mcp#-claudeai-connector" class="btn btn-ghost" target="_blank" rel="noopener">Full setup guide →</a>
-      </div>
-      <div class="connector-visual">
-        <div class="form-mock">
-          <div class="form-row">
-            <label>Custom Connector URL</label>
-            <input type="text" value="https://mcp.yourdomain.com/mcp" readonly>
-          </div>
-          <div class="form-row">
-            <label>Authentication</label>
-            <input type="text" value="Bearer ••••••••••••" readonly>
-          </div>
-          <button class="form-button">Add Connector</button>
-        </div>
+      <p class="caption">Enterprise billing module for hosting providers and BL Consulting tier management. Tracks per-user MCP usage, calculates bills, provisions Portainer stacks per tenant.</p>
+      <ul>
+        <li>8 models: bundle / tenant / usage / invoice / skills</li>
+        <li>Bundle pricing €49–599, millicents precision</li>
+        <li>Portainer client + AES-256 ZIP export</li>
+        <li>BG Trade Registry + sale.order auto-provision</li>
+      </ul>
+      <div class="branches">
+        <span class="branch mono">Odoo 19 · 19.0.1.3.0</span>
       </div>
     </div>
   </div>
 </section>
+</div>
+
+<!-- Tools -->
+<div class="shell">
+<section class="block" id="tools">
+  <div class="tools-head">
+    <div>
+      <div class="eyebrow mono"><span class="num">07</span><span>All 197+ tools</span><span class="line"></span></div>
+      <h2 class="display">Every tool<br>Claude <em>can call</em>.</h2>
+    </div>
+    <p class="lede">Native Odoo RPC tools come from <span class="mono">odoo-rpc-mcp</span>. Proxied infrastructure tools are exposed through the unified gateway from portainer-mcp, github-mcp, oca-mcp, ee-mcp, filesystem-mcp. All authenticated via the same Bearer token.</p>
+  </div>
+
+  <div class="tool-filters mono" id="tool-filters">
+    <button class="on" data-f="all">All · 19</button>
+    <button data-f="native">◉ Native Odoo</button>
+    <button data-f="proxied">◯ Proxied infra</button>
+    <button data-f="new">★ New in 2.10</button>
+  </div>
+
+  <div class="tools" id="tools-grid">
+    <!-- Native -->
+    <div class="tool-card" data-cat="native">
+      <div class="row1"><span class="glyph">⇅</span><span class="count">14</span></div>
+      <h4>CRUD &amp; Search</h4>
+      <div class="toks">
+        <span class="tok">odoo_search</span><span class="tok">odoo_read</span><span class="tok">odoo_create</span><span class="tok">odoo_write</span><span class="tok">odoo_unlink</span><span class="tok">odoo_execute</span><span class="tok">+8</span>
+      </div>
+      <p class="desc">Natural language queries, bulk imports, workflow automation (action_post, action_confirm).</p>
+    </div>
+    <div class="tool-card" data-cat="native">
+      <div class="row1"><span class="glyph">🔍</span><span class="count">4</span></div>
+      <h4>Introspection</h4>
+      <div class="toks">
+        <span class="tok">fields_get</span><span class="tok">list_models</span><span class="tok">module_info</span><span class="tok">version</span>
+      </div>
+      <p class="desc">"Which fields are translate?" "Where is this module installed?"</p>
+    </div>
+    <div class="tool-card newish" data-cat="native new">
+      <span class="new-flag">NEW 2.10</span>
+      <div class="row1"><span class="glyph">🌐</span><span class="count">4</span></div>
+      <h4>Translations</h4>
+      <div class="toks">
+        <span class="tok">list_translatable_fields</span><span class="tok">get_field_translations</span><span class="tok">translate_field</span><span class="tok">translate_html</span>
+      </div>
+      <p class="desc">Translate blog posts, product descriptions, website pages. 3 modes + auto-ZWSP fix.</p>
+    </div>
+    <div class="tool-card newish" data-cat="native new">
+      <span class="new-flag">NEW 2.10</span>
+      <div class="row1"><span class="glyph">🧱</span><span class="count">5</span></div>
+      <h4>Website Snippets</h4>
+      <div class="toks">
+        <span class="tok">list_snippets</span><span class="tok">list_page_snippets</span><span class="tok">add_snippet</span><span class="tok">update_snippet</span><span class="tok">remove_snippet</span>
+      </div>
+      <p class="desc">Swap banner backgrounds, insert CTAs, mutate blog/page HTML via xpath + CSS-property substitutions.</p>
+    </div>
+    <div class="tool-card" data-cat="native">
+      <div class="row1"><span class="glyph">🔐</span><span class="count">7</span></div>
+      <h4>Web Session</h4>
+      <div class="toks">
+        <span class="tok">web_login</span><span class="tok">web_call</span><span class="tok">web_read</span><span class="tok">web_export</span><span class="tok">web_report</span><span class="tok">+2</span>
+      </div>
+      <p class="desc">Cookie-based HTTP. Works through Cloudflare — no XML-RPC endpoints needed.</p>
+    </div>
+    <div class="tool-card" data-cat="native">
+      <div class="row1"><span class="glyph">📎</span><span class="count">4</span></div>
+      <h4>Attachments</h4>
+      <div class="toks">
+        <span class="tok">attachment_upload</span><span class="tok">download</span><span class="tok">public_access_download</span><span class="tok">image</span>
+      </div>
+      <p class="desc">Binary pipeline including vision-based invoice OCR.</p>
+    </div>
+    <div class="tool-card" data-cat="native">
+      <div class="row1"><span class="glyph">📊</span><span class="count">6</span></div>
+      <h4>Reporting</h4>
+      <div class="toks">
+        <span class="tok">odoo_report</span><span class="tok">report_pdf</span><span class="tok">report_xlsx</span><span class="tok">report_html</span><span class="tok">export_csv</span><span class="tok">+1</span>
+      </div>
+      <p class="desc">PDF invoices, XLSX exports, HTML dashboards — all headless.</p>
+    </div>
+    <div class="tool-card" data-cat="native">
+      <div class="row1"><span class="glyph">🌍</span><span class="count">8</span></div>
+      <h4>Portal &amp; Public</h4>
+      <div class="toks">
+        <span class="tok">portal_home</span><span class="tok">orders</span><span class="tok">invoices</span><span class="tok">purchases</span><span class="tok">tickets</span><span class="tok">shop</span><span class="tok">sitemap</span><span class="tok">barcode</span>
+      </div>
+      <p class="desc">Headless customer portal — orders, invoices, tickets, shop.</p>
+    </div>
+    <div class="tool-card" data-cat="native">
+      <div class="row1"><span class="glyph">🇧🇬</span><span class="count">5</span></div>
+      <h4>Bulgaria Localization</h4>
+      <div class="toks">
+        <span class="tok">fp_list</span><span class="tok">details</span><span class="tok">types</span><span class="tok">configure</span><span class="tok">remove_action</span>
+      </div>
+      <p class="desc">Fiscal position tax action maps for НАП: protocols Art. 117, customs declarations, private usage.</p>
+    </div>
+    <div class="tool-card" data-cat="native">
+      <div class="row1"><span class="glyph">🧠</span><span class="count">5</span></div>
+      <h4>AI Tokenizer</h4>
+      <div class="toks">
+        <span class="tok">ai_tokenize_record</span><span class="tok">ai_tokenize_collection</span><span class="tok">ai_search_similar</span><span class="tok">ai_list_documents</span><span class="tok">collection_info</span>
+      </div>
+      <p class="desc">Qdrant vector embeddings per record. Ollama (nomic-embed-text) default. Semantic search.</p>
+    </div>
+    <div class="tool-card" data-cat="native">
+      <div class="row1"><span class="glyph">📚</span><span class="count">6</span></div>
+      <h4>Memory System</h4>
+      <div class="toks">
+        <span class="tok">memory_read</span><span class="tok">write</span><span class="tok">list</span><span class="tok">share</span><span class="tok">pull</span><span class="tok">delete</span>
+      </div>
+      <p class="desc">Three scopes: per-user, shared team, licensed memory packs. Merged on session start.</p>
+    </div>
+    <div class="tool-card" data-cat="native">
+      <div class="row1"><span class="glyph">🔌</span><span class="count">12</span></div>
+      <h4>Connections &amp; Auth</h4>
+      <div class="toks">
+        <span class="tok">odoo_connect</span><span class="tok">connections</span><span class="tok">cert_info</span><span class="tok">cert_refresh</span><span class="tok">user_connection_*</span><span class="tok">who_am_i</span><span class="tok">identify</span>
+      </div>
+      <p class="desc">Multi-tenant aliases, TOFU cert pinning for self-signed, per-user profile isolation.</p>
+    </div>
+    <div class="tool-card" data-cat="native">
+      <div class="row1"><span class="glyph">📧</span><span class="count">11</span></div>
+      <h4>Google Workspace</h4>
+      <div class="toks">
+        <span class="tok">gmail_search</span><span class="tok">gmail_send</span><span class="tok">calendar_events</span><span class="tok">drive_read</span><span class="tok">drive_metadata</span><span class="tok">+6</span>
+      </div>
+      <p class="desc">Gmail · Calendar · Drive over OAuth. Email triage, scheduling, Drive file lookup — all from Claude.</p>
+    </div>
+    <div class="tool-card" data-cat="native">
+      <div class="row1"><span class="glyph">✈️</span><span class="count">7</span></div>
+      <h4>Telegram</h4>
+      <div class="toks">
+        <span class="tok">telegram_configure</span><span class="tok">auth</span><span class="tok">search_contacts</span><span class="tok">get_dialogs</span><span class="tok">get_messages</span><span class="tok">send_message</span>
+      </div>
+      <p class="desc">Full MTProto client — user-account, not bot-API. Send / read / DM / groups / channels.</p>
+    </div>
+    <div class="tool-card" data-cat="native">
+      <div class="row1"><span class="glyph">🖥️</span><span class="count">3</span></div>
+      <h4>SSH &amp; Git</h4>
+      <div class="toks">
+        <span class="tok">ssh_execute</span><span class="tok">git_remote</span><span class="tok">github_api</span>
+      </div>
+      <p class="desc">Remote command execution with SSH agent forwarding; git metadata and GitHub API escape hatch.</p>
+    </div>
+
+    <!-- Proxied -->
+    <div class="tool-card" data-cat="proxied">
+      <div class="row1"><span class="glyph">📦</span><span class="count">25</span></div>
+      <h4>OCA &amp; Enterprise</h4>
+      <div class="toks">
+        <span class="tok">oca_search</span><span class="tok">clone_repo</span><span class="tok">migrate</span><span class="tok">gen_readme</span><span class="tok">ee_depends</span><span class="tok">oca_conflicts</span><span class="tok">+19</span>
+      </div>
+      <p class="desc">Clone and maintain the whole OCA constellation; EE module selection + conflict detection.</p>
+    </div>
+    <div class="tool-card" data-cat="proxied">
+      <div class="row1"><span class="glyph">🐳</span><span class="count">30</span></div>
+      <h4>Portainer &amp; Docker</h4>
+      <div class="toks">
+        <span class="tok">stacks_list</span><span class="tok">create</span><span class="tok">update</span><span class="tok">redeploy</span><span class="tok">environments</span><span class="tok">teams</span><span class="tok">users</span><span class="tok">k8sProxy</span><span class="tok">+22</span>
+      </div>
+      <p class="desc">Provision per-tenant MCP stacks, scale k8s, raw Docker API when needed.</p>
+    </div>
+    <div class="tool-card" data-cat="proxied">
+      <div class="row1"><span class="glyph">🐙</span><span class="count">36</span></div>
+      <h4>GitHub</h4>
+      <div class="toks">
+        <span class="tok">code_search</span><span class="tok">issues</span><span class="tok">prs</span><span class="tok">repo_tree</span><span class="tok">commits</span><span class="tok">actions_runs</span><span class="tok">job_logs</span><span class="tok">+29</span>
+      </div>
+      <p class="desc">Powered by the official ghcr.io/github/github-mcp-server. Full REST passthrough.</p>
+    </div>
+    <div class="tool-card" data-cat="proxied">
+      <div class="row1"><span class="glyph">📁</span><span class="count">15</span></div>
+      <h4>Filesystem</h4>
+      <div class="toks">
+        <span class="tok">read_file</span><span class="tok">write_file</span><span class="tok">edit_file</span><span class="tok">move_file</span><span class="tok">create_directory</span><span class="tok">directory_tree</span><span class="tok">+9</span>
+      </div>
+      <p class="desc">Sandboxed to /repos — safe AI agent filesystem operations.</p>
+    </div>
+  </div>
+</section>
+</div>
+
+<!-- Audiences -->
+<div class="shell">
+<section class="block" id="audiences">
+  <div class="eyebrow mono"><span class="num">08</span><span>Who it's for</span><span class="line"></span></div>
+  <h2 class="display">Four audiences.<br><em>One stack.</em></h2>
+
+  <div class="auds">
+    <div class="aud">
+      <div class="sym">⟨/⟩</div>
+      <h4>Odoo Developers</h4>
+      <ul>
+        <li>Live module development with Claude on your running instance</li>
+        <li>RPC-based module deployment — no filesystem access needed</li>
+        <li>Multi-environment workflows — dev, staging, prod in one session</li>
+        <li>OCA contribution flows — clone, test, PR through Claude</li>
+      </ul>
+    </div>
+    <div class="aud">
+      <div class="sym">✦</div>
+      <h4>Odoo Consultants</h4>
+      <ul>
+        <li>Multiple client databases from one authenticated session</li>
+        <li>Per-client memory — Claude remembers context per customer</li>
+        <li>Shared team knowledge via memory_share</li>
+        <li>Bulgaria localization — fiscal positions, VAT, НАП tools</li>
+      </ul>
+    </div>
+    <div class="aud">
+      <div class="sym">◉</div>
+      <h4>Business Users</h4>
+      <ul>
+        <li>Natural language queries over real Odoo records</li>
+        <li>Invoice extraction via vision LLMs into account.move</li>
+        <li>Semantic search — find similar contracts, tickets, records</li>
+        <li>Email &amp; calendar coordination across Odoo, Gmail, Teams</li>
+      </ul>
+    </div>
+    <div class="aud">
+      <div class="sym">◆</div>
+      <h4>Platform Operators</h4>
+      <ul>
+        <li>Multi-tenant hosting — isolated endpoints per client</li>
+        <li>Billing integration — usage tracking via Cloudflare AI Gateway</li>
+        <li>White-label claude-terminal for your customers</li>
+        <li>Kubernetes scaling — replicas scale independently by load</li>
+      </ul>
+    </div>
+  </div>
+</section>
+</div>
+
+<!-- Deploy -->
+<div class="shell">
+<section class="block" id="deploy">
+  <div class="eyebrow mono"><span class="num">09</span><span>Get started</span><span class="line"></span></div>
+  <h2 class="display">Three ways<br><em>to deploy</em>.</h2>
+
+  <div class="deploy">
+    <div class="dcard">
+      <header>
+        <div><span class="idx">01 / DOCKER</span><h4>Docker Compose</h4><small>Local development · Solo developer</small></div>
+      </header>
+      <pre><span class="c"># Clone &amp; configure</span>
+$ <span class="g">git clone</span> <span class="a">https://github.com/</span>
+  <span class="a">rosenvladimirov/odoo-claude-mcp.git</span>
+$ <span class="g">cd</span> odoo-claude-mcp
+$ <span class="g">cp</span> .env.example .env
+$ <span class="g">nano</span> .env
+
+<span class="c"># Start the stack</span>
+$ <span class="g">docker compose up</span> -d
+<span class="a">✓ 8 services running</span></pre>
+    </div>
+    <div class="dcard">
+      <header>
+        <div><span class="idx">02 / INSTALL</span><h4>Install script</h4><small>Quickest path · Any OS</small></div>
+      </header>
+      <pre><span class="c"># Linux / macOS</span>
+$ <span class="g">curl</span> -fsSL raw.../install.sh | bash
+
+<span class="c"># Windows (PowerShell admin)</span>
+&gt; <span class="g">iwr</span> -useb raw.../install.ps1 | iex
+
+<span class="a">✓ Docker containers pulled
+✓ Env configured interactively
+✓ Stack up on localhost:8084</span></pre>
+    </div>
+    <div class="dcard">
+      <header>
+        <div><span class="idx">03 / K3S</span><h4>Kubernetes</h4><small>Production · Multi-tenant SaaS</small></div>
+      </header>
+      <pre><span class="c"># Kustomize overlays in k3s/</span>
+$ <span class="g">cd</span> k3s/overlays/prod
+$ <span class="g">cp</span> .env.example .env
+$ <span class="g">cp</span> ../../base/secrets.example.yaml
+  secrets.yaml
+
+<span class="c"># Edit secrets, then deploy</span>
+$ <span class="g">kubectl apply</span> -k .
+<span class="a">✓ Deployed with cert-manager
+✓ Ingress + TLS ready</span></pre>
+    </div>
+  </div>
+</section>
+</div>
 
 <!-- Bulgaria -->
-<section class="bg-section">
-  <div class="section-inner">
-    <div class="bg-grid">
-      <div>
-        <div class="section-label">BULGARIA LOCALIZATION</div>
-        <h2 class="section-title">First-class БГ support.</h2>
-        <p class="section-lead">
-          Maintained by the OCA <code>l10n-bulgaria</code> maintainer.
-          Bulgarian-specific features are not an afterthought — they're native.
-        </p>
-        <ul class="bg-list">
-          <li><strong>НАП integration</strong> — fiscal positions, VAT tax maps, audit reports</li>
-          <li><strong>l10n_bg_* module family</strong> — complete ecosystem support</li>
-          <li><strong>Образец 1</strong> — monthly НАП declaration (Наредба №Н-13/2019)</li>
-          <li><strong>Bulgarian partner ID</strong> — UIC/ЕИК, legal forms, NACE codes</li>
-          <li><strong>Transliteration</strong> — BG ⇄ EN ⇄ GR mixin for partner names</li>
-          <li><strong>НАП справка-декларация</strong> — SQL-engine audit reports</li>
-        </ul>
-      </div>
-      <div class="bg-flag">
-        <div class="flag-stripe flag-white"></div>
-        <div class="flag-stripe flag-green"></div>
-        <div class="flag-stripe flag-red"></div>
-      </div>
+<div class="shell">
+<section class="block" id="bulgaria">
+  <div class="eyebrow mono"><span class="num">10</span><span>Bulgaria localization</span><span class="line"></span></div>
+  <div class="bgloc">
+    <div>
+      <h2 class="display">First-class<br><em>БГ support</em>.</h2>
+      <p class="lede">Maintained by the OCA <span class="mono">l10n-bulgaria</span> maintainer. Bulgarian-specific features are not an afterthought — they're native. The only Odoo partner in CEE with direct НАП reporting integration.</p>
+    </div>
+    <div>
+      <ul>
+        <li><b>НАП integration</b><span>Fiscal positions, VAT tax maps, audit reports — protocols Art. 117 ready.</span></li>
+        <li><b>l10n_bg_* family</b><span>Complete ecosystem support, maintained on the OCA organization.</span></li>
+        <li><b>Образец 1</b><span>Monthly НАП declaration — compliant with Наредба № Н-13/2019.</span></li>
+        <li><b>Partner ID</b><span>UIC / ЕИК, legal forms, NACE codes wired into partner model.</span></li>
+        <li><b>Transliteration</b><span>BG ⇄ EN ⇄ GR mixin for partner names. Quiet, consistent.</span></li>
+        <li><b>Справка-декларация</b><span>НАП-flavored SQL-engine audit reports, pre-configured.</span></li>
+      </ul>
     </div>
   </div>
 </section>
+</div>
 
 <!-- Maintainer -->
-<section class="maintainer">
-  <div class="section-inner">
-    <div class="maintainer-card">
-      <div class="maintainer-left">
-        <div class="section-label">MAINTAINED BY</div>
-        <h2 class="maintainer-name">Rosen Vladimirov</h2>
-        <div class="maintainer-role">Founder, BL Consulting · Odoo Silver Partner · OCA l10n-bulgaria maintainer</div>
-        <p class="maintainer-bio">
-          10+ years specializing in Odoo implementations for Bulgarian businesses.
-          Executing company: <em>Terraros Комерс ЕООД</em>. The only Odoo partner in CEE
-          with direct НАП reporting integration.
-        </p>
-        <div class="maintainer-links">
-          <a href="mailto:vladimirov.rosen@gmail.com">vladimirov.rosen@gmail.com</a>
-          <span class="dim">·</span>
-          <a href="https://github.com/rosenvladimirov" target="_blank" rel="noopener">@rosenvladimirov</a>
-          <span class="dim">·</span>
-          <a href="https://www.youtube.com/@DavidRosen8424-Gaming" target="_blank" rel="noopener">YouTube</a>
-          <span class="dim">·</span>
-          <a href="https://www.linkedin.com/in/rosen-vladimirov-a5242823/" target="_blank" rel="noopener">LinkedIn</a>
-          <span class="dim">·</span>
-          <a href="https://bl-consulting.net" target="_blank" rel="noopener">bl-consulting.net</a>
-        </div>
-      </div>
-      <div class="maintainer-right">
-        <div class="flag-mark">🇧🇬</div>
-        <div class="made-in">Made in<br>Bulgaria</div>
+<div class="shell">
+<section class="block" id="maintainer">
+  <div class="eyebrow mono"><span class="num">11</span><span>Maintained by</span><span class="line"></span></div>
+  <div class="maintainer">
+    <div class="portrait">
+      <span class="ph">PORTRAIT · 4:5<br>drop image here</span>
+    </div>
+    <div>
+      <h2 class="display" style="font-size:clamp(44px,5.5vw,72px)">Rosen<br>Vladimirov.</h2>
+      <p style="font-size:15px;line-height:1.55;color:var(--ink-2);margin:24px 0;max-width:52ch">
+        Founder, <b>BL Consulting</b> · Odoo Silver Partner · OCA <span class="mono">l10n-bulgaria</span> maintainer. 10+ years specializing in Odoo implementations for Bulgarian businesses. Executing company <em class="serif">Terraros Комерс ЕООД</em>.
+      </p>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <a class="btn" href="/cdn-cgi/l/email-protection#12647e73767b7f7b607d643c607d61777c52757f737b7e3c717d7f"><span class="__cf_email__" data-cfemail="ccbaa0ada8a5a1a5bea3bae2bea3bfa9a28caba1ada5a0e2afa3a1">[email&#160;protected]</span></a>
+        <a class="btn" href="https://github.com/rosenvladimirov">@rosenvladimirov</a>
+        <a class="btn" href="https://www.youtube.com/@DavidRosen8424-Gaming">YouTube</a>
+        <a class="btn" href="https://bl-consulting.net">bl-consulting.net</a>
       </div>
     </div>
   </div>
 </section>
+</div>
 
 <!-- Footer -->
-<footer class="footer">
-  <div class="section-inner">
-    <div class="footer-grid">
-      <div class="footer-brand">
-        <div class="footer-logo">
-          <span class="logo-mark">◈</span>
-          <span>odoo/claude/mcp</span>
-        </div>
-        <p>Production-grade MCP server suite for Odoo ERP</p>
-        <p class="footer-license">Licensed under AGPL-3.0 · © 2026 Rosen Vladimirov</p>
-      </div>
-      <div class="footer-col">
-        <div class="footer-col-title">Project</div>
-        <a href="https://github.com/rosenvladimirov/odoo-claude-mcp" target="_blank" rel="noopener">GitHub</a>
-        <a href="https://www.youtube.com/@DavidRosen8424-Gaming" target="_blank" rel="noopener">YouTube demos</a>
-        <a href="https://github.com/rosenvladimirov/odoo-claude-mcp/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a>
-        <a href="https://github.com/rosenvladimirov/odoo-claude-mcp/blob/main/README_BG.md" target="_blank" rel="noopener">README (BG)</a>
-        <a href="https://github.com/rosenvladimirov/odoo-claude-mcp/issues" target="_blank" rel="noopener">Issues</a>
-      </div>
-      <div class="footer-col">
-        <div class="footer-col-title">Ecosystem</div>
-        <a href="https://www.odoo.com" target="_blank" rel="noopener">Odoo</a>
-        <a href="https://odoo-community.org" target="_blank" rel="noopener">OCA</a>
-        <a href="https://github.com/OCA/l10n-bulgaria" target="_blank" rel="noopener">l10n-bulgaria</a>
-        <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener">MCP Protocol</a>
-      </div>
-      <div class="footer-col">
-        <div class="footer-col-title">Powered by</div>
-        <a href="https://www.anthropic.com" target="_blank" rel="noopener">Anthropic · Claude</a>
-        <a href="https://qdrant.tech" target="_blank" rel="noopener">Qdrant</a>
-        <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a>
-        <a href="https://xtermjs.org" target="_blank" rel="noopener">xterm.js</a>
-      </div>
+<div class="shell">
+<footer>
+  <div class="foot-grid">
+    <div>
+      <div class="brand mono" style="margin-bottom:14px"><span class="mark"></span><span>odoo<span class="slash">/</span>claude<span class="slash">/</span><span class="accent">mcp</span></span></div>
+      <p style="font-size:13px;line-height:1.55;color:var(--ink-2);max-width:36ch">Production-grade MCP server suite for Odoo ERP. Self-hosted, multi-tenant, Claude.ai connector ready.</p>
+      <p style="font-size:12px;color:var(--ink-3);margin-top:20px" class="mono">🇧🇬 Made in Bulgaria · AGPL-3.0 · © 2026</p>
+    </div>
+    <div>
+      <h5>Project</h5>
+      <ul>
+        <li><a href="#">GitHub</a></li>
+        <li><a href="#">YouTube demos</a></li>
+        <li><a href="#">Changelog</a></li>
+        <li><a href="#">README (BG)</a></li>
+        <li><a href="#">Issues</a></li>
+      </ul>
+    </div>
+    <div>
+      <h5>Ecosystem</h5>
+      <ul>
+        <li><a href="#">Odoo</a></li>
+        <li><a href="#">OCA</a></li>
+        <li><a href="#">l10n-bulgaria</a></li>
+        <li><a href="#">MCP Protocol</a></li>
+      </ul>
+    </div>
+    <div>
+      <h5>Powered by</h5>
+      <ul>
+        <li><a href="#">Anthropic · Claude</a></li>
+        <li><a href="#">Qdrant</a></li>
+        <li><a href="#">Ollama</a></li>
+        <li><a href="#">xterm.js</a></li>
+      </ul>
     </div>
   </div>
+  <div class="foot-bot">
+    <span>odoo-claude-mcp · v2.10.0 · released 2026-04-19</span>
+    <span>Sofia 42.698°N · 23.319°E</span>
+  </div>
 </footer>
+</div>
 
+<!-- Tweaks panel -->
+<div class="tweaks-panel" id="tweaks">
+  <h6>Tweaks <span class="accent mono">●</span></h6>
+  <div class="tw-row">
+    <label>Palette</label>
+    <div class="seg" data-key="palette">
+      <button data-v="paper" class="on">Paper</button>
+      <button data-v="ink">Ink</button>
+      <button data-v="moss">Moss</button>
+    </div>
+  </div>
+  <div class="tw-row">
+    <label>Accent</label>
+    <div class="seg" data-key="accent">
+      <button data-v="cinnabar" class="on">Cinn.</button>
+      <button data-v="indigo">Indigo</button>
+      <button data-v="amber">Amber</button>
+      <button data-v="moss">Moss</button>
+    </div>
+  </div>
+  <div class="tw-row">
+    <label>Grid overlay</label>
+    <div class="seg" data-key="showGrid">
+      <button data-v="false" class="on">Off</button>
+      <button data-v="true">On</button>
+    </div>
+  </div>
+</div>
+
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js" defer></script><script>
+/* ---------- Terminal simulator ---------- */
+const SCRIPTS = {
+  connect: [
+    {t:'$ claude mcp add odoo-mcp \\\\', cls:'prompt'},
+    {t:'    --url https://mcp.yourdomain.com/mcp \\\\'},
+    {t:'    --header "Authorization: Bearer $TOKEN"'},
+    {t:''},
+    {t:'✓ Connected to odoo-mcp (80 tools loaded)', cls:'ok'},
+    {t:'✓ Profile: rosen · 13 Odoo connections', cls:'ok'},
+    {t:'✓ Memory pack: l10n_bg merged (42 entries)', cls:'ok'},
+    {t:''},
+    {t:'> try a query, e.g. "unpaid invoices over €5000"', cls:'dim'},
+  ],
+  query: [
+    {t:'$ claude', cls:'prompt'},
+    {t:'> search our unpaid invoices over €5,000'},
+    {t:''},
+    {t:'[odoo_search_read] account.move', cls:'tool'},
+    {t:'  domain: [state=posted, payment_state=not_paid,', cls:'dim'},
+    {t:'           amount_total_signed > 5000]', cls:'dim'},
+    {t:''},
+    {t:'Found 7 records · Total: €42,380.50', cls:'ok'},
+    {t:'  · INV/2026/0412 · ACME BG EOOD    €11,220.00', cls:'mauve'},
+    {t:'  · INV/2026/0398 · Варна Порт ООД   €8,400.00', cls:'mauve'},
+    {t:'  · INV/2026/0381 · Softel BG       €7,950.00', cls:'mauve'},
+    {t:'  · … 4 more'},
+  ],
+  ai: [
+    {t:'$ claude', cls:'prompt'},
+    {t:'> tokenize and index them with ai_tokenize_record'},
+    {t:''},
+    {t:'[ai_tokenize_record] ×7', cls:'tool'},
+    {t:'  model: nomic-embed-text (Ollama, local)', cls:'dim'},
+    {t:'  collection: account_move_unpaid_2026', cls:'dim'},
+    {t:''},
+    {t:'Qdrant: vectors upserted ✓', cls:'ok'},
+    {t:'✓ Done. Ready for semantic search.', cls:'ok'},
+    {t:''},
+    {t:'> find similar invoices to INV/2026/0412', cls:'dim'},
+  ],
+  translate: [
+    {t:'$ claude', cls:'prompt'},
+    {t:'> translate all blog posts to Bulgarian'},
+    {t:''},
+    {t:'[odoo_list_translatable_fields]', cls:'tool'},
+    {t:'  model: blog.post · 4 fields', cls:'dim'},
+    {t:''},
+    {t:'[odoo_translate_html] × 12 posts', cls:'tool'},
+    {t:'  mode: terms · auto-ZWSP: on', cls:'dim'},
+    {t:'  target: bg_BG', cls:'dim'},
+    {t:''},
+    {t:'✓ 412 translation terms written', cls:'ok'},
+    {t:'✓ 0 conflicts, 0 ZWSP injection failures', cls:'ok'},
+  ],
+};
+
+const termBody = document.getElementById('term-body');
+const termIn = document.getElementById('term-in');
+const termForm = document.getElementById('term-form');
+const tabs = document.querySelectorAll('.term-tabs button');
+
+let typeTimer = null;
+function typeLines(lines, idx=0){
+  if(idx===0) termBody.innerHTML='';
+  if(idx>=lines.length){
+    const caret=document.createElement('div');
+    caret.className='caret';
+    termBody.appendChild(caret);
+    return;
+  }
+  const line = lines[idx];
+  const div = document.createElement('div');
+  div.className = line.cls || '';
+  termBody.appendChild(div);
+  const text = line.t;
+  let i=0;
+  const speed = text.length>40? 8 : 18;
+  function tick(){
+    div.textContent = text.slice(0,i++);
+    if(i<=text.length) typeTimer = setTimeout(tick, speed);
+    else typeTimer = setTimeout(()=>typeLines(lines, idx+1), text===''?50:180);
+  }
+  tick();
+}
+function runTab(key){
+  if(typeTimer) clearTimeout(typeTimer);
+  tabs.forEach(b=>b.classList.toggle('on', b.dataset.tab===key));
+  typeLines(SCRIPTS[key]);
+}
+tabs.forEach(b=>b.addEventListener('click',()=>runTab(b.dataset.tab)));
+runTab('connect');
+
+termForm.addEventListener('submit', e=>{
+  e.preventDefault();
+  const v = termIn.value.trim(); if(!v) return;
+  if(typeTimer) clearTimeout(typeTimer);
+  termBody.innerHTML='';
+  const lines = [
+    {t:'$ claude', cls:'prompt'},
+    {t:'> '+v},
+    {t:''},
+    {t:'[planner] routing to odoo-rpc-mcp · web_search tool', cls:'tool'},
+    {t:'  thinking…', cls:'dim'},
+  ];
+  typeLines(lines);
+  termIn.value='';
+  setTimeout(()=>{
+    const d=document.createElement('div');d.className='ok';d.textContent='✓ Response drafted · 1.2s · 14 records scanned';termBody.appendChild(d);
+  }, 1800);
+});
+
+/* ---------- Tool filters ---------- */
+document.querySelectorAll('#tool-filters button').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    document.querySelectorAll('#tool-filters button').forEach(b=>b.classList.remove('on'));
+    btn.classList.add('on');
+    const f = btn.dataset.f;
+    document.querySelectorAll('.tool-card').forEach(c=>{
+      const cats = (c.dataset.cat||'').split(' ');
+      c.style.display = (f==='all' || cats.includes(f)) ? '' : 'none';
+    });
+  });
+});
+
+/* ---------- Tweaks ---------- */
+const applyTweaks = (t)=>{
+  document.body.dataset.palette = t.palette;
+  document.body.dataset.showgrid = String(t.showGrid);
+  document.body.dataset.accent = t.accent;
+};
+applyTweaks(TWEAKS);
+
+function setTweak(key,val){
+  if(val==='true') val=true; else if(val==='false') val=false;
+  TWEAKS[key]=val;
+  applyTweaks(TWEAKS);
+  document.querySelectorAll(`.tw-row .seg[data-key="${key}"] button`).forEach(b=>{
+    b.classList.toggle('on', String(b.dataset.v)===String(val));
+  });
+  window.parent.postMessage({type:'__edit_mode_set_keys', edits:{[key]:val}},'*');
+}
+
+document.querySelectorAll('.tw-row .seg').forEach(seg=>{
+  const key = seg.dataset.key;
+  seg.querySelectorAll('button').forEach(b=>{
+    b.addEventListener('click',()=>setTweak(key, b.dataset.v));
+  });
+});
+
+window.addEventListener('message', e=>{
+  const d=e.data||{};
+  if(d.type==='__activate_edit_mode') document.getElementById('tweaks').classList.add('on');
+  if(d.type==='__deactivate_edit_mode') document.getElementById('tweaks').classList.remove('on');
+});
+window.parent.postMessage({type:'__edit_mode_available'},'*');
+</script>
 </body>
 </html>
