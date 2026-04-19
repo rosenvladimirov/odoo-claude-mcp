@@ -13,6 +13,8 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
+__version__ = "2.10.0"
+
 import asyncio
 import json
 import logging

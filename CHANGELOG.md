@@ -7,6 +7,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.10.0] — 2026-04-19
+
+### Added — 4 translate tools (multi-language field writes/reads)
+- `odoo_list_translatable_fields(model)` — discovers which fields on a
+  model are translatable; classifies each as `simple` (translate=True),
+  `html` (html_translate), `xml` (xml_translate), `callable` (other
+  truthy), or `none`. Field type + name heuristic compensates for
+  XML-RPC flattening callable values to `True`.
+- `odoo_get_field_translations(model, res_id, field_name)` — reads
+  current per-lang translations. Auto-detects kind and uses the right
+  API surface (`get_field_translations` on 16+, `ir.translation`
+  fallback pre-16).
+- `odoo_translate_field` — writes translations for simple
+  `translate=True` fields. Validates field + lang activation + refuses
+  HTML/XML kinds with an actionable error pointing to the right tool.
+  Version-oriented: 16+ native, <16 ir.translation fallback.
+- `odoo_translate_html` — writes translations for `html_translate` /
+  `xml_translate` fields. Three modes:
+  - `extract` — read-only; returns canonical terms as Odoo's engine
+    sees them (HTML blocks preserving inline tags).
+  - `terms` — direct `{lang: {src_term: tr_term}}` map.
+  - `replace` — `{lang: full_html_string}`; delegated to Odoo ORM via
+    `write(..., context={'lang': lg})` so the native
+    `html_translate`/`xml_translate` engine aligns terms — same path
+    the Website editor uses.
+
+### Added — 5 website snippet tools (widgets + banners)
+- `odoo_website_list_snippets` — list available Odoo snippet templates
+  (ir.ui.view with key containing `.s_`). Categorises: structure /
+  content / dynamic / effect / unknown. Filters by category, module,
+  search keyword.
+- `odoo_website_list_page_snippets(target)` — lxml-parses a target HTML
+  field (blog.post.content, ir.ui.view.arch_db, product.template.
+  website_description, etc.), returns all snippets with index, xpath,
+  data-name, text preview, background URL. Detection via both
+  `data-snippet` attr AND first `s_*` class (Odoo strips data-snippet
+  on some saves).
+- `odoo_website_add_snippet` — fetches snippet arch from
+  `ir.ui.view`, extracts root element (skips `<template>` / `<t>`
+  wrappers), applies optional pre-insertion substitutions, inserts at
+  position (`end`, `begin`, `after`, `before`, `replace`) relative to
+  optional anchor_xpath.
+- `odoo_website_update_snippet` — locates snippet by xpath, applies
+  substitutions. Syntax:
+  - `{'.//h2': 'Title'}` — text replace
+  - `{'.//img/@src': 'url'}` — attribute set
+  - `{'./div/@style:background-image': 'url(...)'}` — CSS property
+    (preserves other style props)
+- `odoo_website_remove_snippet` — removes snippet at xpath.
+
+### Fixed — auto-ZWSP to mark identical translations as translated
+- Odoo's `update_field_translations` silently drops `(lang, term)`
+  entries where value == source; the website translation editor then
+  flags those as "untranslated" even when the translator intentionally
+  kept them identical (URLs, brand names, code refs).
+- Both `odoo_translate_field` and `odoo_translate_html` now
+  transparently prefix identical values with U+200B (zero-width space),
+  so Odoo keeps them as explicit "translated, kept identical" entries.
+  Opt-out via `mark_identical_as_translated=false`.
+- Response includes `zwsp_filled_identical: {lang: count}`.
+
+### Fixed — earlier translate tool regressions
+- `_field_translate_kind` now uses field type + name heuristic as
+  fallback because XML-RPC flattens callable translate values to True.
+- `odoo_translate_html(mode='extract')` now correctly parses the flat
+  per-term-per-lang list structure of `get_field_translations()` for
+  html_translate fields (was assuming nested dict).
+- `odoo_translate_html(mode='replace')` rewritten to delegate to
+  Odoo's native engine via `write()` + lang context (previous stdlib
+  HTMLParser approach mismatched term counts for nested HTML).
+
+### Added — lxml dependency
+- `requirements.txt`: `lxml>=5.2.0` for snippet HTML parsing/mutation.
+
+### Verified
+- E2E test against BL Consulting blog.post id=180 (Odoo 19.0+e):
+  51 terms extracted, BG translations intact, banner image swap +
+  CTA card add/remove round-trip clean.
+
+## [2.9.x] — 2026-04-18 (intermediate rebuilds)
+
+Development iterations during 2.10 feature work. Use 2.10.0 for
+production.
+
+## [2.8.0] — 2026-04-18
+
+### Added — verify_ssl + cert pinning (TOFU)
+- Per-connection `verify_ssl` flag on OdooConnection. When disabled,
+  the first HTTPS call fetches + pins the peer cert under
+  `/data/ssl_certs/<alias>.pem`; subsequent calls verify against the
+  pinned cert (trust-on-first-use). New tools: `odoo_cert_info`,
+  `odoo_cert_refresh`.
+- `MCP_ADMIN_TOKEN` env + `/admin/memory/{upload,remove,list}`
+  endpoints for memory pack management.
+
+## [2.7.0] — 2026-04-18
+
+### Added — Licensed memory scope
+- Per-tenant memory storage with `memory_share` scope `licensed`.
+
 ### Fixed — Cloudflare Bot Fight Mode false positives
 - `odoo-rpc-mcp/server.py:_xmlrpc_validate` used the default
   `xmlrpc.client.ServerProxy` transport, which sends

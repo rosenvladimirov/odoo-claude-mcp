@@ -38,6 +38,68 @@ Unlike single-purpose MCP wrappers, this stack is built for **real production us
 
 ---
 
+## 🛤 Two Tracks — Which Branch Do You Want?
+
+This project ships on **two parallel branches**, each targeting a different
+audience. Pick the track that matches your role.
+
+### 🧑‍💼 Track 2.x — End Users (current stable, `branch 2.0`)
+
+**Who:** Odoo end-users, accountants, Bulgarian SMEs, developers who work
+with a single Odoo stack, content teams managing website/blog.
+
+**What you get:**
+
+- All **188+ MCP tools** for day-to-day Odoo work (CRUD, search, RPC,
+  introspection, attachments, reports, web session)
+- **Multi-language field management** (`odoo_translate_field` +
+  `odoo_translate_html` + 2 helpers — covers blog.post, product
+  descriptions, website pages, arch_db) ★ new in 2.10
+- **Website snippet management** (list / add / update / remove
+  snippets on blog posts and pages, with background image swaps and
+  substitutions) ★ new in 2.10
+- **Bulgaria localization** (fiscal positions, VAT, НАП integration)
+- **AI tokenizer** (Qdrant + Ollama embeddings per Odoo record)
+- **Memory system** (shared + per-user + licensed memory packs)
+- **Google / Telegram / Teams** integration
+- **Claude.ai connector** — Bearer-token HTTPS endpoint ready
+
+**Docker tags:** `:latest`, `:stable`, `:2.x.y` (current: **2.10.0**)
+
+**Documentation:** this README
+
+### 🔧 Track 3.x — Implementers / Integrators (preview, `branch 3.0`)
+
+**Who:** Odoo implementation partners, OCA community contributors,
+SaaS MSPs running multiple client instances, integrator agencies.
+
+**What's planned (development — not production yet):**
+
+- **Admin lifecycle tools** — `odoo_module_install/upgrade/uninstall/
+  diff`, `odoo_config_apply`, `odoo_health_check`, `odoo_backup_db /
+  restore_db`
+- **Industry skill packs** — Manufacturing, Retail, Services, BG
+  Localization, AI Accounting Assistant. Each pack = modules +
+  `ai.skill` records + memory packs + pipeline steps.
+- **Demo builder** — one-command generator of fresh demo
+  environments (`mcp demo create --industry=... --seed=...`).
+  Tenant + Odoo DB + demo data + skills + memory in < 5 minutes.
+- **Module dev + test toolkit** — `odoo_module_scaffold / lint /
+  test / install_from_path / explain`, `odoo_xml_validate`.
+
+**Docker tags:** `:next`, `:3.x.y`
+
+**Documentation:** [`docs/integrator-platform.md`](docs/integrator-platform.md)
+(coming soon — see project memory `roadmap_integrator_platform.md`
+for the full 4-track spec)
+
+**Positioning:** the 3.x track shifts buyer persona from the final
+Odoo user to the integrator / partner / agency — giving them the
+tools to deploy, configure, and demo Odoo + AI workflows for their
+own clients at scale.
+
+---
+
 ## 🏗 Architecture
 
 ```
@@ -82,7 +144,7 @@ Unlike single-purpose MCP wrappers, this stack is built for **real production us
 
 ### Core: `odoo-rpc-mcp`
 
-The flagship MCP server. **188 MCP tools** (83 native + 105 proxied across Portainer, GitHub, Teams, EE, OCA, filesystem) covering every aspect of Odoo development and operations.
+The flagship MCP server. **197+ MCP tools** (92 native + 105 proxied across Portainer, GitHub, Teams, EE, OCA, filesystem) covering every aspect of Odoo development and operations.
 
 **Capabilities:**
 
@@ -94,6 +156,8 @@ The flagship MCP server. **188 MCP tools** (83 native + 105 proxied across Porta
 - **Reporting**: `odoo_report`, `public_access_report_pdf`, `public_access_report_xlsx`
 - **Portal access**: `public_access_portal_orders`, `public_access_portal_invoices`, `public_access_portal_tickets`
 - **Bulgaria l10n**: `odoo_fp_configure`, `odoo_fp_list`, `odoo_fp_details` — fiscal positions tailored for НАП compliance
+- **Translations** ★ 2.10: `odoo_list_translatable_fields`, `odoo_get_field_translations`, `odoo_translate_field` (simple translate=True), `odoo_translate_html` (html_translate / xml_translate with `extract`/`terms`/`replace` modes). Version-aware (Odoo 16+ native JSONB API, <16 ir.translation fallback). Auto-ZWSP marks identical translations as "kept intentionally" so the website editor stops flagging them as untranslated.
+- **Website snippets** ★ 2.10: `odoo_website_list_snippets`, `odoo_website_list_page_snippets`, `odoo_website_add_snippet`, `odoo_website_update_snippet`, `odoo_website_remove_snippet`. Lxml-based HTML parsing with xpath substitutions — covers blog posts, website pages (via arch_db), product descriptions, mega-menus. Supports background image swaps, CTA insertions, position-relative placement (end/begin/after/before/replace).
 - **AI integration**: `ai_tokenize_record`, `ai_search_similar`, `ai_collection_info` — Qdrant vector embeddings per Odoo record
 - **Memory system**: Per-user and shared memory with `memory_read`, `memory_write`, `memory_share`, `memory_pull`
 - **Google services**: OAuth, Gmail search/read/send, Calendar CRUD
