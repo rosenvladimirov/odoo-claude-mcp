@@ -2086,6 +2086,16 @@ TOOLS = [
                     "description": "If true, only validates and reports what would change without writing",
                     "default": False,
                 },
+                "mark_identical_as_translated": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "When True (default), a value that equals the source gets "
+                        "a U+200B (zero-width-space) prefix so Odoo keeps it as an "
+                        "explicit 'translated, kept identical' entry (avoids the "
+                        "'untranslated' flag in the website editor)."
+                    ),
+                },
             },
             "required": ["model", "res_id", "field_name", "translations"],
         },
@@ -2137,6 +2147,18 @@ TOOLS = [
                 "dry_run": {
                     "type": "boolean",
                     "default": False,
+                },
+                "mark_identical_as_translated": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "When True (default), terms whose target-lang value equals "
+                        "the source get prefixed with U+200B (zero-width-space) so "
+                        "Odoo stores them as explicit 'translated, kept identical' "
+                        "entries. Otherwise Odoo dedups them as 'untranslated', "
+                        "which flags technical terms (URLs, brand names, code) as "
+                        "needing translation in the website editor."
+                    ),
                 },
             },
             "required": ["model", "res_id", "field_name"],
@@ -4754,9 +4776,33 @@ def _execute_tool(name: str, args: dict) -> Any:
 
         major = _odoo_major_version(conn)
         if major >= 16:
+            # ZWSP workaround for identical translations: Odoo dedups entries
+            # where value == source, leaving the field flagged as untranslated
+            # for that language. Prefix U+200B so Odoo keeps the entry.
+            ZWSP = "\u200b"
+            mark_identical = args.get("mark_identical_as_translated", True)
+            # Read current source to compare
+            source_val = ""
+            try:
+                src_rec = conn.execute_kw(
+                    model, "read", [[res_id], [field_name]],
+                    {"context": {"lang": source_lang}},
+                )
+                source_val = (src_rec[0].get(field_name) or "") if src_rec else ""
+            except Exception:
+                pass
+            translations_patched = {}
+            for lang, value in translations.items():
+                if (
+                    mark_identical and isinstance(value, str)
+                    and source_val and value == source_val and lang != source_lang
+                ):
+                    translations_patched[lang] = ZWSP + value
+                else:
+                    translations_patched[lang] = value
             result = conn.execute_kw(
                 model, "update_field_translations",
-                [[res_id], field_name, translations],
+                [[res_id], field_name, translations_patched],
                 {"source_lang": source_lang},
             )
             # Verify
@@ -4769,7 +4815,7 @@ def _execute_tool(name: str, args: dict) -> Any:
                 "res_id": res_id,
                 "field": field_name,
                 "translate": kind,
-                "applied": translations,
+                "applied": translations_patched,
                 "verified": verify[0] if isinstance(verify, (list, tuple)) else verify,
                 "odoo_version": major,
             }
@@ -4915,6 +4961,72 @@ def _execute_tool(name: str, args: dict) -> Any:
                 "available": sorted(installed_codes),
             }
 
+        # ── Shared helper: Odoo's html_translate engine drops translations
+        # whose value equals the source term (treats them as "no translation").
+        # This leaves technical identifiers (code, brand names, URLs) flagged
+        # as "untranslated" in the website editor, even if the translator
+        # reviewed and intentionally kept them identical.
+        #
+        # Workaround: prefix a zero-width-space (U+200B) on identical values.
+        # Visually invisible, but makes value != source so Odoo stores it as
+        # an explicit "kept as-is" translation. The editor then counts it as
+        # translated.
+        ZWSP = "\u200b"
+        mark_identical = args.get("mark_identical_as_translated", True)
+
+        def _zwsp_pad_identical_terms(translations_map: dict) -> dict:
+            """In a {lang: {src_term: tr_term}} map, prefix ZWSP where tr == src."""
+            if not mark_identical:
+                return translations_map
+            out = {}
+            for lg, terms in (translations_map or {}).items():
+                if not isinstance(terms, dict):
+                    out[lg] = terms
+                    continue
+                patched = {}
+                for src, tr in terms.items():
+                    if isinstance(tr, str) and tr == src and src:
+                        patched[src] = ZWSP + src
+                    else:
+                        patched[src] = tr
+                out[lg] = patched
+            return out
+
+        def _zwsp_patch_empty_after_write(_model, _res_id, _field, target_langs, _source_lang):
+            """After a write, find terms whose target-lang value is empty while
+            source has text, and backfill them with ZWSP+source so the website
+            translation indicator counts them as translated."""
+            if not mark_identical:
+                return {}
+            try:
+                tr = conn.execute_kw(_model, "get_field_translations", [[_res_id], _field], {})
+                payload = tr[0] if isinstance(tr, (list, tuple)) else tr
+            except Exception:
+                return {}
+            patch = {}
+            for lg in target_langs:
+                if lg == _source_lang:
+                    continue
+                gaps = {}
+                for item in payload or []:
+                    if not isinstance(item, dict) or item.get("lang") != lg:
+                        continue
+                    src = item.get("source") or ""
+                    val = item.get("value") or ""
+                    if src and not val:
+                        gaps[src] = ZWSP + src
+                if gaps:
+                    patch[lg] = gaps
+            if patch:
+                try:
+                    conn.execute_kw(
+                        _model, "update_field_translations",
+                        [[_res_id], _field, patch], {"source_lang": _source_lang},
+                    )
+                except Exception:
+                    pass
+            return {lg: len(v) for lg, v in patch.items()}
+
         # ── Mode: terms ───────────────────────────────────────
         # translations = {lang: {src_term: tr_term}} — direct JSONB update
         if mode == "terms":
@@ -4927,10 +5039,16 @@ def _execute_tool(name: str, args: dict) -> Any:
                     "would_apply": translations,
                     "odoo_version": major,
                 }
+            # Pre-pad identical pairs with ZWSP so Odoo doesn't dedup them
+            translations_patched = _zwsp_pad_identical_terms(translations)
             conn.execute_kw(
                 model, "update_field_translations",
-                [[res_id], field_name, translations],
+                [[res_id], field_name, translations_patched],
                 {"source_lang": source_lang},
+            )
+            # Post-write: backfill any remaining empty values for the target langs
+            zwsp_filled = _zwsp_patch_empty_after_write(
+                model, res_id, field_name, list(translations.keys()), source_lang
             )
             verify = conn.execute_kw(
                 model, "get_field_translations", [[res_id], field_name], {}
@@ -4940,6 +5058,7 @@ def _execute_tool(name: str, args: dict) -> Any:
                 "model": model, "res_id": res_id, "field": field_name,
                 "translate": kind, "mode": "terms",
                 "applied_terms_count": {lang: len(t) for lang, t in translations.items()},
+                "zwsp_filled_identical": zwsp_filled,
                 "verified": verify[0] if isinstance(verify, (list, tuple)) else verify,
                 "odoo_version": major,
             }
@@ -4985,6 +5104,13 @@ def _execute_tool(name: str, args: dict) -> Any:
                 except Exception as e:
                     applied[lang] = f"ERROR: {type(e).__name__}: {e}"
 
+            # Post-write backfill: any term whose target-lang value is still empty
+            # (Odoo's engine skipped it because the new HTML had the same text as
+            # source) gets ZWSP-marked so the editor counts it as translated.
+            zwsp_filled = _zwsp_patch_empty_after_write(
+                model, res_id, field_name, list(translations.keys()), source_lang
+            )
+
             try:
                 verify = conn.execute_kw(
                     model, "get_field_translations", [[res_id], field_name], {}
@@ -4997,6 +5123,7 @@ def _execute_tool(name: str, args: dict) -> Any:
                 "model": model, "res_id": res_id, "field": field_name,
                 "translate": kind, "mode": "replace",
                 "applied": applied,
+                "zwsp_filled_identical": zwsp_filled,
                 "verified": verified,
                 "odoo_version": major,
             }
