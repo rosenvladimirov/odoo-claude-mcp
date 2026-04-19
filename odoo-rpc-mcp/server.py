@@ -2142,6 +2142,148 @@ TOOLS = [
             "required": ["model", "res_id", "field_name"],
         },
     ),
+    # ── Website Snippets (widget + snippet management) ──
+    Tool(
+        name="odoo_website_list_snippets",
+        description=(
+            "List available Odoo website snippet templates (ir.ui.view records with "
+            "key matching 'website.s_*' or similar). Returns per-snippet: key, name, "
+            "module, category (structure|content|dynamic|effect|unknown), preview. "
+            "Use this to discover what snippets can be added to a page. "
+            "Categories inferred from snippet key patterns and modules."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "category": {
+                    "type": "string",
+                    "description": "Filter by category: structure, content, dynamic, effect.",
+                },
+                "module": {
+                    "type": "string",
+                    "description": "Filter by module (e.g. 'website', 'website_blog', 'website_sale').",
+                },
+                "search": {
+                    "type": "string",
+                    "description": "Substring match on key or name (e.g. 'cta', 'text_block').",
+                },
+                "limit": {"type": "integer", "default": 200},
+            },
+        },
+    ),
+    Tool(
+        name="odoo_website_list_page_snippets",
+        description=(
+            "List snippets currently embedded in a target HTML field. Target can be "
+            "a blog.post (field=content), website.page (field=arch_db via view_id), "
+            "product.template (field=website_description), or any HTML field. "
+            "Parses the HTML with lxml, finds all elements bearing a data-snippet "
+            "attribute. Returns per-snippet: index, data_snippet, data_name, xpath, "
+            "text_preview, has_background (detects url() in style), background_url."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string"},
+                "res_id": {"type": "integer"},
+                "field_name": {"type": "string", "description": "HTML field (e.g. 'content', 'arch_db', 'website_description')"},
+                "lang": {"type": "string", "description": "Read lang context (default: current user lang)"},
+            },
+            "required": ["model", "res_id", "field_name"],
+        },
+    ),
+    Tool(
+        name="odoo_website_add_snippet",
+        description=(
+            "Insert a snippet into a target HTML field. Fetches the snippet template "
+            "from ir.ui.view by key, extracts its root HTML element, applies optional "
+            "substitutions (text/attr/src changes before insertion), and places it "
+            "at the specified position relative to an anchor. "
+            "Positions: 'end' (after last element), 'begin' (before first), "
+            "'after' (after anchor_xpath), 'before' (before anchor_xpath), "
+            "'replace' (replace anchor_xpath). "
+            "Substitutions format: {'relative_xpath': value} for text; "
+            "{'relative_xpath/@attr': value} for attribute; "
+            "{'relative_xpath/@style:background-image': 'url(...)'} for CSS property; "
+            "{'relative_xpath/@src': 'https://...'} for image URL."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string"},
+                "res_id": {"type": "integer"},
+                "field_name": {"type": "string"},
+                "snippet_key": {"type": "string", "description": "Snippet template key (e.g. 'website.s_text_block', 'website.s_cta_card')"},
+                "position": {
+                    "type": "string",
+                    "enum": ["end", "begin", "after", "before", "replace"],
+                    "default": "end",
+                },
+                "anchor_xpath": {
+                    "type": "string",
+                    "description": "Required for position in (after, before, replace). Xpath to the anchor element in target.",
+                },
+                "substitutions": {
+                    "type": "object",
+                    "description": "Map of relative xpath → value for pre-insertion customisation.",
+                },
+                "lang": {"type": "string", "description": "Lang context for write (default: en_US)"},
+                "dry_run": {"type": "boolean", "default": False},
+            },
+            "required": ["model", "res_id", "field_name", "snippet_key"],
+        },
+    ),
+    Tool(
+        name="odoo_website_update_snippet",
+        description=(
+            "Update an existing snippet on a target HTML field. Locates the snippet "
+            "via snippet_xpath (absolute in target), applies substitutions to its "
+            "descendants via relative xpaths, and writes back. "
+            "Common use cases: swap background image, change H1/H2 text, update "
+            "CTA button text+href, change card content. "
+            "Substitution syntax identical to odoo_website_add_snippet."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string"},
+                "res_id": {"type": "integer"},
+                "field_name": {"type": "string"},
+                "snippet_xpath": {
+                    "type": "string",
+                    "description": "Xpath to snippet root element in target (e.g. '//section[@data-snippet=\"s_text_block\"][1]')",
+                },
+                "substitutions": {"type": "object"},
+                "lang": {"type": "string", "default": "en_US"},
+                "dry_run": {"type": "boolean", "default": False},
+            },
+            "required": ["model", "res_id", "field_name", "snippet_xpath", "substitutions"],
+        },
+    ),
+    Tool(
+        name="odoo_website_remove_snippet",
+        description=(
+            "Remove a snippet block from a target HTML field. Locates via snippet_xpath "
+            "(absolute). Writes back the reduced HTML."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string"},
+                "res_id": {"type": "integer"},
+                "field_name": {"type": "string"},
+                "snippet_xpath": {"type": "string"},
+                "lang": {"type": "string", "default": "en_US"},
+                "dry_run": {"type": "boolean", "default": False},
+            },
+            "required": ["model", "res_id", "field_name", "snippet_xpath"],
+        },
+    ),
     # ── Web Session (cookie-based HTTP access) ──
     Tool(
         name="odoo_web_login",
@@ -4860,6 +5002,372 @@ def _execute_tool(name: str, args: dict) -> Any:
             }
 
         return {"error": f"Unknown mode '{mode}'. Use 'extract', 'terms', or 'replace'."}
+
+    elif name == "odoo_website_list_snippets":
+        cat = args.get("category")
+        mod = args.get("module")
+        search = (args.get("search") or "").lower()
+        limit = args.get("limit", 200)
+        # Snippets are qweb views whose key contains '.s_'. Using ilike since Odoo's
+        # underscore-wildcard behavior in 'like' is database-dependent.
+        domain = [("type", "=", "qweb"), ("key", "ilike", ".s_")]
+        if mod:
+            domain.append(("key", "=like", f"{mod}.s_%"))
+        if search:
+            # Push search into Odoo domain too — avoids client-side loop truncation
+            domain.extend(["|", ("key", "ilike", search), ("name", "ilike", search)])
+        # Fetch up to 500 candidate rows. With ~200 actual snippets in Odoo, this is
+        # usually enough. We still apply client-side filters (category, slug prefix).
+        rows = conn.execute_kw(
+            "ir.ui.view", "search_read", [domain],
+            {"fields": ["id", "key", "name", "arch_db"], "limit": 500, "order": "key"},
+        )
+        result = []
+        for r in rows:
+            key = r.get("key", "")
+            name = r.get("name", "")
+            # Derive module + slug
+            module_name = key.split(".", 1)[0] if "." in key else ""
+            slug = key.split(".", 1)[1] if "." in key else key
+            if not slug.startswith("s_"):
+                continue
+            # Category heuristic
+            if "dynamic_snippet" in slug or slug.startswith("s_blog_posts") or slug.startswith("s_products"):
+                category = "dynamic"
+            elif any(x in slug for x in ("banner", "kickoff", "hero", "cover", "intro", "header")):
+                category = "structure"
+            elif any(x in slug for x in ("progress", "countdown", "animation", "parallax")):
+                category = "effect"
+            elif any(x in slug for x in ("text", "image", "card", "quote", "pricing", "team", "cta", "faq", "accordion", "table", "grid", "column")):
+                category = "content"
+            else:
+                category = "unknown"
+            if cat and cat != category:
+                continue
+            if search and search not in slug.lower() and search not in (name or "").lower():
+                continue
+            # Preview = first 120 chars of stripped arch
+            arch = r.get("arch_db") or ""
+            if isinstance(arch, dict):
+                arch = list(arch.values())[0] if arch else ""
+            result.append({
+                "key": key,
+                "name": name,
+                "module": module_name,
+                "slug": slug,
+                "category": category,
+                "preview": (arch[:80] + "...") if len(arch) > 80 else arch,
+            })
+            if len(result) >= limit:
+                break
+        return {"count": len(result), "snippets": result}
+
+    elif name == "odoo_website_list_page_snippets":
+        model = args["model"]
+        res_id = int(args["res_id"])
+        field_name = args["field_name"]
+        lang = args.get("lang")
+        ctx = {"lang": lang} if lang else {}
+        rec = conn.execute_kw(model, "read", [[res_id], [field_name]], {"context": ctx})
+        if not rec:
+            return {"error": f"record {model}/{res_id} not found"}
+        html = rec[0].get(field_name) or ""
+        if not html:
+            return {"model": model, "res_id": res_id, "field": field_name, "count": 0, "snippets": []}
+        try:
+            from lxml import html as lxml_html, etree as lxml_etree
+        except ImportError:
+            return {"error": "lxml not installed in MCP container — rebuild with lxml in requirements.txt"}
+        try:
+            tree = lxml_html.fragment_fromstring(html, create_parent="div")
+        except Exception as e:
+            return {"error": f"HTML parse failed: {e}"}
+        snippets = []
+        # Detect snippets by either: data-snippet attr OR class="s_xxx ..."
+        # (Odoo sometimes strips data-snippet on save for cta_card/s_card subclasses.)
+        import re as _re
+        seen_ids = set()
+        candidates = list(tree.xpath("//*[@data-snippet]"))
+        # Also find top-level elements whose first class starts with "s_"
+        for el in tree.xpath("/div/*"):
+            cls = el.get("class", "") or ""
+            first_class = cls.split()[0] if cls else ""
+            if first_class.startswith("s_") and el not in candidates:
+                candidates.append(el)
+        # Stable order by document position
+        candidates.sort(key=lambda e: tree.getroottree().getpath(e))
+        for idx, el in enumerate(candidates):
+            xp = tree.getroottree().getpath(el)
+            # Strip the 'div[1]' wrapper from xpath
+            style = el.get("style", "") or ""
+            # Also inspect immediate children for background
+            child_style = ""
+            child_bg_url = None
+            for ch in el.iter():
+                cs = ch.get("style", "") or ""
+                if "url(" in cs:
+                    import re as _re
+                    m = _re.search(r'url\(["\']?([^"\')]+)["\']?\)', cs)
+                    if m:
+                        child_bg_url = m.group(1)
+                        child_style = cs
+                        break
+            has_bg = bool(child_bg_url) or "url(" in style
+            bg_url = child_bg_url
+            if not bg_url and "url(" in style:
+                import re as _re
+                m = _re.search(r'url\(["\']?([^"\')]+)["\']?\)', style)
+                if m:
+                    bg_url = m.group(1)
+            text_preview = " ".join((t.strip() for t in el.itertext()))[:150]
+            # Derive effective snippet name: data-snippet attr, or first s_* class
+            eff = el.get("data-snippet") or ""
+            if not eff:
+                cls = el.get("class", "") or ""
+                for c in cls.split():
+                    if c.startswith("s_"):
+                        eff = c
+                        break
+            snippets.append({
+                "index": idx,
+                "data_snippet": eff,
+                "data_name": el.get("data-name"),
+                "xpath": xp,
+                "text_preview": text_preview,
+                "has_background": has_bg,
+                "background_url": bg_url,
+            })
+        return {"model": model, "res_id": res_id, "field": field_name, "count": len(snippets), "snippets": snippets}
+
+    elif name in ("odoo_website_add_snippet", "odoo_website_update_snippet", "odoo_website_remove_snippet"):
+        model = args["model"]
+        res_id = int(args["res_id"])
+        field_name = args["field_name"]
+        lang = args.get("lang", "en_US")
+        dry_run = args.get("dry_run", False)
+
+        try:
+            from lxml import html as lxml_html, etree as lxml_etree
+        except ImportError:
+            return {"error": "lxml not installed in MCP container — rebuild with lxml in requirements.txt"}
+
+        # Read current HTML
+        rec = conn.execute_kw(model, "read", [[res_id], [field_name]], {"context": {"lang": lang}})
+        if not rec:
+            return {"error": f"record {model}/{res_id} not found"}
+        current_html = rec[0].get(field_name) or ""
+        try:
+            # Use create_parent to match the same structure list_page_snippets uses
+            tree = lxml_html.fragment_fromstring(current_html or "", create_parent="div")
+        except Exception as e:
+            return {"error": f"HTML parse failed: {e}"}
+
+        def _apply_substitutions(node, subs: dict) -> list:
+            """Apply {xpath: value_or_dict} substitutions to `node`.
+            Syntax:
+              {'.//h2': 'text'}                     → set element text
+              {'.//img/@src': 'url'}                → set attribute
+              {'.//div/@style:background-image': 'url(...)'} → set CSS prop (preserves others)
+            """
+            import re as _re
+            applied = []
+            for spec, value in (subs or {}).items():
+                # Detect attribute/style addressing
+                style_prop = None
+                if ":" in spec and "/@style:" in spec:
+                    xp_part, style_prop = spec.rsplit(":", 1)
+                    attr_spec = xp_part
+                else:
+                    attr_spec = spec
+                attr_name = None
+                if "/@" in attr_spec:
+                    xp_part, attr_name = attr_spec.rsplit("/@", 1)
+                else:
+                    xp_part = attr_spec
+                try:
+                    targets = node.xpath(xp_part) if xp_part else [node]
+                except Exception as e:
+                    applied.append({"xpath": spec, "status": f"xpath error: {e}"})
+                    continue
+                if not targets:
+                    applied.append({"xpath": spec, "status": "no match"})
+                    continue
+                for t in targets:
+                    if attr_name and style_prop:
+                        cur = t.get("style", "") or ""
+                        props = {}
+                        for p in cur.split(";"):
+                            p = p.strip()
+                            if ":" in p:
+                                k, v = p.split(":", 1)
+                                props[k.strip()] = v.strip()
+                        props[style_prop.strip()] = str(value)
+                        new_style = "; ".join(f"{k}: {v}" for k, v in props.items())
+                        t.set("style", new_style)
+                    elif attr_name:
+                        t.set(attr_name, str(value))
+                    else:
+                        # Replace text content
+                        for child in list(t):
+                            t.remove(child)
+                        t.text = str(value)
+                    applied.append({"xpath": spec, "status": "ok"})
+            return applied
+
+        if name == "odoo_website_add_snippet":
+            snippet_key = args["snippet_key"]
+            position = args.get("position", "end")
+            anchor_xpath = args.get("anchor_xpath")
+            subs = args.get("substitutions") or {}
+
+            # Fetch snippet arch
+            snippet_rows = conn.execute_kw(
+                "ir.ui.view", "search_read",
+                [[["type", "=", "qweb"], ["key", "=", snippet_key]]],
+                {"fields": ["arch_db", "name"], "limit": 1},
+            )
+            if not snippet_rows:
+                # Suggest similar keys
+                close = conn.execute_kw(
+                    "ir.ui.view", "search_read",
+                    [[["type", "=", "qweb"], ["key", "ilike", snippet_key.split(".")[-1][:10]]]],
+                    {"fields": ["key"], "limit": 5},
+                )
+                return {
+                    "error": f"snippet not found: {snippet_key}",
+                    "suggestions": [r["key"] for r in close],
+                }
+            snippet_arch = snippet_rows[0].get("arch_db") or ""
+            if isinstance(snippet_arch, dict):
+                snippet_arch = list(snippet_arch.values())[0]
+            # Extract the first real child from the snippet template (<template> wrapper or <t>)
+            try:
+                s_root = lxml_html.fragment_fromstring(snippet_arch, create_parent="div")
+            except Exception as e:
+                return {"error": f"snippet arch parse failed: {e}"}
+            # Skip <template>, <t> wrappers — find first element with data-snippet or section/div
+            snippet_el = None
+            for child in s_root.iter():
+                if child is s_root:
+                    continue
+                tag = child.tag.lower() if isinstance(child.tag, str) else ""
+                if tag in ("template", "t"):
+                    continue
+                if child.get("data-snippet") or tag in ("section", "div"):
+                    snippet_el = child
+                    break
+            if snippet_el is None and len(s_root) > 0:
+                snippet_el = s_root[0]
+            if snippet_el is None:
+                return {"error": "could not extract snippet element from template"}
+
+            # Apply pre-insertion substitutions
+            sub_report = _apply_substitutions(snippet_el, subs)
+
+            # Find insertion point in target
+            parent = tree  # the <div> wrapper
+            if position in ("after", "before", "replace"):
+                if not anchor_xpath:
+                    return {"error": f"position={position} requires anchor_xpath"}
+                try:
+                    anchors = tree.xpath(anchor_xpath)
+                except Exception as e:
+                    return {"error": f"anchor_xpath error: {e}"}
+                if not anchors:
+                    return {"error": f"no element matched anchor_xpath: {anchor_xpath}"}
+                anchor = anchors[0]
+                anchor_parent = anchor.getparent()
+                idx = list(anchor_parent).index(anchor)
+                if position == "after":
+                    anchor_parent.insert(idx + 1, snippet_el)
+                elif position == "before":
+                    anchor_parent.insert(idx, snippet_el)
+                elif position == "replace":
+                    anchor_parent.remove(anchor)
+                    anchor_parent.insert(idx, snippet_el)
+            elif position == "begin":
+                parent.insert(0, snippet_el)
+            else:  # end (default)
+                parent.append(snippet_el)
+
+            if dry_run:
+                # Serialize just the snippet_el to preview
+                return {
+                    "dry_run": True,
+                    "snippet_key": snippet_key,
+                    "position": position,
+                    "substitutions_applied": sub_report,
+                    "inserted_html_preview": lxml_html.tostring(snippet_el, encoding="unicode")[:500],
+                }
+            # Serialize back the full tree (strip outer <div> wrapper)
+            new_html = "".join(
+                lxml_html.tostring(c, encoding="unicode") for c in tree
+            ) + (tree.text or "")
+            # Tree has children; simpler: tostring of inner nodes
+            new_html = "".join(lxml_html.tostring(c, encoding="unicode") for c in tree)
+            # Write with lang context
+            conn.execute_kw(model, "write", [[res_id], {field_name: new_html}], {"context": {"lang": lang}})
+            return {
+                "success": True,
+                "model": model, "res_id": res_id, "field": field_name,
+                "snippet_key": snippet_key,
+                "position": position,
+                "substitutions_applied": sub_report,
+            }
+
+        elif name == "odoo_website_update_snippet":
+            snippet_xpath = args["snippet_xpath"]
+            subs = args["substitutions"]
+            try:
+                targets = tree.xpath(snippet_xpath)
+            except Exception as e:
+                return {"error": f"snippet_xpath error: {e}"}
+            if not targets:
+                return {"error": f"no snippet matched xpath: {snippet_xpath}"}
+            snippet_el = targets[0]
+            sub_report = _apply_substitutions(snippet_el, subs)
+            if dry_run:
+                return {
+                    "dry_run": True,
+                    "snippet_xpath": snippet_xpath,
+                    "substitutions_applied": sub_report,
+                    "updated_html_preview": lxml_html.tostring(snippet_el, encoding="unicode")[:500],
+                }
+            new_html = "".join(lxml_html.tostring(c, encoding="unicode") for c in tree)
+            conn.execute_kw(model, "write", [[res_id], {field_name: new_html}], {"context": {"lang": lang}})
+            return {
+                "success": True,
+                "model": model, "res_id": res_id, "field": field_name,
+                "snippet_xpath": snippet_xpath,
+                "substitutions_applied": sub_report,
+            }
+
+        elif name == "odoo_website_remove_snippet":
+            snippet_xpath = args["snippet_xpath"]
+            try:
+                targets = tree.xpath(snippet_xpath)
+            except Exception as e:
+                return {"error": f"snippet_xpath error: {e}"}
+            if not targets:
+                return {"error": f"no snippet matched xpath: {snippet_xpath}"}
+            snippet_el = targets[0]
+            parent = snippet_el.getparent()
+            removed_preview = lxml_html.tostring(snippet_el, encoding="unicode")[:300]
+            parent.remove(snippet_el)
+            if dry_run:
+                return {
+                    "dry_run": True,
+                    "snippet_xpath": snippet_xpath,
+                    "removed_html_preview": removed_preview,
+                }
+            new_html = "".join(lxml_html.tostring(c, encoding="unicode") for c in tree)
+            conn.execute_kw(model, "write", [[res_id], {field_name: new_html}], {"context": {"lang": lang}})
+            return {
+                "success": True,
+                "model": model, "res_id": res_id, "field": field_name,
+                "snippet_xpath": snippet_xpath,
+                "removed_preview": removed_preview,
+            }
 
     elif name == "odoo_message_post":
         model = args["model"]
