@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "2.11.5"
+__version__ = "2.19.0"
 
 import asyncio
 import json
@@ -25,7 +25,7 @@ import sys
 import uuid
 import unicodedata
 import xmlrpc.client
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
@@ -459,10 +459,35 @@ class OdooConnection:
         self._uid: int | None = None
         self._auth_token: str = ""  # password or api_key
         self._ssl_ctx_cache: "ssl.SSLContext | None" = None
+        self._fallback_logged: bool = False
 
     @property
     def auth_token(self) -> str:
         return self.api_key or self.password
+
+    @property
+    def effective_protocol(self) -> str:
+        """Protocol actually used for data ops (search_read/execute_kw/...).
+
+        Odoo 17+ often rejects api_key auth on the /jsonrpc endpoint with
+        HTTP 403 while /xmlrpc/2/object accepts it. When only api_key is
+        configured (no password), transparently downgrade to xmlrpc for
+        data operations. authenticate() still uses /xmlrpc/2/common which
+        is public and works for both.
+        """
+        if self.protocol == "jsonrpc" and self.api_key and not self.password:
+            return "xmlrpc"
+        return self.protocol
+
+    def _log_fallback_once(self) -> None:
+        if self._fallback_logged:
+            return
+        if self.protocol == "jsonrpc" and self.effective_protocol == "xmlrpc":
+            logger.warning(
+                f"[{self.alias}] jsonrpc+api_key → falling back to "
+                "xmlrpc for data ops (Odoo 17+ /jsonrpc rejects api_key)"
+            )
+            self._fallback_logged = True
 
     # ── SSL / self-signed handling ──────────────────────────────
     #
@@ -584,8 +609,9 @@ class OdooConnection:
         if kwargs is None:
             kwargs = {}
 
+        self._log_fallback_once()
         try:
-            if self.protocol == "jsonrpc":
+            if self.effective_protocol == "jsonrpc":
                 return self._jsonrpc_call(model, method, args, kwargs)
             else:
                 transport = _UASafeTransport(context=self._get_ssl_context()) \
@@ -640,6 +666,7 @@ class OdooConnection:
             "db": self.db,
             "username": self.username,
             "protocol": self.protocol,
+            "effective_protocol": self.effective_protocol,
             "verify_ssl": self.verify_ssl,
             "pinned_cert": (
                 str(self._cached_cert_path())
@@ -2775,6 +2802,135 @@ TOOLS = [
             },
         },
     ),
+    # ── Stock Operations (BG workflows) ──
+    Tool(
+        name="odoo_stock_product_flip_to_storable",
+        description=(
+            "Flip a product from consumable (is_storable=false) to storable (is_storable=true) "
+            "when the product ALREADY has stock.move records. Bypasses Odoo's ORM constraint "
+            "'You can not change the inventory tracking of a product that was already used' via "
+            "raw SQL in an ir.actions.server. Then inserts a stock.quant DIRECTLY (not through an "
+            "inventory adjustment wizard) so no duplicate SVL is created — existing SVLs stay intact. "
+            "Use when a GRN/bill was recorded for a product that was mistakenly set as consu. "
+            "ALWAYS use dry_run=true first to preview impact. Returns full pre/post snapshot."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "product_id": {"type": "integer", "description": "product.product ID to flip"},
+                "location_id": {"type": "integer", "description": "stock.location ID where the quant will be created (usually GRN destination)"},
+                "quantity": {"type": "number", "description": "Quantity to set as on-hand (must match existing SVL remaining_qty for consistency)"},
+                "company_id": {"type": "integer", "description": "Company ID — scope of the operation"},
+                "in_date": {"type": "string", "description": "ISO datetime for stock.quant.in_date (e.g. '2026-04-20 14:40:34'). Should match GRN date."},
+                "dry_run": {"type": "boolean", "default": True, "description": "If true, only preview actions (no writes). Set false to execute."},
+            },
+            "required": ["product_id", "location_id", "quantity", "company_id", "in_date"],
+        },
+    ),
+    Tool(
+        name="odoo_translate_context_aware",
+        description=(
+            "Translate Odoo records using Claude with rich domain context for natural, "
+            "fluent results (not literal). AUTO-DETECTS field kind and handles both: "
+            "(1) simple char/text fields (e.g. ir.ui.menu.name, account.account.name) → "
+            "batch translate via update_field_translations; "
+            "(2) HTML/XML fields (e.g. ir.ui.view.arch_db, website.page, "
+            "product.template.website_description) → extracts canonical terms via "
+            "get_field_translations, translates each term preserving inline HTML tags "
+            "(<strong>, <a>, <span>...), writes back in terms mode. "
+            "Context to LLM: Odoo model, parent chain for menus, existing translations, "
+            "user-supplied domain hint, field kind (simple/html/xml). "
+            "Requires Odoo 16+. Requires ANTHROPIC_API_KEY env var (per-tenant override: "
+            "ANTHROPIC_API_KEY_<TENANT>). Recommended models: "
+            "'claude-haiku-4-5' (menu labels, fast), 'claude-sonnet-4-6' (balanced, "
+            "website pages), 'claude-opus-4-7' (complex legal/accounting terminology). "
+            "ALWAYS use dry_run=true first to review proposals."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string", "description": "Odoo model (e.g. 'ir.ui.menu', 'account.account', 'product.template')"},
+                "ids": {"type": "array", "items": {"type": "integer"}, "description": "Record IDs to translate"},
+                "field_names": {"type": "array", "items": {"type": "string"}, "default": ["name"], "description": "Translatable fields (default: ['name'])"},
+                "target_lang": {"type": "string", "description": "Target language code (e.g. 'bg_BG', 'de_DE')"},
+                "source_lang": {"type": "string", "default": "en_US", "description": "Source language (usually 'en_US')"},
+                "context_hint": {"type": "string", "default": "", "description": "Free-form domain hint ('accounting terms', 'manufacturing', 'Bulgarian NRA terminology', etc.)"},
+                "claude_model": {"type": "string", "default": "claude-haiku-4-5", "description": "Claude model ID"},
+                "max_tokens": {"type": "integer", "default": 4000},
+                "dry_run": {"type": "boolean", "default": True, "description": "If true, only preview (no writes)."},
+            },
+            "required": ["model", "ids", "target_lang"],
+        },
+    ),
+    Tool(
+        name="odoo_stock_mo_delete_draft",
+        description=(
+            "Safely DELETE a draft or cancelled mrp.production with cascade (raw stock.moves, "
+            "finished stock.moves, procurement.group if orphaned). Bypasses Odoo's ORM 'cannot be "
+            "deleted' constraint by forcing state='cancel' via raw SQL, then using DELETE statements "
+            "inside an ir.actions.server. "
+            "Refuses if MO has any SVL, stock.move with quantity > 0, or an already-done state. "
+            "ALWAYS use dry_run=true first."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "mo_id": {"type": "integer", "description": "mrp.production ID to delete"},
+                "dry_run": {"type": "boolean", "default": True, "description": "If true, only preview (no writes)."},
+            },
+            "required": ["mo_id"],
+        },
+    ),
+    Tool(
+        name="odoo_record_backup",
+        description=(
+            "Read full field snapshot of one or more records (any model) and return as a JSON "
+            "structure. Use BEFORE destructive operations to capture state for possible rollback. "
+            "Returns a dict with metadata (date, connection alias, model, ids, field count) plus "
+            "the records themselves. Does NOT write to disk — caller decides what to do with the JSON."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "model": {"type": "string", "description": "Odoo model (e.g. 'mrp.production')"},
+                "ids": {"type": "array", "items": {"type": "integer"}, "description": "Record IDs to snapshot"},
+                "include_related": {"type": "array", "items": {"type": "object", "properties": {"model": {"type": "string"}, "domain": {"type": "array"}, "fields": {"type": "array", "items": {"type": "string"}}}, "required": ["model"]}, "description": "Optional list of related queries. Each: {model, domain, fields}. Example: [{model: 'stock.move', domain: [['raw_material_production_id', 'in', <mo_ids>]], fields: [...]}] (use placeholders manually)."},
+            },
+            "required": ["model", "ids"],
+        },
+    ),
+    Tool(
+        name="odoo_stock_close_unaccounted_value",
+        description=(
+            "Create an Inventory Valuation journal entry (Dr stock valuation / Cr GRNI/stock-input) "
+            "for a stocked movement that was valued but not accounted (account_move_id=false), then "
+            "bind the new account.move back to the record. "
+            "Version-aware: works on stock.valuation.layer (Odoo 14-18) OR stock.move (Odoo 19+). "
+            "GRNI account auto-detection order: "
+            "(a) v14-18 → category.property_stock_account_input_categ_id; "
+            "(b) v19 with l10n_bg_stock_account → category.l10n_bg_stock_input_account_id; "
+            "(c) v19 vanilla → category.account_stock_variation_id (fallback). "
+            "User can override via grni_account_id parameter. "
+            "Refuses if record is already accounted or category is not real_time. "
+            "ALWAYS use dry_run=true first."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "record_id": {"type": "integer", "description": "ID of stock.valuation.layer (v14-18) or stock.move (v19+)"},
+                "source_model": {"type": "string", "enum": ["auto", "stock.valuation.layer", "stock.move"], "default": "auto", "description": "Source model override; 'auto' detects from Odoo version."},
+                "grni_account_id": {"type": "integer", "description": "Override GRNI/stock-input account. If omitted, auto-detected from category."},
+                "date": {"type": "string", "description": "Journal entry date (ISO). Defaults to record's date/create_date."},
+                "dry_run": {"type": "boolean", "default": True, "description": "If true, only preview. Set false to execute."},
+            },
+            "required": ["record_id"],
+        },
+    ),
     # ── Google Services ──
     Tool(
         name="google_auth",
@@ -3575,7 +3731,10 @@ TOOLS = [
         name="ai_invoice_scan_pending",
         description=(
             "List vendor-bill drafts that have an attachment and no successful "
-            "extraction yet. Oldest first (FIFO). Feeds batch processing."
+            "extraction yet. Oldest first (FIFO). Feeds batch processing. "
+            "Set requested_only=true to return only moves explicitly queued "
+            "by the l10n_bg_ai_invoice_glue attachment auto-trigger "
+            "(ai_pipeline_requested=True) — recommended for cron drivers."
         ),
         inputSchema={
             "type": "object",
@@ -3583,6 +3742,7 @@ TOOLS = [
                 "connection": {"type": "string", "default": "default"},
                 "tenant_code": {"type": "string", "default": ""},
                 "limit": {"type": "integer", "default": 50},
+                "requested_only": {"type": "boolean", "default": False},
             },
         },
     ),
@@ -3591,6 +3751,22 @@ TOOLS = [
         description=(
             "Dashboard aggregation: counts of vendor bill moves by next_step "
             "across the last 60 days. Use for header KPI cards."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "tenant_code": {"type": "string", "default": ""},
+            },
+        },
+    ),
+    Tool(
+        name="ai_usage_budget_status",
+        description=(
+            "Current month's vision spend vs configured cap. Reads "
+            "res.company.ai_monthly_budget_eur (requires l10n_bg_ai_invoice_glue) "
+            "and sums billed ai_usage_log rows. Returns spent, limit, "
+            "remaining, % used. `limit_eur=0` means no cap configured."
         ),
         inputSchema={
             "type": "object",
@@ -6092,6 +6268,844 @@ def _execute_tool(name: str, args: dict) -> Any:
             "note": "Use live=true to fetch current values from Odoo",
         }
 
+    # ── Stock Operations (BG workflows) ──
+    elif name == "odoo_stock_product_flip_to_storable":
+        product_id = int(args["product_id"])
+        location_id = int(args["location_id"])
+        quantity = float(args["quantity"])
+        company_id = int(args["company_id"])
+        in_date_raw = str(args["in_date"])
+        dry_run = bool(args.get("dry_run", True))
+
+        try:
+            parsed_dt = datetime.fromisoformat(in_date_raw.replace("Z", "+00:00"))
+        except ValueError as exc:
+            return {"error": f"Invalid in_date '{in_date_raw}': {exc}. Use ISO format "
+                             "e.g. '2026-04-20 14:40:34' or '2026-04-20T14:40:34+00:00'."}
+        if parsed_dt.tzinfo is None:
+            in_date_sql = parsed_dt.strftime("%Y-%m-%d %H:%M:%S") + "+00"
+        else:
+            in_date_sql = parsed_dt.strftime("%Y-%m-%d %H:%M:%S%z")
+
+        prod = conn.execute_kw(
+            "product.product", "read", [[product_id]],
+            {"fields": ["id", "default_code", "name", "is_storable", "type", "tracking",
+                        "qty_available", "product_tmpl_id", "active"]},
+        )
+        if not prod:
+            return {"error": f"product.product id={product_id} not found"}
+        prod = prod[0]
+        tmpl_id = prod["product_tmpl_id"][0] if prod.get("product_tmpl_id") else None
+        if not tmpl_id:
+            return {"error": "product_tmpl_id is missing on product.product"}
+
+        loc = conn.execute_kw(
+            "stock.location", "read", [[location_id]],
+            {"fields": ["id", "name", "complete_name", "usage", "company_id"]},
+        )
+        if not loc:
+            return {"error": f"stock.location id={location_id} not found"}
+        loc = loc[0]
+        loc_company = loc["company_id"][0] if loc.get("company_id") else None
+        if loc_company is not None and loc_company != company_id:
+            return {"error": f"Location company_id={loc_company} does not match requested "
+                             f"company_id={company_id}. Cross-company quant creation is refused."}
+
+        existing_quants = conn.execute_kw(
+            "stock.quant", "search_read",
+            [[["product_id", "=", product_id], ["location_id", "=", location_id],
+              ["company_id", "=", company_id]]],
+            {"fields": ["id", "quantity", "reserved_quantity", "in_date"]},
+        )
+
+        svl_stats = conn.execute_kw(
+            "stock.valuation.layer", "read_group",
+            [[["product_id", "=", product_id], ["company_id", "=", company_id]],
+             ["value", "remaining_value", "quantity", "remaining_qty"], []],
+            {"lazy": False},
+        )
+        svl_summary = svl_stats[0] if svl_stats else {"__count": 0, "value": 0, "remaining_value": 0}
+
+        preview = {
+            "product": prod,
+            "location": loc,
+            "existing_quants_at_location": existing_quants,
+            "svl_totals_for_product": svl_summary,
+            "intended_operations": [
+                f"UPDATE product_template SET is_storable=true WHERE id={tmpl_id}",
+                f"INSERT INTO stock_quant (product_id={product_id}, location_id={location_id}, "
+                f"quantity={quantity}, company_id={company_id}, in_date='{in_date_sql}')",
+            ],
+            "warnings": [],
+        }
+        if prod["is_storable"]:
+            preview["warnings"].append("product.is_storable is ALREADY true — flip is a no-op")
+        if existing_quants:
+            preview["warnings"].append(
+                f"stock.quant already exists at this location ({len(existing_quants)} records) — "
+                "INSERT may create duplicate or violate unique key"
+            )
+        if prod["tracking"] != "none":
+            preview["warnings"].append(
+                f"product.tracking='{prod['tracking']}' — inserting a quant without lot_id may fail "
+                "for lot/serial tracked products"
+            )
+        if dry_run:
+            preview["dry_run"] = True
+            preview["note"] = "No changes made. Set dry_run=false to execute."
+            return preview
+
+        pp_model = conn.execute_kw(
+            "ir.model", "search_read", [[["model", "=", "product.product"]]],
+            {"fields": ["id"], "limit": 1},
+        )
+        if not pp_model:
+            return {"error": "Could not resolve ir.model id for product.product"}
+
+        uid = conn.uid if hasattr(conn, "uid") else 1
+        atomic_code = (
+            f"env.cr.execute(\"UPDATE product_template SET is_storable=true WHERE id={tmpl_id}\"); "
+            f"env.cr.execute(\"UPDATE product_product SET write_date=NOW() WHERE id={product_id}\"); "
+            f"env.cr.execute(\"INSERT INTO stock_quant "
+            f"(product_id, location_id, quantity, reserved_quantity, company_id, in_date, "
+            f"create_uid, write_uid, create_date, write_date) "
+            f"VALUES ({product_id}, {location_id}, {quantity}, 0, {company_id}, "
+            f"{json.dumps(in_date_sql)}, {uid}, {uid}, NOW(), NOW()) RETURNING id\"); "
+            f"new_quant_id = env.cr.fetchone()[0]; "
+            f"env['product.template'].browse({tmpl_id}).invalidate_recordset(); "
+            f"env['product.product'].browse({product_id}).invalidate_recordset(); "
+            f"env['stock.quant'].browse(new_quant_id).invalidate_recordset()"
+        )
+        sa_id = conn.execute_kw(
+            "ir.actions.server", "create",
+            [{"name": "MCP flip to storable + insert quant", "model_id": pp_model[0]["id"],
+              "state": "code", "code": atomic_code}],
+        )
+        try:
+            conn.execute_kw("ir.actions.server", "run", [[sa_id]])
+        finally:
+            conn.execute_kw("ir.actions.server", "unlink", [[sa_id]])
+
+        post_prod = conn.execute_kw(
+            "product.product", "read", [[product_id]],
+            {"fields": ["id", "is_storable", "qty_available", "virtual_available"]},
+        )
+        post_quants = conn.execute_kw(
+            "stock.quant", "search_read",
+            [[["product_id", "=", product_id], ["location_id", "=", location_id],
+              ["company_id", "=", company_id]]],
+            {"fields": ["id", "quantity", "in_date", "company_id", "location_id"]},
+        )
+        return {
+            "dry_run": False,
+            "success": True,
+            "pre": preview,
+            "post": {"product": post_prod[0] if post_prod else None, "quants": post_quants},
+        }
+
+    elif name == "odoo_translate_context_aware":
+        import httpx
+        model_name = args["model"]
+        ids = [int(x) for x in args["ids"]]
+        field_names = args.get("field_names") or ["name"]
+        target_lang = args["target_lang"]
+        source_lang = args.get("source_lang", "en_US")
+        context_hint = args.get("context_hint", "") or ""
+        claude_model = args.get("claude_model", "claude-haiku-4-5")
+        max_tokens = int(args.get("max_tokens", 4000))
+        dry_run = bool(args.get("dry_run", True))
+
+        major = _odoo_major_version(conn)
+        if major < 16:
+            return {"error": f"Odoo {major}.x detected. This tool requires 16+ "
+                             "(update_field_translations). Use odoo_translate_field for older versions."}
+        lang_check = conn.execute_kw("res.lang", "search_count",
+                                     [[["code", "=", target_lang], ["active", "=", True]]])
+        if not lang_check:
+            return {"error": f"Target language '{target_lang}' not found or not active."}
+
+        fields_def = conn.execute_kw(model_name, "fields_get", [field_names],
+                                     {"attributes": ["string", "type", "translate"]})
+        bad = [f for f in field_names if f not in fields_def]
+        if bad:
+            return {"error": f"Fields not found on {model_name}: {bad}"}
+        field_kinds = {f: _field_translate_kind(fields_def[f], f) for f in field_names}
+        non_translatable = [f for f, k in field_kinds.items() if k == "none"]
+        if non_translatable:
+            return {"error": f"Non-translatable fields: {non_translatable}"}
+
+        simple_fields = [f for f, k in field_kinds.items() if k in ("simple", "callable")]
+        html_fields = [f for f, k in field_kinds.items() if k in ("html", "xml")]
+
+        tenant_code = conn.alias if hasattr(conn, "alias") else "default"
+        api_key, base_url = _ai_tenant_credentials(tenant_code)
+        if not api_key:
+            return {"error": "No Anthropic API key configured. Set ANTHROPIC_API_KEY env var "
+                             f"(or ANTHROPIC_API_KEY_{tenant_code.upper().replace('-','_')})."}
+
+        lang_name_map = {"bg_BG": "Bulgarian", "en_US": "English", "de_DE": "German",
+                         "fr_FR": "French", "es_ES": "Spanish", "it_IT": "Italian",
+                         "ro_RO": "Romanian", "ru_RU": "Russian", "tr_TR": "Turkish",
+                         "pl_PL": "Polish", "nl_NL": "Dutch", "cs_CZ": "Czech"}
+        target_human = lang_name_map.get(target_lang, target_lang)
+        source_human = lang_name_map.get(source_lang, source_lang)
+
+        def _call_claude(system_prompt: str, user_prompt: str) -> dict:
+            url = f"{base_url.rstrip('/')}/v1/messages"
+            payload = {
+                "model": claude_model,
+                "max_tokens": max_tokens,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": user_prompt}],
+            }
+            headers = {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            }
+            try:
+                with httpx.Client(timeout=180.0) as client:
+                    resp = client.post(url, json=payload, headers=headers)
+            except Exception as exc:
+                return {"_error": f"HTTP error: {exc}"}
+            if resp.status_code != 200:
+                return {"_error": f"HTTP {resp.status_code}: {resp.text[:500]}"}
+            data = resp.json()
+            text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text").strip()
+            if text.startswith("```"):
+                text = text.strip("`")
+                if text.lower().startswith("json"):
+                    text = text[4:].strip()
+            try:
+                return {"_data": data, "_parsed": json.loads(text)}
+            except json.JSONDecodeError as exc:
+                return {"_error": f"Invalid JSON: {exc}", "_raw": text[:800]}
+
+        simple_preview, html_preview, total_usage = [], [], {"input_tokens": 0, "output_tokens": 0}
+
+        if simple_fields:
+            records = conn.execute_kw(model_name, "read", [ids],
+                                      {"fields": ["id"] + simple_fields,
+                                       "context": {"lang": source_lang}})
+            parent_chain_map = {}
+            if model_name == "ir.ui.menu":
+                for r in records:
+                    chain = []
+                    cur_id = r["id"]
+                    for _ in range(10):
+                        parent = conn.execute_kw("ir.ui.menu", "read", [[cur_id]],
+                                                 {"fields": ["parent_id"],
+                                                  "context": {"lang": source_lang}})
+                        if not parent or not parent[0].get("parent_id"):
+                            break
+                        pid = parent[0]["parent_id"][0]
+                        pdata = conn.execute_kw("ir.ui.menu", "read", [[pid]],
+                                                {"fields": ["name"], "context": {"lang": source_lang}})
+                        if not pdata:
+                            break
+                        chain.insert(0, pdata[0]["name"])
+                        cur_id = pid
+                    parent_chain_map[r["id"]] = " > ".join(chain) if chain else "(root)"
+
+            existing_map = {}
+            for r in records:
+                try:
+                    tr = conn.execute_kw(model_name, "get_field_translations",
+                                         [[r["id"]], simple_fields[0]])
+                    existing_map[r["id"]] = tr
+                except Exception:
+                    existing_map[r["id"]] = None
+
+            items = []
+            for r in records:
+                item = {"id": r["id"], "fields": {}}
+                for f in simple_fields:
+                    item["fields"][f] = r.get(f) or ""
+                if model_name == "ir.ui.menu":
+                    item["parent_chain"] = parent_chain_map.get(r["id"], "")
+                items.append(item)
+
+            system_prompt = (
+                f"You are a professional Odoo ERP translator specialising in {target_human}. "
+                f"You translate business and technical UI strings from {source_human} to {target_human}. "
+                "Produce natural, domain-aware translations — NOT literal word-by-word. "
+                "Use standard terminology for the specific Odoo module (accounting, inventory, "
+                "manufacturing, sales, etc.). Preserve punctuation, capitalisation, and placeholders "
+                "like {var} or %s. For menu labels, use concise noun forms. "
+                "Output ONLY valid JSON — no prose, no markdown fences."
+            )
+            user_prompt = (
+                f"Odoo model: `{model_name}`\n"
+                f"Target field(s): {simple_fields}\n"
+                f"Target language: {target_human} ({target_lang})\n"
+            )
+            if context_hint:
+                user_prompt += f"Domain hint: {context_hint}\n"
+            user_prompt += (
+                "\nTranslate each item. Respond with ONLY:\n"
+                '{"translations": [{"id": <int>, "fields": {"<fieldname>": "<translation>"}}]}\n\n'
+                f"Items ({len(items)}):\n{json.dumps(items, ensure_ascii=False, indent=2)}"
+            )
+            resp = _call_claude(system_prompt, user_prompt)
+            if "_error" in resp:
+                return {"error": f"[simple fields] {resp['_error']}", "raw": resp.get("_raw", "")}
+            parsed = resp["_parsed"]
+            usage = resp["_data"].get("usage", {})
+            total_usage["input_tokens"] += usage.get("input_tokens", 0)
+            total_usage["output_tokens"] += usage.get("output_tokens", 0)
+
+            proposals = {}
+            for entry in parsed.get("translations", []):
+                rid = entry.get("id")
+                if rid in ids:
+                    proposals[rid] = entry.get("fields", {})
+            for r in records:
+                rid = r["id"]
+                for f in simple_fields:
+                    existing = None
+                    if existing_map.get(rid):
+                        try:
+                            for le in existing_map[rid][0].get("translations", []):
+                                if le.get("lang") == target_lang:
+                                    existing = le.get("value")
+                        except Exception:
+                            pass
+                    simple_preview.append({
+                        "id": rid,
+                        "field": f,
+                        "kind": field_kinds[f],
+                        "source": r.get(f) or "",
+                        "existing_translation": existing,
+                        "proposed_translation": proposals.get(rid, {}).get(f, ""),
+                        "parent_chain": parent_chain_map.get(rid) if model_name == "ir.ui.menu" else None,
+                    })
+            simple_proposals_to_write = proposals
+        else:
+            simple_proposals_to_write = {}
+
+        html_proposals_to_write = {}
+        if html_fields:
+            for f in html_fields:
+                for rid in ids:
+                    try:
+                        tr_tuple = conn.execute_kw(model_name, "get_field_translations",
+                                                   [[rid], f], {})
+                        payload = tr_tuple[0] if isinstance(tr_tuple, (list, tuple)) else tr_tuple
+                    except Exception as exc:
+                        html_preview.append({"id": rid, "field": f, "kind": field_kinds[f],
+                                             "error": f"extract failed: {exc}"})
+                        continue
+                    src_terms_ordered = []
+                    seen = set()
+                    existing_tr = {}
+                    for item in (payload or []):
+                        if not isinstance(item, dict):
+                            continue
+                        src = item.get("source") or ""
+                        if src and src not in seen:
+                            seen.add(src)
+                            src_terms_ordered.append(src)
+                        if item.get("lang") == target_lang:
+                            existing_tr[src] = item.get("value")
+                    if not src_terms_ordered:
+                        html_preview.append({"id": rid, "field": f, "kind": field_kinds[f],
+                                             "note": "No translatable terms found"})
+                        continue
+
+                    system_prompt = (
+                        f"You are a professional Odoo ERP translator for {target_human}. "
+                        "You translate HTML/XML content terms (each term is a serialised translatable block "
+                        "from Odoo's html_translate engine, which may contain inline tags like <strong>, <a>, "
+                        "<span>). PRESERVE all HTML tags exactly — only translate the visible text content. "
+                        "Preserve attribute values (href, class, id) unchanged. "
+                        "Produce natural, domain-aware translation. NO literal word-by-word. "
+                        "Output ONLY valid JSON — no prose, no markdown fences."
+                    )
+                    items_list = [{"source": t, "existing": existing_tr.get(t)}
+                                  for t in src_terms_ordered]
+                    user_prompt = (
+                        f"Odoo model: `{model_name}` (record id={rid})\n"
+                        f"Field: `{f}` (kind={field_kinds[f]})\n"
+                        f"Source language: {source_human} ({source_lang})\n"
+                        f"Target language: {target_human} ({target_lang})\n"
+                    )
+                    if context_hint:
+                        user_prompt += f"Domain hint: {context_hint}\n"
+                    user_prompt += (
+                        "\nTranslate each source term. Preserve HTML structure. "
+                        "Respond with ONLY:\n"
+                        '{"terms": [{"source": "<original>", "translation": "<translated>"}]}\n\n'
+                        f"Terms ({len(items_list)}):\n{json.dumps(items_list, ensure_ascii=False, indent=2)}"
+                    )
+                    resp = _call_claude(system_prompt, user_prompt)
+                    if "_error" in resp:
+                        html_preview.append({"id": rid, "field": f, "kind": field_kinds[f],
+                                             "error": resp["_error"]})
+                        continue
+                    parsed = resp["_parsed"]
+                    usage = resp["_data"].get("usage", {})
+                    total_usage["input_tokens"] += usage.get("input_tokens", 0)
+                    total_usage["output_tokens"] += usage.get("output_tokens", 0)
+
+                    term_map = {}
+                    for t in parsed.get("terms", []):
+                        s = t.get("source")
+                        tr = t.get("translation")
+                        if s and tr is not None:
+                            term_map[s] = tr
+                    html_proposals_to_write.setdefault(rid, {})[f] = term_map
+                    html_preview.append({
+                        "id": rid, "field": f, "kind": field_kinds[f],
+                        "terms_count": len(src_terms_ordered),
+                        "translated_count": len(term_map),
+                        "sample_terms": [
+                            {"source": s[:160], "existing": (existing_tr.get(s) or "")[:160],
+                             "proposed": term_map.get(s, "")[:160]}
+                            for s in src_terms_ordered[:5]
+                        ],
+                    })
+
+        preview = {
+            "model": model_name,
+            "source_lang": source_lang,
+            "target_lang": target_lang,
+            "claude_model": claude_model,
+            "field_kinds": field_kinds,
+            "simple_translations": simple_preview,
+            "html_xml_translations": html_preview,
+            "claude_usage_total": total_usage,
+        }
+        if dry_run:
+            preview["dry_run"] = True
+            preview["note"] = "No writes. Set dry_run=false to apply."
+            return preview
+
+        written = 0
+        errors = []
+        for rid, fields_map in simple_proposals_to_write.items():
+            for f, tr in fields_map.items():
+                if not tr:
+                    continue
+                try:
+                    conn.execute_kw(model_name, "update_field_translations",
+                                    [[rid], f, {target_lang: tr}])
+                    written += 1
+                except Exception as exc:
+                    errors.append({"id": rid, "field": f, "kind": "simple", "error": str(exc)})
+
+        for rid, fields_map in html_proposals_to_write.items():
+            for f, term_map in fields_map.items():
+                if not term_map:
+                    continue
+                try:
+                    conn.execute_kw(model_name, "update_field_translations",
+                                    [[rid], f, {target_lang: term_map}])
+                    written += 1
+                except Exception as exc:
+                    errors.append({"id": rid, "field": f, "kind": field_kinds.get(f),
+                                   "error": str(exc)})
+
+        return {
+            "dry_run": False,
+            "success": not errors,
+            "translations_written": written,
+            "errors": errors,
+            "pre": preview,
+        }
+
+    elif name == "odoo_stock_mo_delete_draft":
+        mo_id = int(args["mo_id"])
+        dry_run = bool(args.get("dry_run", True))
+
+        mo = conn.execute_kw(
+            "mrp.production", "read", [[mo_id]],
+            {"fields": ["id", "name", "state", "product_id", "product_qty", "qty_produced",
+                        "origin", "procurement_group_id", "move_raw_ids", "move_finished_ids",
+                        "company_id", "date_start"]},
+        )
+        if not mo:
+            return {"error": f"mrp.production id={mo_id} not found"}
+        mo = mo[0]
+        if mo["state"] not in ("draft", "cancel"):
+            return {"error": f"MO '{mo['name']}' state='{mo['state']}' — only draft/cancel can be deleted. "
+                             "For confirmed/progress/done MOs use Odoo's standard cancel/unbuild flow."}
+        if float(mo.get("qty_produced") or 0) > 0:
+            return {"error": f"MO '{mo['name']}' has qty_produced={mo['qty_produced']} > 0. Refuse."}
+
+        move_ids = list(mo.get("move_raw_ids", [])) + list(mo.get("move_finished_ids", []))
+        if move_ids:
+            moves = conn.execute_kw(
+                "stock.move", "read", [move_ids],
+                {"fields": ["id", "product_id", "state", "quantity", "product_uom_qty"]},
+            )
+            non_draft = [m for m in moves if m["state"] not in ("draft", "cancel")]
+            if non_draft:
+                return {"error": f"MO '{mo['name']}' has {len(non_draft)} non-draft/cancel stock.moves. "
+                                 f"First offenders: {[(m['id'], m['state']) for m in non_draft[:3]]}"}
+            any_qty = [m for m in moves if float(m.get("quantity") or 0) > 0]
+            if any_qty:
+                return {"error": f"MO '{mo['name']}' has {len(any_qty)} moves with quantity > 0. Refuse."}
+
+        svl_model_exists = conn.execute_kw(
+            "ir.model", "search_count",
+            [[["model", "=", "stock.valuation.layer"]]],
+        )
+        svl_count = 0
+        if svl_model_exists and move_ids:
+            svl_count = conn.execute_kw(
+                "stock.valuation.layer", "search_count",
+                [[["stock_move_id", "in", move_ids]]],
+            )
+        elif move_ids:
+            svl_count = conn.execute_kw(
+                "stock.move", "search_count",
+                [[["id", "in", move_ids], ["account_move_id", "!=", False]]],
+            )
+        if svl_count:
+            return {"error": f"MO '{mo['name']}' has {svl_count} valuation/accounting records. Refuse."}
+
+        acc_move_count = conn.execute_kw(
+            "account.move", "search_count",
+            [[["ref", "ilike", mo["name"]]]],
+        )
+
+        pg_id = mo["procurement_group_id"][0] if mo.get("procurement_group_id") else None
+        pg_siblings = 0
+        if pg_id:
+            pg_siblings = conn.execute_kw(
+                "mrp.production", "search_count",
+                [[["procurement_group_id", "=", pg_id], ["id", "!=", mo_id]]],
+            )
+
+        preview = {
+            "mo": mo,
+            "move_ids": move_ids,
+            "move_count": len(move_ids),
+            "svl_or_valued_move_count": svl_count,
+            "account_move_refs_matching_name": acc_move_count,
+            "procurement_group_id": pg_id,
+            "procurement_group_has_other_mos": bool(pg_siblings),
+            "procurement_group_will_be_deleted": bool(pg_id) and not pg_siblings,
+            "warnings": [],
+        }
+        if acc_move_count:
+            preview["warnings"].append(
+                f"{acc_move_count} account.move records reference name '{mo['name']}' (via ref ilike). "
+                "These will NOT be deleted — manual review recommended."
+            )
+        if dry_run:
+            preview["dry_run"] = True
+            preview["note"] = "No changes made. Set dry_run=false to execute."
+            return preview
+
+        mrp_model = conn.execute_kw(
+            "ir.model", "search_read", [[["model", "=", "mrp.production"]]],
+            {"fields": ["id"], "limit": 1},
+        )
+        if not mrp_model:
+            return {"error": "Could not resolve ir.model id for mrp.production"}
+
+        move_ids_sql = "ARRAY[" + ",".join(str(i) for i in move_ids) + "]::integer[]" if move_ids else "ARRAY[]::integer[]"
+        pg_cleanup = ""
+        if pg_id and not pg_siblings:
+            pg_cleanup = (
+                f"env.cr.execute('DELETE FROM procurement_group WHERE id=%s AND "
+                f"NOT EXISTS (SELECT 1 FROM mrp_production WHERE procurement_group_id=%s) AND "
+                f"NOT EXISTS (SELECT 1 FROM stock_move WHERE group_id=%s)', "
+                f"({pg_id}, {pg_id}, {pg_id})); "
+            )
+        code = (
+            f"env.cr.execute(\"UPDATE mrp_production SET state='cancel' WHERE id={mo_id}\"); "
+            f"env.cr.execute('DELETE FROM stock_move_line WHERE move_id = ANY(%s)', ({move_ids_sql},)) "
+            f"if {bool(move_ids)} else None; "
+            f"env.cr.execute('DELETE FROM stock_move WHERE id = ANY(%s)', ({move_ids_sql},)) "
+            f"if {bool(move_ids)} else None; "
+            f"env.cr.execute(\"DELETE FROM mrp_production WHERE id={mo_id}\"); "
+            f"{pg_cleanup}"
+            "env.invalidate_all()"
+        )
+        sa_id = conn.execute_kw(
+            "ir.actions.server", "create",
+            [{"name": f"MCP delete draft MO {mo_id}", "model_id": mrp_model[0]["id"],
+              "state": "code", "code": code}],
+        )
+        try:
+            conn.execute_kw("ir.actions.server", "run", [[sa_id]])
+        finally:
+            conn.execute_kw("ir.actions.server", "unlink", [[sa_id]])
+
+        post_mo = conn.execute_kw("mrp.production", "search_count", [[["id", "=", mo_id]]])
+        post_moves = conn.execute_kw("stock.move", "search_count",
+                                     [[["id", "in", move_ids]]]) if move_ids else 0
+        post_pg = conn.execute_kw("procurement.group", "search_count",
+                                  [[["id", "=", pg_id]]]) if pg_id else 0
+        return {
+            "dry_run": False,
+            "success": True,
+            "pre": preview,
+            "post": {
+                "mo_remaining": post_mo,
+                "moves_remaining": post_moves,
+                "procurement_group_remaining": post_pg,
+            },
+        }
+
+    elif name == "odoo_record_backup":
+        model = args["model"]
+        ids = [int(x) for x in args["ids"]]
+        include_related = args.get("include_related") or []
+
+        all_fields = conn.execute_kw(model, "fields_get", [], {"attributes": ["type"]})
+        readable_field_names = [n for n, d in all_fields.items() if d.get("type") != "binary"]
+        records = conn.execute_kw(model, "read", [ids], {"fields": readable_field_names})
+
+        related_dumps = {}
+        for rel in include_related:
+            rm = rel["model"]
+            rd = rel.get("domain", [])
+            rf = rel.get("fields") or None
+            if rf:
+                related_records = conn.execute_kw(rm, "search_read", [rd], {"fields": rf})
+            else:
+                ids_only = conn.execute_kw(rm, "search", [rd])
+                if ids_only:
+                    rm_fields = conn.execute_kw(rm, "fields_get", [], {"attributes": ["type"]})
+                    rm_readable = [n for n, d in rm_fields.items() if d.get("type") != "binary"]
+                    related_records = conn.execute_kw(rm, "read", [ids_only], {"fields": rm_readable})
+                else:
+                    related_records = []
+            related_dumps[rm] = related_records
+
+        active_alias = args.get("connection") or "default"
+        snapshot = {
+            "backup_date_utc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "connection": active_alias,
+            "primary": {
+                "model": model,
+                "ids": ids,
+                "count": len(records),
+                "field_count": len(readable_field_names),
+                "records": records,
+            },
+            "related": related_dumps,
+            "note": "Binary fields (images, attachments) excluded. Caller should persist this JSON "
+                    "(e.g. write to ~/.claude/clients/<conn>/backup_<op>_<date>.json) before destructive ops.",
+        }
+        return snapshot
+
+    elif name == "odoo_stock_close_unaccounted_value":
+        record_id = int(args["record_id"])
+        dry_run = bool(args.get("dry_run", True))
+        src_override = args.get("source_model", "auto")
+        grni_override = args.get("grni_account_id")
+
+        if src_override == "auto":
+            svl_model_exists = conn.execute_kw(
+                "ir.model", "search_count",
+                [[["model", "=", "stock.valuation.layer"]]],
+            )
+            source_model = "stock.valuation.layer" if svl_model_exists else "stock.move"
+        else:
+            source_model = src_override
+
+        cat_fields_def = conn.execute_kw(
+            "product.category", "fields_get", [],
+            {"attributes": ["type", "relation"]},
+        )
+        has_l10n_bg_input = "l10n_bg_stock_input_account_id" in cat_fields_def
+        has_legacy_input = "property_stock_account_input_categ_id" in cat_fields_def
+        has_variation_acc = "account_stock_variation_id" in cat_fields_def
+
+        if source_model == "stock.valuation.layer":
+            fields_rec = ["id", "product_id", "quantity", "unit_cost", "value",
+                          "remaining_qty", "remaining_value", "company_id",
+                          "stock_move_id", "account_move_id", "description", "create_date"]
+        else:
+            fields_rec = ["id", "product_id", "quantity", "price_unit", "value",
+                          "remaining_qty", "remaining_value", "company_id",
+                          "account_move_id", "is_valued", "is_in", "is_out",
+                          "reference", "name", "date", "create_date"]
+
+        rec = conn.execute_kw(source_model, "read", [[record_id]], {"fields": fields_rec})
+        if not rec:
+            return {"error": f"{source_model} id={record_id} not found"}
+        rec = rec[0]
+        if rec.get("account_move_id"):
+            return {"error": f"{source_model} {record_id} is NOT orphan — already linked to "
+                             f"account.move {rec['account_move_id']}"}
+        if source_model == "stock.move" and not rec.get("is_valued"):
+            return {"error": f"stock.move {record_id} has is_valued=false — nothing to account for."}
+
+        product_id = rec["product_id"][0]
+        company_id = rec["company_id"][0]
+        value = float(rec["value"])
+        qty = float(rec["quantity"])
+
+        if source_model == "stock.valuation.layer":
+            desc = rec.get("description") or ""
+            record_date = rec.get("create_date", "")[:10]
+        else:
+            desc = rec.get("reference") or rec.get("name") or ""
+            record_date = (rec.get("date") or rec.get("create_date") or "")[:10]
+
+        prod = conn.execute_kw(
+            "product.product", "read", [[product_id]],
+            {"fields": ["id", "default_code", "name", "categ_id"]},
+        )
+        if not prod:
+            return {"error": f"product.product id={product_id} vanished"}
+        categ_id = prod[0]["categ_id"][0]
+
+        cat_read_fields = ["id", "name", "property_stock_valuation_account_id",
+                           "property_stock_journal", "property_valuation"]
+        if has_legacy_input:
+            cat_read_fields.append("property_stock_account_input_categ_id")
+        if has_l10n_bg_input:
+            cat_read_fields.append("l10n_bg_stock_input_account_id")
+        if has_variation_acc:
+            cat_read_fields.append("account_stock_variation_id")
+
+        categ = conn.execute_kw("product.category", "read", [[categ_id]], {"fields": cat_read_fields})
+        if not categ:
+            return {"error": f"product.category id={categ_id} not found"}
+        categ = categ[0]
+        if not categ["property_stock_valuation_account_id"]:
+            return {"error": "category has no property_stock_valuation_account_id. "
+                             f"Category: {categ}"}
+        if not categ["property_stock_journal"]:
+            return {"error": "category has no property_stock_journal. "
+                             f"Category: {categ}"}
+        if categ["property_valuation"] != "real_time":
+            return {"error": f"category.property_valuation='{categ['property_valuation']}' — "
+                             "only real_time valuation supported."}
+
+        if grni_override is not None:
+            grni_acc = int(grni_override)
+            grni_source = "user_override"
+        elif has_legacy_input and categ.get("property_stock_account_input_categ_id"):
+            grni_acc = categ["property_stock_account_input_categ_id"][0]
+            grni_source = "property_stock_account_input_categ_id (v14-18)"
+        elif has_l10n_bg_input and categ.get("l10n_bg_stock_input_account_id"):
+            grni_acc = categ["l10n_bg_stock_input_account_id"][0]
+            grni_source = "l10n_bg_stock_input_account_id (v19 + l10n_bg_stock_account)"
+        elif has_variation_acc and categ.get("account_stock_variation_id"):
+            grni_acc = categ["account_stock_variation_id"][0]
+            grni_source = "account_stock_variation_id (v19 vanilla fallback)"
+        else:
+            return {"error": "Cannot auto-detect GRNI account. Provide grni_account_id explicitly. "
+                             f"Available category fields: {list(categ.keys())}"}
+
+        stock_acc = categ["property_stock_valuation_account_id"][0]
+        journal_id = categ["property_stock_journal"][0]
+
+        journal = conn.execute_kw(
+            "account.journal", "read", [[journal_id]],
+            {"fields": ["id", "name", "type", "code", "company_id"]},
+        )
+        if not journal:
+            return {"error": f"account.journal id={journal_id} not found"}
+        journal = journal[0]
+        if journal["type"] != "general":
+            return {"error": f"Journal '{journal['name']}' has type='{journal['type']}' — "
+                             "only 'general' journals are supported for Inventory Valuation entries."}
+        j_company = journal["company_id"][0] if journal.get("company_id") else None
+        if j_company is not None and j_company != company_id:
+            return {"error": f"Journal company_id={j_company} does not match record company_id={company_id}."}
+
+        date = args.get("date") or record_date
+        if not date:
+            return {"error": "date is required (could not derive from record)"}
+        try:
+            datetime.fromisoformat(date)
+        except ValueError as exc:
+            return {"error": f"Invalid date '{date}': {exc}. Use ISO format YYYY-MM-DD."}
+
+        ref_prefix = "SVL" if source_model == "stock.valuation.layer" else "StockMove"
+        ref = f"{ref_prefix} {record_id} - {desc}"[:200]
+        line_name = desc[:200]
+
+        preview = {
+            "source_model": source_model,
+            "record": rec,
+            "product": prod[0],
+            "category": categ,
+            "journal": journal,
+            "grni_account_source": grni_source,
+            "journal_entry_to_create": {
+                "journal_id": journal_id,
+                "date": date,
+                "ref": ref,
+                "company_id": company_id,
+                "lines": [
+                    {"account_id": stock_acc, "debit": value, "credit": 0, "quantity": qty},
+                    {"account_id": grni_acc, "debit": 0, "credit": value, "quantity": 0},
+                ],
+            },
+        }
+        if dry_run:
+            preview["dry_run"] = True
+            preview["note"] = "No changes made. Set dry_run=false to execute."
+            return preview
+
+        am_model = conn.execute_kw(
+            "ir.model", "search_read", [[["model", "=", "account.move"]]],
+            {"fields": ["id"], "limit": 1},
+        )
+        if not am_model:
+            return {"error": "Could not resolve ir.model id for account.move"}
+
+        ref_py = json.dumps(ref)
+        date_py = json.dumps(date)
+        name_py = json.dumps(line_name)
+        update_table = "stock_valuation_layer" if source_model == "stock.valuation.layer" else "stock_move"
+        code = (
+            f"move = env['account.move'].with_company({company_id}).create({{"
+            f"'move_type': 'entry', 'journal_id': {journal_id}, "
+            f"'date': {date_py}, 'ref': {ref_py}, 'company_id': {company_id}, "
+            f"'line_ids': ["
+            f"(0, 0, {{'account_id': {stock_acc}, 'name': {name_py}, "
+            f"'debit': {value}, 'credit': 0.0, 'product_id': {product_id}, 'quantity': {qty}}}), "
+            f"(0, 0, {{'account_id': {grni_acc}, 'name': {name_py}, "
+            f"'debit': 0.0, 'credit': {value}, 'product_id': {product_id}, 'quantity': 0.0}})"
+            f"]}}); "
+            f"move.action_post(); "
+            f"env.cr.execute('UPDATE {update_table} SET account_move_id=%s WHERE id=%s', "
+            f"(move.id, {record_id})); "
+            f"env[{json.dumps(source_model)}].browse({record_id}).invalidate_recordset(); "
+            f"action = {{'type': 'ir.actions.act_window', 'res_model': 'account.move', 'res_id': move.id}}"
+        )
+        sa_id = conn.execute_kw(
+            "ir.actions.server", "create",
+            [{"name": f"MCP close unaccounted {source_model} {record_id}",
+              "model_id": am_model[0]["id"], "state": "code", "code": code}],
+        )
+        try:
+            result = conn.execute_kw("ir.actions.server", "run", [[sa_id]])
+        finally:
+            conn.execute_kw("ir.actions.server", "unlink", [[sa_id]])
+
+        new_move_id = result.get("res_id") if isinstance(result, dict) else None
+        post_rec = conn.execute_kw(
+            source_model, "read", [[record_id]], {"fields": ["id", "account_move_id"]},
+        )
+        post_move = None
+        if new_move_id:
+            post_move = conn.execute_kw(
+                "account.move", "read", [[new_move_id]],
+                {"fields": ["id", "name", "state", "journal_id", "date", "ref", "amount_total"]},
+            )
+        return {
+            "dry_run": False,
+            "success": True,
+            "source_model": source_model,
+            "grni_account_source": grni_source,
+            "pre": preview,
+            "post": {
+                "record": post_rec[0] if post_rec else None,
+                "account_move": post_move[0] if post_move else None,
+            },
+        }
+
     # ── AI Tokenizer (l10n_bg_claude_terminal v1.23+) ──
     elif name == "ai_tokenize_record":
         result = conn.execute_kw(
@@ -6303,10 +7317,12 @@ def _execute_tool(name: str, args: dict) -> Any:
             conn=conn,
             tenant_code=tenant_code,
             limit=int(args.get("limit", 50)),
+            requested_only=bool(args.get("requested_only", False)),
         )
         return {
             "tenant_code": tenant_code,
             "count": len(pending),
+            "requested_only": bool(args.get("requested_only", False)),
             "pending": pending,
         }
 
@@ -6315,6 +7331,28 @@ def _execute_tool(name: str, args: dict) -> Any:
         return ai_invoice_engine.pipeline_summary(
             conn=conn, tenant_code=tenant_code,
         )
+
+    elif name == "ai_usage_budget_status":
+        tenant_code = _ai_tenant_code(conn, args.get("tenant_code"))
+        limit_mc = ai_invoice_engine._read_company_budget_eur_mc(conn)
+        spent_mc = ai_usage_log.monthly_cost_eur_mc(tenant_code)
+        enforced = limit_mc > 0
+        remaining_mc = max(0, limit_mc - spent_mc) if enforced else None
+        pct = (spent_mc / limit_mc * 100) if enforced and limit_mc > 0 else None
+        return {
+            "tenant_code": tenant_code,
+            "enforced": enforced,
+            "spent_eur_mc": spent_mc,
+            "spent_eur": round(spent_mc / 100_000, 4),
+            "limit_eur_mc": limit_mc,
+            "limit_eur": round(limit_mc / 100_000, 2) if enforced else 0,
+            "remaining_eur_mc": remaining_mc,
+            "remaining_eur": (
+                round(remaining_mc / 100_000, 4) if enforced else None
+            ),
+            "percent_used": round(pct, 2) if pct is not None else None,
+            "exceeded": enforced and spent_mc >= limit_mc,
+        }
 
     elif name == "ai_invoice_pipeline_run":
         tenant_code = _ai_tenant_code(conn, args.get("tenant_code"))

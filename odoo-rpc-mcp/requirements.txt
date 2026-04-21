@@ -12,3 +12,8 @@ requests>=2.31.0
 lxml>=5.2.0
 argon2-cffi>=23.1.0
 itsdangerous>=2.2.0
+# Optional — PDF sanitization in ai_vision_service (Gap 4.3). When
+# present the vision extractor strips /JS, /OpenAction, /EmbeddedFiles
+# before sending the PDF to Claude. If missing the sanitizer falls
+# back to returning the original bytes + logs a warning.
+pypdf>=4.0.0

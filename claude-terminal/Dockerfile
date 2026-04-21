@@ -1,6 +1,6 @@
 FROM node:22-bookworm-slim
 
-LABEL maintainer="BL Consulting"
+LABEL maintainer="Rosen Vladimirov <vladimirov.rosen@gmail.com>"
 LABEL description="Claude Code CLI with ttyd web terminal (multi-user)"
 
 # Build ttyd from source

@@ -313,6 +313,35 @@ def stats(tenant_code: str, period: str = "month") -> dict:
     }
 
 
+def monthly_cost_eur_mc(
+    tenant_code: str, now: datetime | None = None,
+) -> int:
+    """Return total EUR millicents charged this calendar month.
+
+    Used by the budget guard in the invoice pipeline: compares this
+    running total against the company's monthly cap and aborts the
+    extract before spending a euro more on vision API calls.
+
+    `now` is injectable for testing; defaults to UTC now.
+    """
+    now = now or datetime.now(timezone.utc)
+    month_start = now.replace(
+        day=1, hour=0, minute=0, second=0, microsecond=0,
+    )
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT COALESCE(SUM(cost_millicents), 0) AS total
+            FROM ai_usage_log
+            WHERE tenant_code = ?
+              AND billed = 1
+              AND created_at >= ?
+            """,
+            (tenant_code, month_start.isoformat(timespec="seconds")),
+        ).fetchone()
+    return int(row["total"]) if row else 0
+
+
 def _period_start(period: str, now: datetime) -> datetime | None:
     period = (period or "month").lower()
     if period == "day":
@@ -378,8 +407,18 @@ def daily_totals(tenant_code: str, day: str) -> dict:
     return dict(row) if row else {}
 
 
-def mark_billed(ids: Iterable[int], billed: bool) -> int:
-    """Flip billed flag on a batch of rows (for manual corrections)."""
+def mark_billed(
+    ids: Iterable[int], billed: bool, *, reason: str | None = None,
+) -> int:
+    """Flip billed flag on a batch of rows (for manual corrections).
+
+    This is the ONLY sanctioned mutation of rows after they're written —
+    every other column is append-only by convention. The change plus
+    ``reason`` (if supplied) is WARN-logged so operations has an audit
+    trail of who flipped a billed flag and why (the stream feeds
+    reconciliation reports). Passing no ``reason`` still works but
+    emits a softer log line.
+    """
     id_list = list(ids)
     if not id_list:
         return 0
@@ -390,4 +429,17 @@ def mark_billed(ids: Iterable[int], billed: bool) -> int:
             [1 if billed else 0, *id_list],
         )
         conn.commit()
-        return cur.rowcount
+        affected = cur.rowcount
+    if reason:
+        logger.warning(
+            "ai_usage_log.mark_billed: flipped %s rows to billed=%s "
+            "(ids=%s, reason=%s)",
+            affected, billed, id_list, reason,
+        )
+    else:
+        logger.info(
+            "ai_usage_log.mark_billed: flipped %s rows to billed=%s "
+            "(ids=%s, no reason given)",
+            affected, billed, id_list,
+        )
+    return affected

@@ -89,14 +89,39 @@ def choose_model(
 
 
 def count_pdf_pages(pdf_bytes: bytes) -> int:
-    """Cheap PDF page counter. Falls back to 1 on any failure."""
-    try:
-        # Scan for /Type /Page (not /Pages) — fast, no external deps.
-        # For robust count, install pypdf; this is good-enough for routing.
-        n = pdf_bytes.count(b"/Type /Page") - pdf_bytes.count(b"/Type /Pages")
-        return max(1, n)
-    except Exception:
+    """Return the true PDF page count; fall back to a byte heuristic.
+
+    Accurate count matters for model routing — the haiku/sonnet/opus
+    cutoffs (see ``choose_model``) are driven by this number. The old
+    byte scan undercounted by 2–3× on PDFs whose /Pages tree listed
+    intermediate nodes, over-routing tiny invoices to sonnet.
+
+    Order of attempts:
+      1. pypdf — authoritative, handles encrypted / cross-ref tables.
+      2. Byte heuristic — ``/Type /Page`` minus ``/Type /Pages``; used
+         when pypdf is absent or raises. Good enough to keep routing
+         sane until the operator installs pypdf.
+      3. Hard fallback 1 — so extract_invoice always routes to a model.
+    """
+    if not pdf_bytes:
         return 1
+    try:  # ① pypdf
+        from io import BytesIO as _BytesIO
+
+        from pypdf import PdfReader as _PdfReader
+        reader = _PdfReader(_BytesIO(pdf_bytes))
+        n = len(reader.pages)
+        if n > 0:
+            return n
+    except Exception as e:  # noqa: BLE001
+        logger.debug("pypdf page count failed, falling back to byte scan: %s", e)
+    try:  # ② byte heuristic
+        n = pdf_bytes.count(b"/Type /Page") - pdf_bytes.count(b"/Type /Pages")
+        if n >= 1:
+            return n
+    except Exception:  # noqa: BLE001
+        pass
+    return 1  # ③ hard fallback
 
 
 # ─── Cost calculation ─────────────────────────────────────
@@ -179,14 +204,343 @@ Rules:
 - Output ONLY the JSON object, no markdown, no commentary."""
 
 
+_SYSTEM_PROMPT_V2 = """You are a Bulgarian accounting document scanner.
+
+Extract data from the attached invoice or credit note. Return a SINGLE JSON \
+object matching this schema:
+
+{
+  "document_type": "in_invoice" | "in_refund" | "out_invoice" | "out_refund",
+  "l10n_bg_document_type": "01" | "02" | "03" | ... | "98",
+  "partner_name": string,
+  "partner_vat": string | null,
+  "partner_address": string | null,
+  "invoice_number": string,
+  "invoice_date": "YYYY-MM-DD",
+  "delivery_date": "YYYY-MM-DD" | null,
+  "payment_term_days": integer | null,
+  "currency": "BGN" | "EUR" | "USD" | ...,
+  "amount_untaxed": number,
+  "amount_tax": number,
+  "amount_total": number,
+  "lines": [
+    {
+      "description": string,
+      "quantity": number,
+      "uom": string | null,
+      "price_unit": number,
+      "tax_rate": 0 | 9 | 20,
+      "amount_subtotal": number
+    }
+  ],
+  "_confidence": {
+    "document_type": number,
+    "partner_name": number,
+    "partner_vat": number,
+    "invoice_number": number,
+    "invoice_date": number,
+    "amount_untaxed": number,
+    "amount_tax": number,
+    "amount_total": number,
+    "lines_overall": number
+  }
+}
+
+Rules:
+- Numbers MUST be numeric types, not strings.
+- Dates in ISO YYYY-MM-DD only.
+- Cyrillic company names: preserve exactly.
+- BG VAT format: "BG" + 9 or 10 digits (strip spaces).
+- If a field is ambiguous or missing: null. Do NOT invent values.
+- The `_confidence` object gives your per-field confidence in the range
+  0.0 to 1.0. Be honest: 1.0 means "I am certain this is correct",
+  0.5 means "I am guessing", 0.0 means "I could not extract this".
+  For `lines_overall` assess whether every line item was captured cleanly
+  (missing rows, merged rows, unclear UoM all reduce the score).
+  Do NOT output confidence for fields whose value is null.
+- Output ONLY the JSON object, no markdown, no commentary."""
+
+
+_SYSTEM_PROMPT_V4 = """You are a Bulgarian accounting document scanner.
+
+Extract data from the attached invoice, credit note, or customs \
+declaration. Return a SINGLE JSON object matching this schema:
+
+{
+  "document_type": "in_invoice" | "in_refund" | "out_invoice" | "out_refund",
+  "l10n_bg_document_type": "01" | "02" | "03" | "117_protocol_117_1" | \
+"117_protocol_82_2_1" | ... | "in_customs" | "out_customs" | "98",
+  "partner_name": string,
+  "partner_vat": string | null,
+  "partner_eik": string | null,
+  "partner_address": string | null,
+  "customs_mrn": string | null,
+  "invoice_number": string,
+  "invoice_date": "YYYY-MM-DD",
+  "delivery_date": "YYYY-MM-DD" | null,
+  "payment_term_days": integer | null,
+  "currency": "BGN" | "EUR" | "USD" | ...,
+  "amount_untaxed": number,
+  "amount_tax": number,
+  "amount_total": number,
+  "lines": [
+    {
+      "description": string,
+      "quantity": number,
+      "uom": string | null,
+      "price_unit": number,
+      "tax_rate": 0 | 9 | 20,
+      "amount_subtotal": number
+    }
+  ],
+  "_confidence": {
+    "document_type": number,
+    "partner_name": number,
+    "partner_vat": number,
+    "invoice_number": number,
+    "invoice_date": number,
+    "amount_untaxed": number,
+    "amount_tax": number,
+    "amount_total": number,
+    "lines_overall": number
+  }
+}
+
+Multi-page guidance (IMPORTANT):
+- The grand total (amount_untaxed / amount_tax / amount_total) typically
+  appears on the LAST page of a multi-page invoice. Before filling it,
+  scan the final pages — do not report a per-page subtotal as the total.
+- "Continued…" / "Продължава…" / page numbering like "1 of 3" signals
+  a multi-sheet document; collect lines from all pages before reporting.
+- If totals appear on an intermediate page (quote-style preview), they
+  are NOT the final totals — look further.
+- When a rounding row is present ("Закръгляване" / "Rounding"), include
+  it as a separate line and use the printed final total, not the sum of
+  the other lines.
+
+Bulgarian-specific guidance:
+- BG VAT format: "BG" + 9 or 10 digits. Strip spaces and dashes. If the
+  printed value is just 9/13 digits (naked ЕИК), return it as-is in
+  partner_vat and also populate partner_eik — the post-processor will
+  normalise.
+- partner_eik is the 9-digit Единен идентификационен код (company
+  registry code). 13-digit EIKs (sole traders) truncate to the first 9
+  on the VAT number; keep the full 13 in partner_eik if printed.
+- customs_mrn: 18-character Movement Reference Number on import/export
+  customs declarations (2-digit year + 2-letter country + 14 alphanum).
+  Populate only when the document is an actual customs declaration —
+  NOT when an invoice merely mentions an MRN in its text.
+- Art. 117 (self-billing): when the supplier VAT is non-Bulgarian (EU
+  or third-country), the document_type is typically a 117_* protocol
+  code (e.g. "117_protocol_117_1" for EU services reverse-charge, or
+  "117_protocol_82_2_1" for third-country services). Pick the closest
+  fit; the accountant will confirm.
+
+Rules:
+- Numbers MUST be numeric types, not strings.
+- Dates in ISO YYYY-MM-DD only.
+- Cyrillic company names: preserve exactly.
+- If a field is ambiguous or missing: null. Do NOT invent values.
+- The `_confidence` object gives your per-field confidence in the range
+  0.0 to 1.0. Be honest: 1.0 = certain, 0.5 = guessing, 0.0 = could
+  not extract. Do NOT output confidence for fields whose value is null.
+- Output ONLY the JSON object, no markdown, no commentary."""
+
+
+_SYSTEM_PROMPT_V3 = """You are a Bulgarian accounting document scanner.
+
+Extract data from the attached invoice, credit note, or customs \
+declaration. Return a SINGLE JSON object matching this schema:
+
+{
+  "document_type": "in_invoice" | "in_refund" | "out_invoice" | "out_refund",
+  "l10n_bg_document_type": "01" | "02" | "03" | "117_protocol_117_1" | \
+"117_protocol_82_2_1" | ... | "in_customs" | "out_customs" | "98",
+  "partner_name": string,
+  "partner_vat": string | null,
+  "partner_eik": string | null,
+  "partner_address": string | null,
+  "customs_mrn": string | null,
+  "invoice_number": string,
+  "invoice_date": "YYYY-MM-DD",
+  "delivery_date": "YYYY-MM-DD" | null,
+  "payment_term_days": integer | null,
+  "currency": "BGN" | "EUR" | "USD" | ...,
+  "amount_untaxed": number,
+  "amount_tax": number,
+  "amount_total": number,
+  "lines": [
+    {
+      "description": string,
+      "quantity": number,
+      "uom": string | null,
+      "price_unit": number,
+      "tax_rate": 0 | 9 | 20,
+      "amount_subtotal": number
+    }
+  ],
+  "_confidence": {
+    "document_type": number,
+    "partner_name": number,
+    "partner_vat": number,
+    "invoice_number": number,
+    "invoice_date": number,
+    "amount_untaxed": number,
+    "amount_tax": number,
+    "amount_total": number,
+    "lines_overall": number
+  }
+}
+
+Bulgarian-specific guidance:
+- BG VAT format: "BG" + 9 or 10 digits. Strip spaces and dashes. If the
+  printed value is just 9/13 digits (naked ЕИК), return it as-is in
+  partner_vat and also populate partner_eik — the post-processor will
+  normalise.
+- partner_eik is the 9-digit Единен идентификационен код (company
+  registry code). 13-digit EIKs (sole traders) truncate to the first 9
+  on the VAT number; keep the full 13 in partner_eik if printed.
+- customs_mrn: 18-character Movement Reference Number on import/export
+  customs declarations (2-digit year + 2-letter country + 14 alphanum).
+  Populate only when the document is an actual customs declaration —
+  NOT when an invoice merely mentions an MRN in its text.
+- Art. 117 (self-billing): when the supplier VAT is non-Bulgarian (EU
+  or third-country), the document_type is typically a 117_* protocol
+  code (e.g. "117_protocol_117_1" for EU services reverse-charge, or
+  "117_protocol_82_2_1" for third-country services). Pick the closest
+  fit; the accountant will confirm.
+
+Rules:
+- Numbers MUST be numeric types, not strings.
+- Dates in ISO YYYY-MM-DD only.
+- Cyrillic company names: preserve exactly.
+- If a field is ambiguous or missing: null. Do NOT invent values.
+- The `_confidence` object gives your per-field confidence in the range
+  0.0 to 1.0. Be honest: 1.0 = certain, 0.5 = guessing, 0.0 = could
+  not extract. Do NOT output confidence for fields whose value is null.
+- Output ONLY the JSON object, no markdown, no commentary."""
+
+
+# Map prompt_version -> system prompt text.  New versions get appended here;
+# consumers default to the newest.
+_PROMPT_VERSIONS = {
+    "v1": _SYSTEM_PROMPT_V1,
+    "v2": _SYSTEM_PROMPT_V2,
+    "v3": _SYSTEM_PROMPT_V3,
+    "v4": _SYSTEM_PROMPT_V4,
+}
+DEFAULT_PROMPT_VERSION = "v4"
+
+
+def _format_partner_account_hints(hints: list[dict]) -> str:
+    """Render partner→account histogram as a terse bullet list.
+
+    Caller passes the output of ``ai_invoice_engine._collect_partner_account_histogram``
+    — already sorted descending + truncated to the top accounts. Format
+    optimised for prompt compactness: one line per account, "share%
+    (count lines): Account Label". The model uses this as a soft
+    prior when suggesting line coding, NOT as a hard override.
+    """
+    if not hints:
+        return ""
+    lines = []
+    for h in hints[:5]:
+        share_pct = (h.get("share") or 0) * 100
+        label = h.get("account_label") or f"id={h.get('account_id')}"
+        lines.append(
+            f"- {share_pct:.0f}% ({h.get('count', 0)} lines): {label}"
+        )
+    return "\n".join(lines)
+
+
+def _format_few_shot_block(examples: list[dict]) -> str:
+    """Render past invoices as a compact JSON reference for the model.
+
+    Kept as JSON (not narrative prose) so Claude can pattern-match
+    partner naming, line descriptions, UoM conventions deterministically.
+    Truncated per-example to a few fields — the goal is priming on
+    vendor vocabulary, not exhaustive replay.
+    """
+    if not examples:
+        return ""
+    slim = [{
+        "partner_name": e.get("partner_name") or "",
+        "invoice_number_example": e.get("invoice_number") or "",
+        "invoice_date_example": e.get("invoice_date") or "",
+        "amount_untaxed": e.get("amount_untaxed") or 0.0,
+        "amount_tax": e.get("amount_tax") or 0.0,
+        "amount_total": e.get("amount_total") or 0.0,
+        "currency": e.get("currency") or "",
+        "lines": [{
+            "description": (ln.get("description") or "")[:120],
+            "quantity": ln.get("quantity") or 0,
+            "price_unit": ln.get("price_unit") or 0.0,
+            "amount_subtotal": ln.get("amount_subtotal") or 0.0,
+        } for ln in (e.get("lines") or [])[:3]],
+    } for e in examples[:3]]
+    return json.dumps(slim, ensure_ascii=False, indent=2)
+
+
 def build_messages(
     *,
     file_b64: str,
     mimetype: str,
-    prompt_version: str = "v1",
+    prompt_version: str = DEFAULT_PROMPT_VERSION,
+    few_shot_examples: list[dict] | None = None,
+    partner_account_hints: list[dict] | None = None,
 ) -> tuple[str, list[dict]]:
-    """Return (system, messages) tuple for Anthropic Messages API."""
-    system = _SYSTEM_PROMPT_V1  # v1 is the only version shipped initially
+    """Return (system, messages) tuple for Anthropic Messages API.
+
+    When ``few_shot_examples`` or ``partner_account_hints`` is provided,
+    a leading user→assistant pair is prepended carrying vendor-specific
+    context. The pair gets ``cache_control`` so repeat extractions on
+    the same vendor hit the prompt cache and amortise the tokens.
+    """
+    system = _PROMPT_VERSIONS.get(prompt_version, _SYSTEM_PROMPT_V4)
+    messages: list[dict] = []
+
+    fs_text = (
+        _format_few_shot_block(few_shot_examples)
+        if few_shot_examples else ""
+    )
+    hints_text = (
+        _format_partner_account_hints(partner_account_hints)
+        if partner_account_hints else ""
+    )
+    if fs_text or hints_text:
+        parts: list[str] = []
+        if fs_text:
+            parts.append(
+                "REFERENCE — past invoices from this vendor (for "
+                "partner-name spelling, line description style, UoM "
+                "conventions, currency). Do NOT copy values; extract "
+                "what the current scan shows:\n" + fs_text
+            )
+        if hints_text:
+            parts.append(
+                "ACCOUNT CODING HISTORY — most frequent account codes "
+                "this vendor's lines landed on previously. Treat as a "
+                "soft prior for the `account_id` on new lines unless "
+                "the line description clearly says otherwise:\n"
+                + hints_text
+            )
+        messages.append({
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": "\n\n".join(parts),
+                "cache_control": {"type": "ephemeral"},
+            }],
+        })
+        messages.append({
+            "role": "assistant",
+            "content": (
+                "Understood — I'll use the reference only for "
+                "formatting cues and extract fresh values from "
+                "the attached scan."
+            ),
+        })
+
     content: list[dict] = []
 
     if mimetype == "application/pdf":
@@ -209,7 +563,8 @@ def build_messages(
         "text": "Extract the invoice data as specified. Return ONLY the JSON object.",
     })
 
-    return system, [{"role": "user", "content": content}]
+    messages.append({"role": "user", "content": content})
+    return system, messages
 
 
 # ─── Extraction ───────────────────────────────────────────
@@ -227,8 +582,11 @@ class ExtractionResult:
     cache_creation_tokens: int = 0
     cost_usd_millicents: int = 0
     cost_eur_millicents: int = 0
-    prompt_version: str = "v1"
+    prompt_version: str = DEFAULT_PROMPT_VERSION
     extracted_data: dict | None = None
+    # Per-field confidence pulled out of extracted_data["_confidence"].
+    # Empty for prompt v1 responses (no confidence info in schema).
+    field_confidence: dict[str, float] = field(default_factory=dict)
     raw_response: dict | None = field(default=None, repr=False)
     error_message: str | None = None
 
@@ -251,6 +609,25 @@ class ExtractionResult:
         }
 
 
+def _extract_field_confidence(extracted: dict) -> dict[str, float]:
+    """Pull the `_confidence` sub-dict, coerce values to floats in [0,1].
+
+    Returns {} for v1 responses (no `_confidence` key). Unparseable entries
+    are dropped silently — callers treat missing as "no info".
+    """
+    raw = (extracted or {}).get("_confidence") or {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, float] = {}
+    for k, v in raw.items():
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        out[str(k)] = max(0.0, min(1.0, f))
+    return out
+
+
 def extract_invoice(
     *,
     file_bytes: bytes,
@@ -259,11 +636,13 @@ def extract_invoice(
     base_url: str = "https://api.anthropic.com",
     tenant_tier: str = "business",
     routing_enabled: bool = True,
-    prompt_version: str = "v1",
+    prompt_version: str = DEFAULT_PROMPT_VERSION,
     eur_usd: float = DEFAULT_EUR_USD,
     timeout: float = 60.0,
     max_tokens: int = 2000,
     model_override: str | None = None,
+    few_shot_examples: list[dict] | None = None,
+    partner_account_hints: list[dict] | None = None,
 ) -> ExtractionResult:
     """Call Anthropic Vision, parse JSON, return structured result.
 
@@ -291,6 +670,8 @@ def extract_invoice(
         file_b64=file_b64,
         mimetype=mimetype,
         prompt_version=prompt_version,
+        few_shot_examples=few_shot_examples,
+        partner_account_hints=partner_account_hints,
     )
 
     url = f"{base_url.rstrip('/')}/v1/messages"
@@ -378,6 +759,7 @@ def extract_invoice(
             cost_eur_millicents=cost_eur_mc,
             prompt_version=prompt_version,
             extracted_data=extracted,
+            field_confidence=_extract_field_confidence(extracted),
             raw_response=data,
         )
 

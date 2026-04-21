@@ -52,6 +52,8 @@ from typing import Any, Callable
 
 import ai_usage_log
 import ai_vision_service
+import bg_validators
+import pdf_sanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -316,6 +318,365 @@ def _step_guard_already_extracted(ctx: PipelineContext) -> dict:
     return {"prior_extractions": len(prior)}
 
 
+def _read_company_bool_flag(conn, field_name: str) -> bool:
+    """Read a Boolean field from res.company (first by id).
+
+    Defensive — returns False when the field is absent (e.g. glue
+    module uninstalled) or the call raises. Paired with
+    ``_read_company_budget_eur_mc`` so the MCP pipeline can keep
+    per-tenant config reads short and uniform.
+    """
+    try:
+        company_ids = conn.execute_kw(
+            "res.company", "search", [[]],
+            {"limit": 1, "order": "id asc"},
+        )
+        if not company_ids:
+            return False
+        rows = conn.execute_kw(
+            "res.company", "read", [company_ids], {"fields": [field_name]},
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("company flag read skipped: %s", e)
+        return False
+    if not rows:
+        return False
+    return bool(rows[0].get(field_name))
+
+
+# Critical fields that gate two-pass escalation — low confidence here
+# triggers a second extraction pass with sonnet.
+_ESCALATION_FIELDS = ("partner_vat", "invoice_date", "amount_total")
+_ESCALATION_CONF_THRESHOLD = 0.75
+
+
+def _needs_escalation(result) -> tuple[bool, str]:
+    """Return (should_escalate, reason) based on field_confidence.
+
+    Only haiku-routed successful extractions are eligible; sonnet/opus
+    are already the top tiers on this stack.
+    """
+    if not result or result.state != "success":
+        return False, "no successful extraction"
+    if result.model != "claude-haiku-4-5":
+        return False, f"model={result.model} not haiku"
+    conf = result.field_confidence or {}
+    low = [
+        f for f in _ESCALATION_FIELDS
+        if conf.get(f) is not None and conf[f] < _ESCALATION_CONF_THRESHOLD
+    ]
+    if low:
+        return True, "low conf: " + ", ".join(
+            f"{f}={conf[f]:.2f}" for f in low
+        )
+    return False, "all critical fields above threshold"
+
+
+def _read_company_budget_eur_mc(conn) -> int:
+    """Read res.company.ai_monthly_budget_eur from Odoo; convert to EUR mc.
+
+    Budget is stored as a Float (EUR) on the company for UX. Converted
+    here to millicents to match ai_usage_log bookkeeping (integer math).
+    Returns 0 when the field is missing, unparseable, or set to 0 —
+    treated as "no cap, pipeline runs unconstrained".
+
+    Multi-company caveat: reads the FIRST company (lowest id) in the
+    database. Most Odoo tenants have a single operating entity; for
+    multi-company setups the cap applies globally at the connection
+    level, not per-company. A future v2 can accept a company_id hint
+    on ctx for per-entity budgets.
+    """
+    try:
+        company_ids = conn.execute_kw(
+            "res.company", "search", [[]],
+            {"limit": 1, "order": "id asc"},
+        )
+        if not company_ids:
+            return 0
+        rows = conn.execute_kw(
+            "res.company", "read", [company_ids],
+            {"fields": ["ai_monthly_budget_eur"]},
+        )
+    except Exception as e:  # noqa: BLE001 — field may be absent on legacy DBs
+        logger.debug("budget read skipped: %s", e)
+        return 0
+    if not rows:
+        return 0
+    val = rows[0].get("ai_monthly_budget_eur")
+    try:
+        eur = float(val or 0.0)
+    except (TypeError, ValueError):
+        return 0
+    if eur <= 0:
+        return 0
+    # 1 EUR = 100 cents = 100_000 millicents
+    return int(round(eur * 100_000))
+
+
+def _step_guard_monthly_budget(ctx: PipelineContext) -> dict:
+    """Abort the pipeline when this month's spend reached the company cap.
+
+    Runs before extraction so we never bill against a cap that's
+    already hit. On hit:
+      * post a chatter note with current spend + limit
+      * mark the move with ai_review_reason='budget_exceeded' via the
+        same field the glue skill uses (direct write — skill won't run)
+      * clear ai_pipeline_requested so the move drops out of scan_pending
+      * abort the pipeline — no vision call, no usage log row
+    Budget = 0 (disabled) skips the check entirely.
+    """
+    budget_mc = _read_company_budget_eur_mc(ctx.odoo_conn)
+    if budget_mc <= 0:
+        return {"enforced": False, "budget_eur_mc": 0}
+    spent_mc = ai_usage_log.monthly_cost_eur_mc(ctx.tenant_code)
+    ctx.data["budget_eur_mc"] = budget_mc
+    ctx.data["spent_eur_mc"] = spent_mc
+    if spent_mc < budget_mc:
+        return {
+            "enforced": True,
+            "budget_eur_mc": budget_mc,
+            "spent_eur_mc": spent_mc,
+            "remaining_eur_mc": budget_mc - spent_mc,
+        }
+    # Budget exceeded — mark + abort.
+    ctx.abort = True
+    ctx.abort_reason = "budget_exceeded"
+    writes = {
+        "ai_needs_review": True,
+        "ai_pipeline_requested": False,
+    }
+    # Writing ai_review_reason directly requires the glue module — guard.
+    try:
+        fields_def = ctx.odoo_conn.execute_kw(
+            "account.move", "fields_get", [["ai_review_reason"]],
+            {"attributes": ["string"]},
+        )
+        if "ai_review_reason" in fields_def:
+            writes["ai_review_reason"] = "budget_exceeded"
+    except Exception as e:  # noqa: BLE001
+        logger.debug("ai_review_reason not on this DB: %s", e)
+    try:
+        ctx.odoo_conn.execute_kw(
+            "account.move", "write", [[ctx.move_id], writes],
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("budget guard write failed: %s", e)
+    body = (
+        "<b>🛑 AI pipeline aborted — monthly budget exceeded</b>"
+        f"<br/>This month so far: €{spent_mc / 100_000:.2f}"
+        f"<br/>Company cap: €{budget_mc / 100_000:.2f}"
+        "<br/>Raise the cap in Settings → Companies → AI Invoice Posting, "
+        "or wait for the new billing month."
+    )
+    try:
+        ctx.odoo_conn.execute_kw(
+            "account.move", "message_post", [[ctx.move_id]],
+            {"body": body, "message_type": "comment",
+             "subtype_xmlid": "mail.mt_note"},
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("budget guard chatter failed: %s", e)
+    return {
+        "enforced": True,
+        "aborted": True,
+        "budget_eur_mc": budget_mc,
+        "spent_eur_mc": spent_mc,
+    }
+
+
+def _step_retrieve_few_shot_examples(ctx: PipelineContext) -> dict:
+    """Pull a few past posted bills from the same partner for in-context priming.
+
+    Phase 1 is deliberately simple: direct Odoo query on account.move filtered
+    by partner_id + state='posted' + move_type in (in_invoice, in_refund).
+    No Qdrant here — semantic fallback (when partner is unknown or the
+    archive is empty) lands in Phase 2 once a first vision pass can surface
+    a partner candidate.
+
+    Skipped silently when:
+      * the move has no partner_id yet (cold extraction — nothing to anchor
+        on; the model will ask for everything)
+      * partner has fewer than 1 historical posted bill
+
+    Output shape (stored on ctx.data['few_shot_examples']):
+        [
+          {"partner_name": "...", "invoice_number": "INV-1",
+           "invoice_date": "2026-03-15", "amount_untaxed": 100.0,
+           "amount_tax": 20.0, "amount_total": 120.0,
+           "currency": "BGN",
+           "lines": [{"description": "...", "quantity": ...,
+                       "price_unit": ..., "amount_subtotal": ...},
+                      ...up to 3 representative lines]},
+          ...
+        ]
+    """
+    move = ctx.move or {}
+    # move['partner_id'] is an Odoo [id, name] tuple when populated.
+    partner_field = move.get("partner_id")
+    partner_id: int | None = None
+    if isinstance(partner_field, (list, tuple)) and partner_field:
+        partner_id = partner_field[0]
+    elif isinstance(partner_field, int):
+        partner_id = partner_field
+
+    if not partner_id:
+        return {"skipped": "no partner_id on move"}
+
+    try:
+        past_moves = ctx.odoo_conn.execute_kw(
+            "account.move", "search_read",
+            [[
+                ["partner_id", "=", partner_id],
+                ["state", "=", "posted"],
+                ["move_type", "in", ["in_invoice", "in_refund"]],
+                ["id", "!=", ctx.move_id],
+            ]],
+            {"fields": [
+                "id", "name", "partner_id", "ref",
+                "invoice_date", "amount_untaxed", "amount_tax",
+                "amount_total", "currency_id",
+            ],
+             "limit": 3, "order": "invoice_date desc"},
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("few-shot retrieval skipped: %s", e)
+        return {"skipped": f"odoo query error: {e}"}
+
+    if not past_moves:
+        return {"found": 0}
+
+    past_ids = [m["id"] for m in past_moves]
+    # Pull up to 3 representative lines per past move for shape reference.
+    try:
+        all_lines = ctx.odoo_conn.execute_kw(
+            "account.move.line", "search_read",
+            [[
+                ["move_id", "in", past_ids],
+                ["display_type", "=", False],  # skip section/note rows
+            ]],
+            {"fields": [
+                "move_id", "name", "quantity", "price_unit",
+                "price_subtotal", "product_uom_id", "account_id",
+            ],
+             "order": "move_id asc, sequence asc"},
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("few-shot line fetch skipped: %s", e)
+        all_lines = []
+
+    lines_by_move: dict[int, list[dict]] = {}
+    for ln in all_lines:
+        move_ref = ln.get("move_id")
+        mid = move_ref[0] if isinstance(move_ref, (list, tuple)) else move_ref
+        lines_by_move.setdefault(mid, []).append(ln)
+
+    # Partner→account histogram across a bigger window (Gap 2.2).
+    # Same partner, last 30 posted expense lines — collapse to frequency.
+    account_histogram = _collect_partner_account_histogram(
+        ctx.odoo_conn, partner_id, ctx.move_id,
+    )
+
+    examples: list[dict] = []
+    for m in past_moves:
+        currency_ref = m.get("currency_id") or [None, ""]
+        partner_ref = m.get("partner_id") or [None, ""]
+        lines = lines_by_move.get(m["id"], [])[:3]
+        examples.append({
+            "partner_name": partner_ref[1] if len(partner_ref) > 1 else "",
+            "invoice_number": m.get("ref") or m.get("name") or "",
+            "invoice_date": m.get("invoice_date") or "",
+            "amount_untaxed": m.get("amount_untaxed") or 0.0,
+            "amount_tax": m.get("amount_tax") or 0.0,
+            "amount_total": m.get("amount_total") or 0.0,
+            "currency": currency_ref[1] if len(currency_ref) > 1 else "",
+            "lines": [{
+                "description": ln.get("name") or "",
+                "quantity": ln.get("quantity") or 0,
+                "price_unit": ln.get("price_unit") or 0.0,
+                "amount_subtotal": ln.get("price_subtotal") or 0.0,
+            } for ln in lines],
+        })
+
+    ctx.data["few_shot_examples"] = examples
+    if account_histogram:
+        ctx.data["partner_account_history"] = account_histogram
+    return {
+        "found": len(examples),
+        "partner_id": partner_id,
+        "account_history": len(account_histogram),
+    }
+
+
+def _collect_partner_account_histogram(
+    conn, partner_id: int, current_move_id: int | None,
+) -> list[dict]:
+    """Frequency of account.account codes used on past lines from partner.
+
+    Looks across the last ~30 posted expense moves of the partner and
+    counts how often each account.account code appears on their lines.
+    The output is pre-sorted descending by frequency, truncated to
+    top 5 — this is what the vision model sees as "historically this
+    vendor ends up coded to 602xxxxx 80% of the time, so treat it as
+    the default suggestion unless the line text clearly says otherwise".
+    Returns [] on any query failure — the pipeline never fails because
+    analytics are missing.
+    """
+    try:
+        history_move_ids = conn.execute_kw(
+            "account.move", "search",
+            [[
+                ["partner_id", "=", partner_id],
+                ["state", "=", "posted"],
+                ["move_type", "in", ["in_invoice", "in_refund"]],
+                ["id", "!=", current_move_id or 0],
+            ]],
+            {"limit": 30, "order": "invoice_date desc"},
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("partner account history skipped: %s", e)
+        return []
+    if not history_move_ids:
+        return []
+    try:
+        lines = conn.execute_kw(
+            "account.move.line", "search_read",
+            [[
+                ["move_id", "in", history_move_ids],
+                ["display_type", "=", False],
+                ["account_id", "!=", False],
+            ]],
+            {"fields": ["account_id"]},
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("partner account lines skipped: %s", e)
+        return []
+    counts: dict[tuple[int, str], int] = {}
+    for ln in lines:
+        acc_ref = ln.get("account_id")
+        if not acc_ref:
+            continue
+        if isinstance(acc_ref, (list, tuple)):
+            key = (acc_ref[0], acc_ref[1] if len(acc_ref) > 1 else "")
+        else:
+            key = (int(acc_ref), "")
+        counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return []
+    total = sum(counts.values()) or 1
+    hist = [
+        {
+            "account_id": acc_id,
+            "account_label": acc_label,
+            "count": cnt,
+            "share": round(cnt / total, 3),
+        }
+        for (acc_id, acc_label), cnt in sorted(
+            counts.items(), key=lambda kv: kv[1], reverse=True,
+        )
+    ]
+    return hist[:5]
+
+
 def _step_extract_vision(ctx: PipelineContext) -> dict:
     """Call Anthropic Vision via ai_vision_service."""
     import base64 as _b64
@@ -333,14 +694,73 @@ def _step_extract_vision(ctx: PipelineContext) -> dict:
         return {"error": ctx.abort_reason}
     att = atts[0]
     file_bytes = _b64.b64decode(att["datas"])
+    mimetype = att.get("mimetype") or "application/pdf"
+
+    # Strip JS / embedded files / auto-actions from PDFs before routing
+    # to Claude. Graceful on failure — returns originals so a malformed
+    # PDF still gets extracted (sanitizer reports the parse error).
+    if mimetype == "application/pdf":
+        file_bytes, sanitize_report = pdf_sanitizer.sanitize_pdf(file_bytes)
+        ctx.data["pdf_sanitize"] = sanitize_report.to_dict()
+    else:
+        ctx.data["pdf_sanitize"] = {
+            "available": True, "modified": False, "skipped": "not a pdf",
+        }
+
     result = ai_vision_service.extract_invoice(
         file_bytes=file_bytes,
-        mimetype=att.get("mimetype") or "application/pdf",
+        mimetype=mimetype,
         api_key=ctx.api_key,
         base_url=ctx.base_url,
         tenant_tier=ctx.tenant_tier,
+        few_shot_examples=ctx.data.get("few_shot_examples") or None,
+        partner_account_hints=ctx.data.get("partner_account_history") or None,
     )
     ctx.data["vision_result"] = result
+    ctx.data["first_pass_model"] = result.model
+    ctx.data["first_pass_state"] = result.state
+
+    # Two-pass escalation: if haiku produced a shaky read and the tenant
+    # opted in, re-run with sonnet. Both runs land in ai_usage_log via
+    # the log_usage step — we re-log the first pass here so the caller
+    # has a record even when sonnet overwrites ctx.data["vision_result"].
+    should, reason = _needs_escalation(result)
+    if should and _read_company_bool_flag(ctx.odoo_conn, "ai_two_pass_escalation"):
+        # Persist the first-pass usage row before overwriting.
+        try:
+            ai_usage_log.log_extraction(
+                tenant_code=ctx.tenant_code,
+                odoo_url=ctx.odoo_conn.url,
+                odoo_db=ctx.odoo_conn.db,
+                move_id=ctx.move_id,
+                attachment_id=ctx.attachment_id,
+                source=ctx.source,
+                extra={"pass": "first", "escalation_reason": reason},
+                **result.to_log_kwargs(),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("first-pass log failed: %s", e)
+
+        retry = ai_vision_service.extract_invoice(
+            file_bytes=file_bytes,
+            mimetype=mimetype,
+            api_key=ctx.api_key,
+            base_url=ctx.base_url,
+            tenant_tier=ctx.tenant_tier,
+            few_shot_examples=ctx.data.get("few_shot_examples") or None,
+            partner_account_hints=ctx.data.get("partner_account_history") or None,
+            model_override="claude-sonnet-4-6",
+        )
+        ctx.data["vision_result"] = retry
+        ctx.data["escalated"] = True
+        ctx.data["escalation_reason"] = reason
+        result = retry
+    else:
+        ctx.data["escalated"] = False
+        if should:
+            ctx.data["escalation_reason"] = (
+                f"{reason} (escalation disabled on company)"
+            )
     ctx.data["attachment_name"] = att.get("name")
     ctx.data["attachment_size"] = att.get("file_size")
     if result.state == "error":
@@ -350,6 +770,24 @@ def _step_extract_vision(ctx: PipelineContext) -> dict:
         "tokens_in": result.input_tokens, "tokens_out": result.output_tokens,
         "cost_eur_mc": result.cost_eur_millicents,
     }
+
+
+def _step_normalize_bg_fields(ctx: PipelineContext) -> dict:
+    """Clean up BG-specific fields the vision prompt produced.
+
+    Runs between extract and log_usage so both the billed ledger row
+    and the chatter audit record reflect the canonical values. See
+    bg_validators.normalize_extracted_bg_fields for the concrete
+    rules; this step is a thin adapter that also records the
+    normalisation report on the context for downstream consumers.
+    """
+    result = ctx.data.get("vision_result")
+    if not result or result.state != "success":
+        return {"skipped": "no successful extraction"}
+    data = result.extracted_data or {}
+    report = bg_validators.normalize_extracted_bg_fields(data)
+    ctx.data["bg_normalize"] = report
+    return report
 
 
 def _step_log_usage(ctx: PipelineContext) -> dict:
@@ -375,9 +813,239 @@ def _step_log_usage(ctx: PipelineContext) -> dict:
     return {"log_id": log_id}
 
 
+def _fmt_amount(value) -> str:
+    """Render a numeric amount for chatter tables; falls back to '-'."""
+    try:
+        return f"{float(value):,.2f}"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _fmt_confidence_badge(conf: float) -> str:
+    """Coloured span for per-field confidence — green/amber/red."""
+    if conf >= 0.85:
+        colour = "#1f883d"   # green
+    elif conf >= 0.70:
+        colour = "#bf8700"   # amber
+    else:
+        colour = "#d1242f"   # red
+    return (
+        f'<span style="color:{colour};font-weight:600">'
+        f"{conf * 100:.0f}%</span>"
+    )
+
+
+def _render_extraction_chatter(
+    *, data: dict, field_confidence: dict | None,
+    arithmetic_note: str, attachment_id: int | None,
+    model: str, prompt_version: str,
+    escalated: bool = False,
+    pdf_sanitize: dict | None = None,
+) -> str:
+    """Build a human-readable HTML summary for the chatter.
+
+    Replaces the old raw ``json.dumps`` dump with a structured table +
+    top-5 lines + confidence badges. Keeps a collapsible details block
+    with the full JSON for the accountant who wants the raw response.
+    """
+    import json as _json
+    fc = field_confidence or {}
+    data = data or {}
+    pdf_sanitize = pdf_sanitize or {}
+
+    rows = [
+        ("Document type",
+         str(data.get("document_type") or "-"),
+         fc.get("document_type")),
+        ("BG doc type",
+         str(data.get("l10n_bg_document_type") or "-"),
+         None),
+        ("Supplier",
+         str(data.get("partner_name") or "-"),
+         fc.get("partner_name")),
+        ("Supplier VAT",
+         str(data.get("partner_vat") or "-"),
+         fc.get("partner_vat")),
+        ("EIK",
+         str(data.get("partner_eik") or "-"),
+         None),
+        ("Invoice №",
+         str(data.get("invoice_number") or "-"),
+         fc.get("invoice_number")),
+        ("Invoice date",
+         str(data.get("invoice_date") or "-"),
+         fc.get("invoice_date")),
+        ("Currency",
+         str(data.get("currency") or "-"),
+         None),
+        ("Untaxed",
+         _fmt_amount(data.get("amount_untaxed")),
+         fc.get("amount_untaxed")),
+        ("Tax",
+         _fmt_amount(data.get("amount_tax")),
+         fc.get("amount_tax")),
+        ("Total",
+         _fmt_amount(data.get("amount_total")),
+         fc.get("amount_total")),
+    ]
+    mrn = data.get("customs_mrn")
+    if mrn:
+        rows.append(("Customs MRN", str(mrn), None))
+
+    table_rows = "".join(
+        f"<tr><th style='text-align:left;padding:2px 8px;white-space:nowrap'>"
+        f"{label}</th>"
+        f"<td style='padding:2px 8px'>{value}</td>"
+        f"<td style='padding:2px 8px;text-align:right'>"
+        f"{_fmt_confidence_badge(conf) if conf is not None else ''}</td></tr>"
+        for label, value, conf in rows
+    )
+
+    lines = data.get("lines") or []
+    line_rows_html = ""
+    if lines:
+        line_rows = []
+        for ln in lines[:5]:
+            desc = str(ln.get("description") or "")[:80]
+            qty = ln.get("quantity") or 0
+            price = _fmt_amount(ln.get("price_unit"))
+            subtotal = _fmt_amount(ln.get("amount_subtotal"))
+            tax_rate = ln.get("tax_rate")
+            tax_str = f"{tax_rate}%" if tax_rate not in (None, "") else "-"
+            line_rows.append(
+                f"<tr>"
+                f"<td style='padding:2px 8px'>{desc}</td>"
+                f"<td style='padding:2px 8px;text-align:right'>{qty}</td>"
+                f"<td style='padding:2px 8px;text-align:right'>{price}</td>"
+                f"<td style='padding:2px 8px;text-align:right'>{tax_str}</td>"
+                f"<td style='padding:2px 8px;text-align:right'>{subtotal}</td>"
+                f"</tr>"
+            )
+        overflow = ""
+        if len(lines) > 5:
+            overflow = (
+                f"<div style='font-size:10px;color:#666;margin-top:4px'>"
+                f"…{len(lines) - 5} more line(s) truncated</div>"
+            )
+        line_rows_html = (
+            "<b>Lines</b>"
+            "<table style='font-size:11px;border-collapse:collapse;margin-top:4px'>"
+            "<thead><tr>"
+            "<th style='text-align:left;padding:2px 8px'>Description</th>"
+            "<th style='text-align:right;padding:2px 8px'>Qty</th>"
+            "<th style='text-align:right;padding:2px 8px'>Unit</th>"
+            "<th style='text-align:right;padding:2px 8px'>VAT</th>"
+            "<th style='text-align:right;padding:2px 8px'>Subtotal</th>"
+            "</tr></thead><tbody>"
+            + "".join(line_rows)
+            + "</tbody></table>"
+            + overflow
+        )
+
+    lines_overall_conf = fc.get("lines_overall")
+    lines_conf_html = (
+        f"<div style='font-size:11px;margin-top:2px'>"
+        f"Lines confidence: {_fmt_confidence_badge(lines_overall_conf)}</div>"
+        if lines_overall_conf is not None else ""
+    )
+
+    header_badges = []
+    header_badges.append(
+        f"<span style='background:#e6f0ff;padding:2px 6px;"
+        f"border-radius:3px;font-size:10px'>"
+        f"model: {model}</span>"
+    )
+    header_badges.append(
+        f"<span style='background:#e6f0ff;padding:2px 6px;"
+        f"border-radius:3px;font-size:10px'>"
+        f"prompt: {prompt_version}</span>"
+    )
+    if escalated:
+        header_badges.append(
+            "<span style='background:#fff4e0;padding:2px 6px;"
+            "border-radius:3px;font-size:10px'>two-pass</span>"
+        )
+    if pdf_sanitize.get("modified"):
+        header_badges.append(
+            "<span style='background:#ffe0e0;padding:2px 6px;"
+            "border-radius:3px;font-size:10px'>PDF sanitised</span>"
+        )
+
+    arith_colour = "#1f883d" if arithmetic_note == "arithmetic OK" else "#bf8700"
+    arith_html = (
+        f"<div style='font-size:11px;margin-top:6px;color:{arith_colour}'>"
+        f"Arithmetic: {arithmetic_note}</div>"
+    )
+
+    raw_json_html = (
+        "<details style='margin-top:8px;font-size:11px'>"
+        "<summary>Raw JSON</summary>"
+        "<pre style='font-size:10px;white-space:pre-wrap'>"
+        + _json.dumps(data, indent=2, ensure_ascii=False)[:4000]
+        + "</pre></details>"
+    )
+
+    return (
+        "<b>🤖 AI Extracted Invoice</b><br/>"
+        f"<div style='margin:4px 0'>{' '.join(header_badges)}</div>"
+        f"<div style='font-size:10px;color:#666'>"
+        f"attachment #{attachment_id}</div>"
+        "<table style='font-size:11px;border-collapse:collapse;margin-top:6px'>"
+        + table_rows
+        + "</table>"
+        + lines_conf_html
+        + (f"<div style='margin-top:8px'>{line_rows_html}</div>" if line_rows_html else "")
+        + arith_html
+        + raw_json_html
+    )
+
+
+def _check_arithmetic(data: dict, tolerance: float = 0.02) -> tuple[bool, str]:
+    """Sanity-check the extracted totals.
+
+    Returns (ok, note).  Two invariants:
+      1. sum(lines[*].amount_subtotal) ≈ amount_untaxed
+      2. amount_untaxed + amount_tax      ≈ amount_total
+
+    `tolerance` is absolute, in the invoice's currency. 2 cents is enough
+    to absorb rounding but small enough to catch real OCR mistakes.
+    Returns ok=True when a value is missing — we only flag definite
+    mismatches, not absences (those are caught by confidence scoring).
+    """
+    notes: list[str] = []
+    ok = True
+    lines = data.get("lines") or []
+    try:
+        lines_sum = sum(float(l.get("amount_subtotal") or 0) for l in lines)
+    except (TypeError, ValueError):
+        lines_sum = None
+    untaxed = data.get("amount_untaxed")
+    tax = data.get("amount_tax")
+    total = data.get("amount_total")
+    try:
+        untaxed_f = float(untaxed) if untaxed is not None else None
+        tax_f = float(tax) if tax is not None else None
+        total_f = float(total) if total is not None else None
+    except (TypeError, ValueError):
+        return True, "arithmetic: non-numeric totals (skipped)"
+
+    if lines_sum is not None and untaxed_f is not None and lines:
+        if abs(lines_sum - untaxed_f) > tolerance:
+            ok = False
+            notes.append(
+                f"sum(lines)={lines_sum:.2f} != untaxed={untaxed_f:.2f}"
+            )
+    if untaxed_f is not None and tax_f is not None and total_f is not None:
+        if abs(untaxed_f + tax_f - total_f) > tolerance:
+            ok = False
+            notes.append(
+                f"untaxed+tax={untaxed_f + tax_f:.2f} != total={total_f:.2f}"
+            )
+    return ok, "; ".join(notes) or "arithmetic OK"
+
+
 def _step_write_back_move(ctx: PipelineContext) -> dict:
     """Apply extracted fields to draft account.move (empty-field only)."""
-    import json as _json
     result = ctx.data.get("vision_result")
     if not result or result.state != "success" or not result.extracted_data:
         return {"skipped": "no successful extraction"}
@@ -385,6 +1053,12 @@ def _step_write_back_move(ctx: PipelineContext) -> dict:
     if move.get("state") != "draft":
         return {"skipped": f"state={move.get('state')} not draft"}
     data = result.extracted_data
+
+    # Arithmetic reconciliation — independent of confidence, always run.
+    arith_ok, arith_note = _check_arithmetic(data)
+    ctx.data["arithmetic_ok"] = arith_ok
+    ctx.data["arithmetic_note"] = arith_note
+
     writes: dict = {}
     if not move.get("partner_id") and data.get("partner_vat"):
         vat = data["partner_vat"].replace(" ", "").upper()
@@ -402,13 +1076,16 @@ def _step_write_back_move(ctx: PipelineContext) -> dict:
         ctx.odoo_conn.execute_kw(
             "account.move", "write", [[ctx.move_id], writes],
         )
-    # Always post to chatter (audit)
-    body = (
-        "<b>🤖 AI Extracted Invoice Data</b>"
-        f"<br/>Pipeline run | attachment #{ctx.attachment_id}"
-        "<pre style='font-size:11px;white-space:pre-wrap'>"
-        + _json.dumps(data, indent=2, ensure_ascii=False)[:3000]
-        + "</pre>"
+    # Always post to chatter (audit) — human-readable summary.
+    body = _render_extraction_chatter(
+        data=data,
+        field_confidence=result.field_confidence,
+        arithmetic_note=arith_note,
+        attachment_id=ctx.attachment_id,
+        model=result.model,
+        prompt_version=result.prompt_version,
+        escalated=ctx.data.get("escalated", False),
+        pdf_sanitize=ctx.data.get("pdf_sanitize"),
     )
     try:
         ctx.odoo_conn.execute_kw(
@@ -419,19 +1096,43 @@ def _step_write_back_move(ctx: PipelineContext) -> dict:
     except Exception as e:  # noqa: BLE001
         logger.warning("chatter post failed: %s", e)
         chatter = False
-    ctx.data["writeback"] = {"fields_written": list(writes.keys()), "chatter": chatter}
+    ctx.data["writeback"] = {
+        "fields_written": list(writes.keys()),
+        "chatter": chatter,
+        "arithmetic_ok": arith_ok,
+        "arithmetic_note": arith_note,
+    }
     ctx.data["next_step"] = STEP_AWAIT_SKILL_POST
     return ctx.data["writeback"]
 
 
 def _step_invoke_posting_skill(ctx: PipelineContext) -> dict:
-    """Fire vendor-bill-posting-bg skill if glue module is installed."""
+    """Fire vendor-bill-posting-bg skill if glue module is installed.
+
+    Passes pipeline hints the skill needs for weighted scoring via a
+    ``composite_fields`` dict on the ctx handed to the skill:
+      - ``_field_confidence`` : per-field 0..1 from vision prompt v2
+      - ``_arithmetic_ok`` / ``_arithmetic_note`` : from write-back step
+      - ``_prompt_version`` : which schema version produced the data
+
+    Older skill versions that ignore ``composite_fields`` still work —
+    they just fall back to field-presence scoring.
+    """
     result = ctx.data.get("vision_result")
     if not result or result.state != "success":
         return {"skipped": "no successful extraction"}
+    composite_fields = {
+        "_field_confidence": dict(result.field_confidence),
+        "_arithmetic_ok": ctx.data.get("arithmetic_ok", True),
+        "_arithmetic_note": ctx.data.get("arithmetic_note", ""),
+        "_prompt_version": result.prompt_version,
+        "_extractor_model": result.model,
+    }
+    skill_ctx = {"composite_fields": composite_fields}
     try:
         rv = ctx.odoo_conn.execute_kw(
-            "account.move", "_skill_post_vendor_bill", [[ctx.move_id]], {},
+            "account.move", "_skill_post_vendor_bill",
+            [[ctx.move_id], skill_ctx], {},
         )
         ctx.data["skill_invoked"] = True
         ctx.data["skill_result"] = rv
@@ -454,11 +1155,29 @@ registry.register(Step(
 ))
 
 registry.register(Step(
+    name="guard_monthly_budget",
+    sequence=15,
+    execute=_step_guard_monthly_budget,
+    applies_when=lambda c: c.move_id is not None and c.source != "force",
+    description="Abort if this month's spend exceeds company budget cap",
+    on_error="continue",
+))
+
+registry.register(Step(
     name="guard_already_extracted",
     sequence=20,
     execute=_step_guard_already_extracted,
     applies_when=lambda c: c.move_id is not None and c.source != "force",
     description="Short-circuit if move was already extracted successfully",
+))
+
+registry.register(Step(
+    name="retrieve_few_shot_examples",
+    sequence=50,
+    execute=_step_retrieve_few_shot_examples,
+    applies_when=lambda c: c.move_id is not None,
+    description="Pull top-3 past posted bills from same partner for in-context priming",
+    on_error="skip",
 ))
 
 registry.register(Step(
@@ -468,6 +1187,18 @@ registry.register(Step(
     applies_when=lambda c: c.attachment_id is not None and bool(c.api_key),
     description="Anthropic Vision extraction with model routing",
     on_error="abort",
+))
+
+registry.register(Step(
+    name="normalize_bg_fields",
+    sequence=150,
+    execute=_step_normalize_bg_fields,
+    applies_when=lambda c: (
+        c.data.get("vision_result") is not None
+        and c.data["vision_result"].state == "success"
+    ),
+    description="Normalise BG VAT/EIK/MRN, hint on art.117 misclassification",
+    on_error="skip",
 ))
 
 registry.register(Step(
@@ -688,9 +1419,20 @@ def scan_pending(
     *, conn, tenant_code: str,
     move_types: tuple[str, ...] = ("in_invoice", "in_refund"),
     limit: int = 50,
+    requested_only: bool = False,
 ) -> list[dict]:
-    """Find draft vendor-bill moves that have an attachment and no log row."""
+    """Find draft vendor-bill moves that have an attachment and no log row.
+
+    When ``requested_only`` is True, also require
+    ``ai_pipeline_requested=True`` on the move — i.e. only moves that
+    were explicitly queued by the glue module's attachment auto-trigger.
+    Handy for cron workloads: ``scan_pending(requested_only=True)`` picks
+    up just the moves that the user (or the auto-trigger) actually asked
+    to process, ignoring old drafts that happen to have a PDF attached.
+    """
     domain = [["state", "=", "draft"], ["move_type", "in", list(move_types)]]
+    if requested_only:
+        domain.append(["ai_pipeline_requested", "=", True])
     move_ids = conn.execute_kw(
         "account.move", "search", [domain],
         {"limit": 500, "order": "create_date asc"},

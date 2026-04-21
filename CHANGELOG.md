@@ -7,6 +7,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.19.0] — 2026-04-21 — AI OCR gap-closure set (Trust Foundation + 13 gaps)
+
+### Trust Foundation (P0 — confidence-based auto-post)
+- **Gap 1.1** — per-field confidence in vision prompt v2 (`_confidence` dict).
+  `ExtractionResult.field_confidence` + `_extract_field_confidence` helper.
+- **Gap 1.2** — arithmetic reconciliation (`_check_arithmetic`): sum(lines)
+  vs amount_untaxed, untaxed+tax vs total, 2-cent tolerance.
+- **Gap 3.1** — `ai_review_reason` rejection taxonomy Selection (9 codes).
+- **Gap 3.2** — weighted per-field thresholds via `ai_field_thresholds_json`
+  on res.company; hard gates that block auto-post independent of score.
+
+### Circuit breakers & scaling (P0/P1)
+- **Gap 4.2** — monthly budget cap: `res.company.ai_monthly_budget_eur` +
+  `_step_guard_monthly_budget` (seq=15) + `ai_usage_log.monthly_cost_eur_mc`.
+  New tool `ai_usage_budget_status`.
+- **Gap 4.1** — attachment auto-trigger: `ir.attachment.create` hook + flag
+  `ai_pipeline_requested` + `scan_pending(requested_only=True)`.
+- **Gap 2.1** (Phase 1) — few-shot RAG: `_step_retrieve_few_shot_examples`
+  (direct Odoo query on posted past bills, same partner, top 3) + injection
+  in leading cached user message.
+- **Gap 2.2** — partner→account coding memory:
+  `_collect_partner_account_histogram` (last 30 posted lines) +
+  `_format_partner_account_hints` inline with few-shot block.
+
+### Bulgarian domain (P1)
+- **Gap 1.3** — `bg_validators.py` (EIK/VAT/MRN regex + normalise), prompt
+  v3 with `partner_eik`, `customs_mrn`, art.117 guidance. New pipeline step
+  `normalize_bg_fields` (seq=150).
+- **Gap 1.4** — prompt v4: explicit multi-page total guidance (last page,
+  "Continued…" markers, rounding rows).
+
+### Quality & cost (P1/P2)
+- **Gap 1.6** — two-pass escalation: haiku→sonnet when critical fields
+  confidence < 0.75. Opt-in via `res.company.ai_two_pass_escalation`.
+- **Gap 1.7** — `count_pdf_pages` uses pypdf authoritative count (byte
+  heuristic fallback). Fixes over-routing to sonnet on trivial PDFs.
+- **Gap 4.3** — `pdf_sanitizer.py` strips /JS /OpenAction /AA /EmbeddedFiles
+  before routing to vision API. Graceful fallback on malformed PDFs.
+- **Gap 4.5** — friendly chatter table: `_render_extraction_chatter` with
+  confidence badges, lines table, arithmetic status, collapsible raw JSON.
+- **Gap 4.6** — Qdrant cross-company isolation guard in `ai.qdrant.client`.
+- **Gap 4.7** — API key rotation: `claude_keys_rotated_at` + 90-day nag.
+
+### Active learning (P1/P3)
+- **Gap 3.3** — duplicate detection: `account.move._ai_check_duplicate`
+  (same partner+ref OR same partner+date+total).
+- **Gap 3.4** — `ai.correction` model (append-only) + `ai_extracted_snapshot`
+  field + `write()` override captures field changes as training signal.
+- **Gap 3.6** — ai.correction immutable write/unlink guards;
+  `ai_usage_log.mark_billed(reason=...)` audit logging.
+- **Gap 3.7** — reviewer dashboard: `severity` computed (high/medium/low/
+  unknown) + graph + pivot views + "Prompt Tuning Queue" pre-filtered action.
+
+### Infrastructure
+- Dockerfile: +COPY `bg_validators.py` and `pdf_sanitizer.py`.
+  `requirements.txt` +`pypdf>=4.0.0`. Maintainer updated.
+- 156 pytest tests across 11 files covering all new code paths.
+
+### Adjacent MCP fix
+- **Odoo 19 MCP 403** — jsonrpc+api_key auto-fallback to xmlrpc on data ops
+  (`effective_protocol` property + one-time warning log). Glue-side
+  `claude_anthropic_api_key` field removal also landed in this cycle.
+
+### Added — Context-aware translation tool (simple + HTML/XML)
+- `odoo_translate_context_aware` — translate Odoo records using Claude with domain
+  context for natural, fluent results (not literal). **Auto-detects field kind** and
+  handles both paths in one call:
+  - **Simple char/text** (e.g. ir.ui.menu.name, account.account.name): batch translate
+    via `update_field_translations`. Context: Odoo model, parent chain (for menus:
+    "Sales > Orders > Quotations"), existing translations, user domain hint.
+  - **HTML/XML** (e.g. ir.ui.view.arch_db, website.page, product.template.website_description):
+    extracts canonical terms via `get_field_translations`, translates each term preserving
+    inline HTML tags (<strong>, <a>, <span>...), writes back in terms mode. Per-record,
+    per-field Claude call (HTML payloads are large).
+  Validates target language is active, fields are translatable, Odoo ≥ 16.
+  Uses `_ai_tenant_credentials()` for ANTHROPIC_API_KEY resolution (per-tenant override
+  supported). Recommended models: haiku-4-5 (menu labels), sonnet-4-6 (balanced, website
+  pages), opus-4-7 (complex terminology). Supports `dry_run=True`.
+
+### Added — 4 stock operation tools (BG workflows, v14-v19 compatible)
+- `odoo_stock_mo_delete_draft` — safely DELETE a draft/cancelled mrp.production with
+  cascade (raw + finished stock.moves, procurement.group if orphaned). Bypasses Odoo's
+  "cannot be deleted" constraint via raw SQL + ir.actions.server. Refuses if MO has
+  any SVL / valued stock.move / qty_produced > 0. Checks for account.move records
+  matching name (warns, doesn't delete). Version-aware SVL lookup.
+- `odoo_record_backup` — utility: reads full field snapshot of any records (excluding
+  binary fields) + optional related-record queries. Returns structured JSON. Use
+  BEFORE destructive ops to capture state for rollback. Does NOT write to disk —
+  caller decides where to persist (recommended: `~/.claude/clients/<conn>/backup_<op>_<date>.json`).
+
+### Added — 2 stock operation tools (BG workflows, v14-v19 compatible)
+- `odoo_stock_product_flip_to_storable` — flip a product from consu (is_storable=false)
+  to storable when it already has stock.move records. Bypasses Odoo's ORM constraint
+  via raw SQL in an ir.actions.server (atomic flip + quant INSERT in one transaction),
+  so no duplicate SVL/valuation is created. Supports `dry_run=True` (default) with
+  preview, warnings for edge cases (already storable, existing quant, lot tracking),
+  location↔company validation, ISO datetime parsing for `in_date`.
+  Works on Odoo 18 and 19 (`is_storable` + `stock.quant` are identical across versions).
+- `odoo_stock_close_unaccounted_value` — create an Inventory Valuation journal entry
+  (Dr stock valuation / Cr GRNI) for a stocked record that has `account_move_id=false`,
+  then bind the new account.move back. **Version-aware**: auto-detects whether to
+  operate on `stock.valuation.layer` (v14-18) or `stock.move` (v19+, since SVL was
+  merged into stock.move). GRNI account auto-detect order: (a) v14-18
+  `property_stock_account_input_categ_id`, (b) v19 + `l10n_bg_stock_account`
+  `l10n_bg_stock_input_account_id`, (c) v19 vanilla fallback `account_stock_variation_id`.
+  User can override via `grni_account_id`. Validates journal type='general' and
+  company match. Supports `dry_run=True`.
+
+Both tools read accounts from `product.category` properties — no hardcoded account IDs.
+Recipe derived from 2026-04-21 Alpinter Bulgaria prod session.
+
 ## [2.10.0] — 2026-04-19
 
 ### Added — 4 translate tools (multi-language field writes/reads)

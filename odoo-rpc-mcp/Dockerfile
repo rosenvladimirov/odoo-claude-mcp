@@ -1,12 +1,13 @@
 FROM python:3.13-slim
 
-LABEL maintainer="BL Consulting <rosen@blconsulting.bg>"
+LABEL maintainer="Rosen Vladimirov <vladimirov.rosen@gmail.com>"
 LABEL description="Odoo RPC MCP Server (XML-RPC/JSON-RPC)"
 
 # Tag convention (Docker Hub / registry):
 #   :latest  → :stable  → last 2.x build  (production across all tiers)
 #   :2.x.y   → semver of end-user track (maintained on branch 2.0)
-#              Current: 2.10.0 — translate + website snippet tools
+#              Current: 2.19.0 — AI OCR gap-closure set (P0+P1+P2+P3 Trust
+#              Foundation, Budget, RAG, BG validators, reviewer dashboard)
 #   :next    → last 3.x build (integrator platform — preview, not production)
 #   :3.x.y   → semver of integrator track (maintained on branch 3.0)
 # Branch 2.0 is the default repo branch and source of :latest/:stable.
@@ -27,6 +28,8 @@ COPY --chmod=644 ai_usage_log.py .
 COPY --chmod=644 ai_vision_service.py .
 COPY --chmod=644 ai_invoice_engine.py .
 COPY --chmod=644 admin_ui.py .
+COPY --chmod=644 bg_validators.py .
+COPY --chmod=644 pdf_sanitizer.py .
 
 RUN useradd -m -s /bin/bash mcp && \
     mkdir -p /data && chown mcp:mcp /data
