@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "2.19.0"
+__version__ = "2.20.0"
 
 import asyncio
 import json
@@ -3901,6 +3901,53 @@ TOOLS = [
             },
         },
     ),
+    # ── Execute a single named Odoo pipeline step ──
+    Tool(
+        name="ai_pipeline_step_execute",
+        description=(
+            "Execute a single ai.pipeline.step by name via Odoo RPC. "
+            "Looks up the step in Odoo by name, builds a ctx from the supplied "
+            "parameters, calls env[step.model].step.method(ctx), and returns "
+            "the updated ctx (with composite_fields populated by the step). "
+            "Use ai_pipeline_steps_list to discover available step names."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "step_name": {
+                    "type": "string",
+                    "description": (
+                        "The step 'name' field in Odoo "
+                        "(e.g. 'resolve_partner_bg', 'post_vendor_bill_bg')."
+                    ),
+                },
+                "source_model": {
+                    "type": "string",
+                    "description": "Odoo model of the triggering record (e.g. 'account.move').",
+                },
+                "source_id": {
+                    "type": "integer",
+                    "description": "Database ID of the source record.",
+                },
+                "composite_fields": {
+                    "type": "object",
+                    "description": (
+                        "ctx['composite_fields'] dict — pass extracted invoice fields: "
+                        "partner_vat, partner_name, partner_eik, invoice_date, ref, "
+                        "amount_total, lines, etc."
+                    ),
+                    "default": {},
+                },
+                "extra_ctx": {
+                    "type": "object",
+                    "description": "Additional top-level ctx keys merged before executing the step.",
+                    "default": {},
+                },
+            },
+            "required": ["step_name", "source_model", "source_id"],
+        },
+    ),
 ]
 
 
@@ -7452,6 +7499,51 @@ def _execute_tool(name: str, args: dict) -> Any:
             "steps": rows,
         }
 
+    elif name == "ai_pipeline_step_execute":
+        step_name = args["step_name"]
+        # Fetch the step record from Odoo
+        steps = conn.execute_kw(
+            "ai.pipeline.step", "search_read",
+            [[["name", "=", step_name]]],
+            {"fields": ["id", "name", "model", "method", "on_error"], "limit": 1},
+        )
+        if not steps:
+            return {"error": f"ai.pipeline.step '{step_name}' not found in Odoo"}
+        step = steps[0]
+        # Build standard pipeline ctx
+        ctx = {
+            "source_model": args["source_model"],
+            "source_res_id": int(args["source_id"]),
+            "composite_fields": dict(args.get("composite_fields") or {}),
+            "matched_skill_ids": [],
+            "matched_skill_scores": {},
+            "result": {},
+            "abort": False,
+        }
+        ctx.update(args.get("extra_ctx") or {})
+        # Call env[model].method(ctx) via XML-RPC execute_kw
+        try:
+            updated_ctx = conn.execute_kw(
+                step["model"], step["method"], [ctx], {}
+            )
+        except Exception as exc:
+            err = str(exc)
+            if step.get("on_error") == "abort":
+                return {"error": err, "step": step_name}
+            return {
+                "step": step_name,
+                "model": step["model"],
+                "method": step["method"],
+                "error": err,
+                "ctx_sent": ctx,
+            }
+        return {
+            "step": step_name,
+            "model": step["model"],
+            "method": step["method"],
+            "ctx": updated_ctx,
+        }
+
     # ── Google Services ──
     elif name == "google_auth":
         if google_mgr is None:
@@ -8537,6 +8629,232 @@ def create_app():
             except Exception as e:
                 response = JSONResponse({"error": str(e)}, status_code=400)
             await response(scope, receive, send)
+
+        elif path == "/api/ai/extract-raw" and scope["type"] == "http" and scope.get("method") == "POST":
+            from starlette.requests import Request as _Req
+            from starlette.responses import JSONResponse as _JSONResp
+            _request = _Req(scope, receive)
+            # Internal Docker network (172.24.x / 172.27.x) is trusted without token
+            _client_ip = (scope.get("client") or ("", 0))[0]
+            _is_internal = _client_ip.startswith("172.") or _client_ip == "127.0.0.1"
+            if not _is_internal:
+                _expected = os.environ.get("MCP_ADMIN_TOKEN", "")
+                _provided = (_request.headers.get("authorization") or "").replace("Bearer ", "", 1).strip()
+                if not _expected or _provided != _expected:
+                    _r = _JSONResp({"error": "auth required"}, status_code=401)
+                    await _r(scope, receive, send)
+                    return
+            try:
+                import base64 as _b64x
+                _body = await _request.json()
+                _file_b64 = _body.get("file_b64", "")
+                _mimetype = _body.get("mimetype", "application/pdf")
+                _tenant_code = (_body.get("tenant_code") or "default").strip()
+                if not _file_b64:
+                    _r = _JSONResp({"error": "file_b64 required"}, status_code=400)
+                    await _r(scope, receive, send)
+                    return
+                _api_key, _base_url = _ai_tenant_credentials(_tenant_code)
+                if not _api_key:
+                    _r = _JSONResp(
+                        {"error": "No Anthropic API key. Set ANTHROPIC_API_KEY env var."}, status_code=503)
+                    await _r(scope, receive, send)
+                    return
+                _file_bytes = _b64x.b64decode(_file_b64)
+                _company_vat = (_body.get("company_vat") or "").strip()
+                if _company_vat:
+                    import ai_vision_service as _vis, httpx as _hx, time as _tm, json as _js2, base64 as _b64h
+                    _t0 = _tm.monotonic()
+                    _pages = _vis.count_pdf_pages(_file_bytes) if _mimetype == "application/pdf" else 1
+                    _model = _vis.choose_model(pages=_pages, size_bytes=len(_file_bytes))
+                    _sys, _msgs = _vis.build_messages(
+                        file_b64=_b64h.b64encode(_file_bytes).decode(), mimetype=_mimetype)
+                    _hint_u = {"role": "user", "content": [{"type": "text", "text":
+                        "IMPORTANT: VAT " + _company_vat + " belongs to the BUYER/RECIPIENT "
+                        "(\u043f\u043e\u043b\u0443\u0447\u0430\u0442\u0435\u043b). Set partner_name and partner_vat to the "
+                        "SELLER/ISSUER (\u043f\u0440\u043e\u0434\u0430\u0432\u0430\u0447) who ISSUED this document. "
+                        "If the PDF contains multiple invoices extract only the first one. "
+                        "Return ONLY the JSON object, no explanation, no markdown fences."}]}
+                    _hint_a = {"role": "assistant", "content":
+                        "Understood - I will extract the seller/issuer as partner_name/partner_vat."}
+                    _msgs = _msgs[:-1] + [_hint_u, _hint_a] + [_msgs[-1]]
+                    _url2 = _base_url.rstrip('/') + '/v1/messages'
+                    _hdrs2 = {"x-api-key": _api_key, "anthropic-version": "2023-06-01",
+                              "content-type": "application/json"}
+                    try:
+                        with _hx.Client(timeout=120) as _hc:
+                            _resp2 = _hc.post(_url2, json={"model": _model, "max_tokens": 2000,
+                                "system": _sys, "messages": _msgs}, headers=_hdrs2)
+                        _dur2 = int((_tm.monotonic() - _t0) * 1000)
+                        if _resp2.status_code == 200:
+                            _d2 = _resp2.json()
+                            _raw2 = "".join(b.get("text","") for b in _d2.get("content",[])
+                                            if b.get("type")=="text").strip()
+                            import re as _re2
+                            _jm = _re2.search(r'```(?:json)?\s*(\{.*?\})\s*```', _raw2, _re2.DOTALL)
+                            if _jm:
+                                _raw2 = _jm.group(1)
+                            else:
+                                _ji = _raw2.find("{")
+                                if _ji > 0:
+                                    _raw2 = _raw2[_ji:]
+                            _ext2 = _js2.loads(_raw2)
+                            _fc2 = _ext2.pop("_confidence", {})
+                            _r = _JSONResp({"state": "success", "model": _model, "pages": _pages,
+                                "duration_ms": _dur2, "prompt_version": "v4+seller_hint",
+                                "data": _ext2, "field_confidence": _fc2, "cost_eur_millicents": 0})
+                            await _r(scope, receive, send)
+                            return
+                    except Exception:
+                        pass  # fall through to normal extraction
+                _result = ai_vision_service.extract_invoice(
+                    file_bytes=_file_bytes, mimetype=_mimetype, api_key=_api_key, base_url=_base_url,
+                )
+                if _company_vat and _result.state in ("success", "cached") and _result.extracted_data:
+                    _ext_v = (_result.extracted_data.get("partner_vat") or "").strip()
+                    _own_d = _company_vat.lstrip("BG").lstrip("bg")
+                    _ext_d = _ext_v.lstrip("BG").lstrip("bg")
+                    if _own_d and _ext_d and _ext_d == _own_d:
+                        _result.extracted_data["partner_vat"] = None
+                        _result.extracted_data["partner_name"] = None
+                if _result.state == "error":
+                    _r = _JSONResp({"error": _result.error_message or "extraction failed"}, status_code=502)
+                else:
+                    _r = _JSONResp({
+                        "state": _result.state, "model": _result.model, "pages": _result.pages,
+                        "duration_ms": _result.duration_ms, "prompt_version": _result.prompt_version,
+                        "data": _result.extracted_data, "field_confidence": _result.field_confidence,
+                        "cost_eur_millicents": _result.cost_eur_millicents,
+                    })
+            except Exception as _ex:
+                _r = _JSONResp({"error": str(_ex)}, status_code=500)
+            await _r(scope, receive, send)
+
+        elif path == "/api/ai/customs/extract-raw" and scope["type"] == "http" and scope.get("method") == "POST":
+            from starlette.requests import Request as _CReq
+            from starlette.responses import JSONResponse as _CResp
+            _creq = _CReq(scope, receive)
+            _client_ip = (scope.get("client") or ("", 0))[0]
+            _is_internal = _client_ip.startswith("172.") or _client_ip == "127.0.0.1"
+            if not _is_internal:
+                _expected = os.environ.get("MCP_ADMIN_TOKEN", "")
+                _provided = (_creq.headers.get("authorization") or "").replace("Bearer ", "", 1).strip()
+                if not _expected or _provided != _expected:
+                    _r = _CResp({"error": "auth required"}, status_code=401)
+                    await _r(scope, receive, send)
+                    return
+            try:
+                import base64 as _b64c, json as _jsc, re as _rec, time as _tmc
+                import httpx as _hxc
+                import ai_vision_service as _visc
+                _cbody = await _creq.json()
+                _cimg_b64 = _cbody.get("image_b64", _cbody.get("file_b64", ""))
+                _cmime = _cbody.get("mimetype", "application/pdf")
+                _ctenant = (_cbody.get("tenant_code") or "default").strip()
+                if not _cimg_b64:
+                    _r = _CResp({"error": "image_b64 required"}, status_code=400)
+                    await _r(scope, receive, send)
+                    return
+                _capi_key, _cbase_url = _ai_tenant_credentials(_ctenant)
+                if not _capi_key:
+                    _r = _CResp({"error": "No Anthropic API key configured."}, status_code=503)
+                    await _r(scope, receive, send)
+                    return
+                _cfile_bytes = _b64c.b64decode(_cimg_b64)
+                _cpages = _visc.count_pdf_pages(_cfile_bytes) if _cmime == "application/pdf" else 1
+                _cmodel = _visc.choose_model(pages=_cpages, size_bytes=len(_cfile_bytes))
+                _ct0 = _tmc.monotonic()
+                _CSYS = (
+                    "You are an OCR and data extraction engine for Bulgarian customs declarations "
+                    "(EAD / Vdigane na stoki). Extract ONLY structured data. "
+                    "Return ONLY a valid JSON object, no explanation, no markdown fences. "
+                    "Use snake_case keys. Return null for fields not found. "
+                    "All amounts as float, dates as YYYY-MM-DD strings."
+                )
+                _CPROMPT = (
+                    "Extract the following fields from this Bulgarian customs declaration (EAD / Вдигане на стоки).\n\n"
+                    "## Header fields (return at root level)\n"
+                    "- mrn: MRN barcode top-right (18 chars, format YYBGxxxxxxXXXXXXXX, e.g. 26BG004002010764R8)\n"
+                    "- declaration_number: H1 field value (long number like 26000000002362H001110)\n"
+                    "- lrn: field \"12 09 - LRN\" value\n"
+                    "- customs_office_code: \"МУ на подаване\" 8-char code (e.g. BG004002)\n"
+                    "- declaration_date: \"Дата на приемане\" converted to ISO YYYY-MM-DD\n"
+                    "- package_count: \"Общ брой пакети\" integer (field 28)\n"
+                    "- package_type: package type code from bottom section (e.g. PC)\n"
+                    "- country_of_dispatch: field \"16 06 - Държава на изпращане\" ISO-2 (e.g. TR)\n"
+                    "- total_invoiced_value: field \"14 06 - Обща фактурирана стойност\" float\n"
+                    "- currency: field \"14 05 - Валута на фактурата\" (e.g. EUR)\n"
+                    "- exchange_rate: field \"14 06 - Обменен курс\" float\n"
+                    "- total_gross_weight: header \"18 04 - Бруто тегло\" float kg\n"
+                    "- transit_mrn: from Предшестващи документи section N821 row Референтен номер\n"
+                    "- importer_name: field \"13 04 Вносител\" company name\n"
+                    "- importer_vat: field \"13 04 Вносител\" TIN (starts with BGC or BG)\n\n"
+                    "## Line items array (key: lines)\n"
+                    "For each \"Стока N - Вдигната стока\" section extract an object:\n"
+                    "{ line_number (int), hs_code (field 18 09 056), cn_code (18 09 057), "
+                    "taric_code (18 09 058), description (field 18 05 text), "
+                    "gross_weight_kg (18 04 float), net_weight_kg (18 01 float), "
+                    "customs_value_eur (Митническа стойност EUR float), "
+                    "statistical_value_eur (Статистическа стойност EUR float), "
+                    "country_of_origin (16 08 001 ISO-2), "
+                    "customs_duty_eur (A00 Дължим размер float), "
+                    "vat_eur (B00 Дължим размер float) }\n\n"
+                    "## Computed totals\n"
+                    "- total_customs_value: sum of all line customs_value_eur\n"
+                    "- total_vat_eur: sum of all line vat_eur\n"
+                    "- overall_confidence: float 0..1\n"
+                    "- mrn_confidence, declaration_confidence, office_confidence: per-field confidence floats\n\n"
+                    "Return ONLY the JSON object."
+                )
+                # Build content block: document for PDF, image for raster images
+                if _cmime == "application/pdf":
+                    _ccontent_block = {"type": "document", "source": {
+                        "type": "base64", "media_type": "application/pdf", "data": _cimg_b64,
+                    }}
+                else:
+                    _ccontent_block = {"type": "image", "source": {
+                        "type": "base64", "media_type": _cmime, "data": _cimg_b64,
+                    }}
+                _cmsgs = [
+                    {"role": "user", "content": [
+                        _ccontent_block,
+                        {"type": "text", "text": _CPROMPT},
+                    ]},
+                ]
+                _curl = _cbase_url.rstrip("/") + "/v1/messages"
+                _chdrs = {
+                    "x-api-key": _capi_key,
+                    "anthropic-version": "2023-06-01",
+                    "anthropic-beta": "pdfs-2024-09-25",
+                    "content-type": "application/json",
+                }
+                with _hxc.Client(timeout=180.0) as _hc:
+                    _cresp = _hc.post(_curl, json={"model": _cmodel, "max_tokens": 3000,
+                        "system": _CSYS, "messages": _cmsgs}, headers=_chdrs)
+                _cdur = int((_tmc.monotonic() - _ct0) * 1000)
+                if _cresp.status_code != 200:
+                    _r = _CResp({"error": f"Claude API {_cresp.status_code}: {_cresp.text[:300]}"}, status_code=502)
+                    await _r(scope, receive, send)
+                    return
+                _cd = _cresp.json()
+                _craw = "".join(
+                    b.get("text", "") for b in _cd.get("content", []) if b.get("type") == "text"
+                ).strip()
+                _cjm = _rec.search(r"```(?:json)?\s*(\{.*?\})\s*```", _craw, _rec.DOTALL)
+                if _cjm:
+                    _craw = _cjm.group(1)
+                else:
+                    _cji = _craw.find("{")
+                    if _cji > 0:
+                        _craw = _craw[_cji:]
+                _cext = _jsc.loads(_craw)
+                _r = _CResp({
+                    "state": "success", "model": _cmodel, "pages": _cpages,
+                    "duration_ms": _cdur, "data": _cext,
+                })
+            except Exception as _cex:
+                _r = _CResp({"error": str(_cex)}, status_code=500)
+            await _r(scope, receive, send)
         elif path == "/mcp":
             await session_manager.handle_request(scope, receive, send)
         elif path == "/sse":
