@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "2.20.0"
+__version__ = "2.21.0"
 
 import asyncio
 import json
@@ -4097,7 +4097,7 @@ def _ssh_execute(host: str, user: str, command: str, port: int = 22,
             connect_kwargs["look_for_keys"] = True
             home_ssh = Path.home() / ".ssh"
             key_candidates = [home_ssh / k for k in ("id_ed25519", "id_ecdsa", "id_rsa")
-                              if (home_ssh / k).exists()]
+                              if (home_ssh / k).exists() and os.access(str(home_ssh / k), os.R_OK)]
             if key_candidates:
                 connect_kwargs["key_filename"] = [str(k) for k in key_candidates]
 
@@ -7745,7 +7745,8 @@ def create_app():
                        "/api/session/list", "/api/session/update",
                        "/api/session/delete", "/api/connect",
                        "/api/identify",
-                       "/api/user/connections"}
+                       "/api/user/connections",
+                       "/api/config/ai_keys"}
     public_paths = {"/health", "/.well-known/oauth-authorization-server",
                     "/oauth/token", "/oauth/register"}
 
@@ -8857,6 +8858,11 @@ def create_app():
             await _r(scope, receive, send)
         elif path == "/mcp":
             await session_manager.handle_request(scope, receive, send)
+        elif path == "/api/config/ai_keys" and scope["type"] == "http" and scope.get("method") == "GET":
+            from starlette.responses import JSONResponse as _AKResp
+            _ak = os.environ.get("ANTHROPIC_API_KEY", "")
+            await _AKResp({"anthropic_api_key": _ak})(scope, receive, send)
+
         elif path == "/sse":
             await handle_sse(scope, receive, send)
         elif path.startswith("/messages"):
