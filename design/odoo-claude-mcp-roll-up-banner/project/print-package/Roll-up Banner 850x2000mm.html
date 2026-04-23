@@ -1,0 +1,1053 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Odoo · Claude · MCP — Roll-up banner (PRINT — 850 × 2000 mm)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&family=Geist:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+<script>
+const TWEAKS = /*EDITMODE-BEGIN*/{
+  "variant": "classic",
+  "palette": "paper",
+  "accent": "claude",
+  "showBleed": true,
+  "showStand": true
+}/*EDITMODE-END*/;
+</script>
+
+<style>
+  /* ============================================================
+     PRINT PAGE — 850 × 2000 mm (roll-up banner)
+     ============================================================ */
+  @page {
+    size: 850mm 2000mm;
+    margin: 0;
+  }
+  @media print {
+    html, body {
+      margin: 0 !important;
+      padding: 0 !important;
+      background: var(--paper) !important;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    /* Force banner to top-left, no centering, no scale.
+       @page size: 850mm 2000mm + 1px=1mm layout means the banner fills exactly. */
+    body > *, #scaleWrap, .stage, .banner-wrap {
+      transform: none !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      display: block !important;
+      position: static !important;
+      left: 0 !important;
+      top: 0 !important;
+      width: auto !important;
+      height: auto !important;
+      align-items: flex-start !important;
+      justify-content: flex-start !important;
+    }
+    .banner {
+      position: absolute !important;
+      left: 0 !important;
+      top: 0 !important;
+      width: 850px !important;
+      height: 2000px !important;
+      box-shadow: none !important;
+      break-inside: avoid;
+      page-break-inside: avoid;
+    }
+    .stand-base, .stand-cap, .shadow, nav, header, footer, .toolbar, .tweaks, [data-ui="chrome"] {
+      display: none !important;
+    }
+  }
+
+  :root{
+    --paper: oklch(0.968 0.012 85);
+    --paper-2: oklch(0.945 0.015 82);
+    --ink: oklch(0.18 0.012 60);
+    --ink-2: oklch(0.35 0.010 60);
+    --ink-3: oklch(0.55 0.008 60);
+    --rule: oklch(0.18 0.012 60 / 0.14);
+    --rule-strong: oklch(0.18 0.012 60 / 0.28);
+    --accent: oklch(0.58 0.19 25);
+    --accent-ink: oklch(0.98 0.005 85);
+    --chip: oklch(0.92 0.015 80);
+    --term-bg: oklch(0.17 0.014 260);
+    --term-ink: oklch(0.92 0.01 90);
+    --term-dim: oklch(0.62 0.008 90);
+    --term-green: oklch(0.78 0.16 145);
+    --term-accent: oklch(0.78 0.14 55);
+  }
+  [data-palette="ink"]{
+    --paper: oklch(0.14 0.01 260);
+    --paper-2: oklch(0.19 0.012 260);
+    --ink: oklch(0.96 0.005 90);
+    --ink-2: oklch(0.78 0.008 90);
+    --ink-3: oklch(0.60 0.008 90);
+    --rule: oklch(0.96 0.005 90 / 0.14);
+    --rule-strong: oklch(0.96 0.005 90 / 0.28);
+    --chip: oklch(0.24 0.012 260);
+  }
+  [data-palette="cinnabar"]{
+    --paper: oklch(0.58 0.19 25);
+    --paper-2: oklch(0.52 0.19 25);
+    --ink: oklch(0.98 0.010 85);
+    --ink-2: oklch(0.94 0.020 85);
+    --ink-3: oklch(0.82 0.040 30);
+    --rule: oklch(0.98 0.010 85 / 0.22);
+    --rule-strong: oklch(0.98 0.010 85 / 0.40);
+    --accent: oklch(0.18 0.012 60);
+    --accent-ink: oklch(0.98 0.010 85);
+    --chip: oklch(0.98 0.010 85 / 0.14);
+  }
+  [data-accent="cinnabar"]{ --accent: oklch(0.58 0.19 25); }
+  [data-accent="indigo"]{ --accent: oklch(0.52 0.17 265); }
+  [data-accent="moss"]{ --accent: oklch(0.48 0.13 145); }
+  [data-accent="ink"]{ --accent: oklch(0.18 0.012 60); }
+  [data-accent="claude"]{ --accent: oklch(0.55 0.17 250); }
+
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:#fff;color:var(--ink);font-family:"Geist",ui-sans-serif,system-ui;font-feature-settings:"ss01","cv11"}
+
+  /* Print size: exactly 850 × 2000 mm (1mm = 1px internally, then CSS mm on @page) */
+  @page{
+    size: 850mm 2000mm;
+    margin: 0;
+  }
+  html,body{margin:0;padding:0}
+  body{width:850mm;height:2000mm}
+  .mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-feature-settings:"calt","ss01"}
+  .serif{font-family:"Instrument Serif",ui-serif,Georgia,serif;font-weight:400;letter-spacing:-.015em}
+
+  /* ========= Print stage — banner at actual 850×2000 mm ========= */
+  .stage{
+    width:850mm;height:2000mm;
+    background:#fff;
+    overflow:hidden;
+    position:relative;
+  }
+  /* Fixed-pixel banner (850×2000 design units) scaled to exactly 850×2000mm via transform */
+  .stage-inner{
+    width:850px;height:2000px;
+    transform: scale(calc(850mm / 850px));
+    transform-origin: top left;
+  }
+
+  .banner-wrap{position:relative;display:block;width:850px;height:2000px}
+
+  .banner{
+    width:850px;height:2000px;
+    background:var(--paper);
+    color:var(--ink);
+    position:relative;
+    overflow:hidden;
+    /* Fine technical grid — 20mm squares, hairline */
+    background-image:
+      linear-gradient(to right, color-mix(in oklch, var(--ink) 8%, transparent) 0, color-mix(in oklch, var(--ink) 8%, transparent) 1px, transparent 1px, transparent 20px),
+      linear-gradient(to bottom, color-mix(in oklch, var(--ink) 8%, transparent) 0, color-mix(in oklch, var(--ink) 8%, transparent) 1px, transparent 1px, transparent 20px);
+    background-size: 40px 40px, 40px 40px;
+    background-position: 0 0, 0 0;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  /* Bleed marks hidden for production */
+  .banner::before,.banner::after{display:none !important}
+
+  /* hide non-print chrome */
+  .stand-base,.stand-top,.meta-label,.tweaks-panel,.stage-caption{display:none !important}
+
+  /* ========= Meta label ========= */
+  .meta-label{
+    position:absolute;left:-180px;top:200px;width:160px;
+    font:500 10px/1.6 "JetBrains Mono";letter-spacing:.15em;text-transform:uppercase;color:oklch(0.72 0.005 90);
+    text-align:right;
+  }
+  .meta-label b{color:oklch(0.96 0 0);font-weight:500}
+  .meta-label .dim{color:oklch(0.55 0.005 90)}
+  @media(max-width:1400px){.meta-label{display:none}}
+
+  /* ========= COMMON BANNER CHROME ========= */
+  .top-bar{
+    position:absolute;top:0;left:0;right:0;height:18px;
+    background:var(--accent);
+  }
+  .cap{
+    height:8px;background:var(--ink);
+  }
+  .ticker-band{
+    height:34px;background:var(--ink);color:var(--paper);
+    display:flex;align-items:center;overflow:hidden;white-space:nowrap;
+    font:500 11px/1 "JetBrains Mono";letter-spacing:.14em;text-transform:uppercase;
+  }
+  .ticker-band .run{display:flex;gap:40px;padding:0 40px;animation:run 40s linear infinite}
+  .ticker-band .run span::before{content:"◆  ";color:var(--accent);margin-right:10px}
+  @keyframes run{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+
+  /* ========= Brand lockup ========= */
+  .brand-block{display:flex;align-items:center;gap:14px;font:500 20px/1 "JetBrains Mono";letter-spacing:-.005em}
+  .brand-block .mark{
+    width:44px;height:44px;border:2px solid var(--ink);border-radius:50%;
+    position:relative;display:grid;place-items:center;flex:0 0 44px;
+  }
+  .brand-block .mark::before,.brand-block .mark::after{content:"";position:absolute;background:var(--ink)}
+  .brand-block .mark::before{width:20px;height:2.5px}
+  .brand-block .mark::after{width:2.5px;height:20px}
+  .brand-block .slash{color:var(--ink-3)}
+  .brand-block .accent{color:var(--accent);font-weight:600}
+
+  /* ========= Shared typography ========= */
+  .eyebrow{font:500 13px/1 "JetBrains Mono";letter-spacing:.22em;text-transform:uppercase;color:var(--accent);display:flex;align-items:center;gap:14px}
+  .eyebrow::before{content:"§";font-size:14px}
+  .eyebrow-line{flex:1;height:1px;background:var(--rule-strong);max-width:120px}
+
+  /* ========= SECTIONS PER VARIANT ========= */
+
+  /* ============================================================
+     VARIANT A — "CLASSIC" Editorial hierarchy
+     ============================================================ */
+  .variant-classic{
+    padding:40px 64px 44px;
+    display:flex;flex-direction:column;
+    gap:0;
+  }
+
+  .va-head{
+    padding-top:18px;display:flex;justify-content:space-between;align-items:flex-start;gap:20px;
+    padding-bottom:22px;border-bottom:1px solid var(--rule-strong);
+  }
+  .va-head .v{
+    text-align:right;font:500 11px/1.5 "JetBrains Mono";letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);
+  }
+  .va-head .v b{color:var(--ink);display:block;font-size:14px;margin-bottom:4px;letter-spacing:.08em}
+
+  .va-eyebrows{
+    display:flex;gap:22px;margin-top:28px;
+    font:500 12px/1 "JetBrains Mono";letter-spacing:.18em;text-transform:uppercase;color:var(--ink-3);
+  }
+  .va-eyebrows span::before{content:""}
+
+  .va-headline{
+    font-family:"Instrument Serif";font-weight:400;
+    font-size:118px;line-height:.88;letter-spacing:-.03em;
+    margin-top:22px;
+  }
+  .va-headline em{
+    font-style:italic;color:var(--accent);
+  }
+
+  .va-sub{
+    font-family:"Geist";font-weight:400;font-size:21px;line-height:1.35;color:var(--ink-2);
+    margin-top:22px;max-width:40ch;text-wrap:pretty;
+  }
+  .va-sub b{color:var(--ink);font-weight:500}
+
+  .va-kpis{
+    display:grid;grid-template-columns:repeat(4,1fr);
+    margin-top:36px;
+    border-top:1px solid var(--rule-strong);border-bottom:1px solid var(--rule-strong);
+  }
+  .va-kpis .kpi{
+    padding:16px 14px;border-right:1px solid var(--rule);
+  }
+  .va-kpis .kpi:last-child{border-right:none}
+  .va-kpis .n{font-family:"Instrument Serif";font-size:52px;line-height:1;letter-spacing:-.02em}
+  .va-kpis .n sup{font-size:.38em;vertical-align:top;margin-left:3px;color:var(--accent)}
+  .va-kpis .l{font:500 10px/1.3 "JetBrains Mono";letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin-top:8px}
+
+  /* Architecture — VISUAL CENTERPIECE of the banner */
+  .va-arch{
+    margin-top:34px;padding:28px 0 22px;
+    border-top:2.5px solid var(--ink);border-bottom:2.5px solid var(--ink);
+    position:relative;
+  }
+  .va-arch::before{
+    content:"THE STACK";position:absolute;top:-9px;left:50%;transform:translateX(-50%);
+    background:var(--paper);padding:0 16px;
+    font:600 11px/1 "JetBrains Mono";letter-spacing:.32em;color:var(--accent);
+  }
+  .va-arch .arch-title{
+    text-align:center;margin-bottom:6px;
+    font-family:"Instrument Serif";font-size:38px;line-height:1;letter-spacing:-.02em;
+  }
+  .va-arch .arch-title em{
+    font-style:italic;color:var(--accent);
+  }
+  .va-arch .arch-sub{
+    text-align:center;margin:6px auto 18px;max-width:44ch;
+    font:400 13px/1.45 "Geist";color:var(--ink-2);text-wrap:pretty;
+  }
+  .va-arch .tier-label{
+    font:500 10px/1 "JetBrains Mono";letter-spacing:.28em;color:var(--ink-3);
+    text-transform:uppercase;text-align:center;margin-bottom:12px;
+  }
+  .va-arch .clients{display:flex;gap:28px;flex-wrap:wrap;justify-content:center;padding-bottom:4px}
+  .va-arch .pill{
+    padding:6px 2px;font:500 13px/1 "Geist";color:var(--ink);position:relative;
+  }
+  .va-arch .pill::after{
+    content:"";position:absolute;inset:auto 0 -3px 0;height:1.5px;background:var(--rule-strong);
+  }
+  .va-arch .wire{display:block;margin:10px auto 4px}
+  .va-arch .wire svg{display:block;margin:0 auto}
+
+  .va-arch .gate{
+    margin:10px auto 0;padding:14px 0;background:transparent;color:var(--ink);
+    display:flex;align-items:center;justify-content:center;gap:14px;
+    font:500 19px/1.1 "JetBrains Mono";letter-spacing:-.005em;
+    width:max-content;max-width:92%;position:relative;
+  }
+  .va-arch .gate .gk{color:var(--accent);font-weight:600}
+  .va-arch .gate .gs{opacity:.5;font-weight:400}
+  .va-arch .gate .dot{
+    width:9px;height:9px;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 0 5px color-mix(in oklch, var(--accent) 30%, transparent);
+    animation:pulse 1.8s ease infinite;flex:0 0 9px;
+  }
+  .va-arch .gate .tag{
+    background:var(--accent);color:var(--accent-ink);
+    font:600 9px/1 "JetBrains Mono";letter-spacing:.18em;padding:5px 8px;
+    margin-left:4px;
+  }
+  @keyframes pulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.4);opacity:.55}}
+
+  .va-arch .servers{
+    display:grid;grid-template-columns:repeat(4,1fr);
+    border-top:1px solid var(--rule);border-left:1px solid var(--rule);
+    margin:18px 0 4px;
+  }
+  .va-arch .node{
+    padding:12px 10px;text-align:center;position:relative;
+    border-right:1px solid var(--rule);border-bottom:1px solid var(--rule);
+  }
+  .va-arch .node .n{
+    display:inline-block;font:500 14px/1.1 "JetBrains Mono";color:var(--ink);letter-spacing:-.005em;
+  }
+  .va-arch .node .t{
+    display:block;font:500 10px/1.2 "Geist";letter-spacing:.12em;color:var(--ink-3);
+    text-transform:uppercase;margin-top:6px;
+  }
+  .va-arch .node .ct{
+    position:absolute;top:8px;right:10px;font:500 9px/1 "JetBrains Mono";
+    color:var(--ink-3);letter-spacing:.06em;
+  }
+  .va-arch .node.star{background:color-mix(in oklch, var(--accent) 9%, var(--paper))}
+  .va-arch .node.star .n{
+    color:var(--accent);
+    text-decoration:underline;text-decoration-color:var(--accent);text-decoration-thickness:2px;text-underline-offset:4px;
+  }
+  .va-arch .node.star .ct{color:var(--accent);font-weight:600}
+
+  .va-arch .infra{
+    display:flex;flex-wrap:wrap;gap:4px 20px;justify-content:center;
+    padding:12px 12px 0;font:500 11px/1.4 "JetBrains Mono";color:var(--ink-3);letter-spacing:.06em;
+  }
+  .va-arch .infra span{position:relative;padding-left:14px}
+  .va-arch .infra span::before{
+    content:"";position:absolute;left:0;top:50%;transform:translateY(-50%);
+    width:6px;height:6px;border:1.5px solid var(--accent);border-radius:50%;
+  }
+  .va-arch .infra b{color:var(--ink);font-weight:500}
+
+  /* Reasons row — thin rules, clean headings (no underlines) */
+  .va-reasons{
+    margin-top:28px;display:grid;grid-template-columns:repeat(3,1fr);gap:0;
+    border-top:1px solid var(--rule);padding-top:20px;
+  }
+  .va-reasons .r{
+    padding:0 14px 0 0;
+  }
+  .va-reasons .r + .r{padding-left:18px;border-left:1px solid var(--rule)}
+  .va-reasons .idx{font:500 10px/1 "JetBrains Mono";color:var(--ink-3);letter-spacing:.16em;margin-bottom:10px;text-transform:uppercase}
+  .va-reasons h3{
+    font-family:"Instrument Serif";font-size:24px;line-height:1.05;letter-spacing:-.01em;
+  }
+  .va-reasons h3 em{
+    font-style:italic;color:var(--accent);
+  }
+  .va-reasons p{font:400 12px/1.45 "Geist";color:var(--ink-2);margin-top:10px;text-wrap:pretty}
+
+  /* CTA / Footer block */
+  .va-foot{
+    margin-top:auto;padding-top:24px;
+    border-top:1px solid var(--rule-strong);
+    display:grid;grid-template-columns:1.2fr 1fr;gap:20px;align-items:end;
+  }
+  .va-foot .cta-line{
+    font-family:"Instrument Serif";font-style:italic;font-size:26px;line-height:1.1;color:var(--ink);
+    max-width:20ch;
+  }
+  .va-foot .cta-line em{
+    font-style:italic;color:var(--accent);
+  }
+  .va-foot .contacts{
+    display:flex;flex-direction:column;gap:10px;text-align:right;
+    font:500 13px/1.4 "JetBrains Mono";color:var(--ink-2);
+  }
+  .va-foot .contacts b{color:var(--ink);font-weight:500}
+  .va-foot .contacts .accent{color:var(--accent)}
+
+  /* QR — clean, no container */
+  .qr{
+    width:148px;height:148px;flex:0 0 148px;
+    display:grid;place-items:center;
+  }
+  .qr img{width:100%;height:100%;display:block;image-rendering:pixelated}
+  /* QR block — no container, just whitespace + rule */
+  .qr-block{
+    display:flex;gap:22px;align-items:center;
+    padding:18px 0 0;margin-top:22px;
+    border-top:1px solid var(--rule);
+  }
+  .qr-block .qt{font:500 11px/1.4 "JetBrains Mono";letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3)}
+  .qr-block .qt b{
+    display:inline-block;color:var(--ink);font-size:19px;margin-bottom:10px;letter-spacing:.04em;font-weight:500;
+  }
+  .qr-block .qt .url{color:var(--accent);font-size:14px;margin-top:12px;letter-spacing:.02em;font-weight:500}
+
+  /* ============================================================
+     VARIANT B — "TERMINAL" — terminal-led, dark band hero
+     ============================================================ */
+  .variant-terminal{
+    display:flex;flex-direction:column;height:100%;
+  }
+  .vb-top{
+    background:var(--ink);color:var(--paper);
+    padding:56px 64px 44px;position:relative;
+  }
+  .vb-top .brand-block{color:var(--paper)}
+  .vb-top .brand-block .mark{border-color:var(--paper)}
+  .vb-top .brand-block .mark::before,.vb-top .brand-block .mark::after{background:var(--paper)}
+  .vb-top .brand-block .slash{color:oklch(0.60 0.005 90)}
+  .vb-top .eyebrow{color:var(--accent);margin-top:38px}
+  .vb-top h1{
+    font-family:"Instrument Serif";font-weight:400;color:var(--paper);
+    font-size:116px;line-height:.92;letter-spacing:-.03em;margin-top:16px;
+  }
+  .vb-top h1 em{color:var(--accent);font-style:italic}
+
+  .vb-term{
+    margin:0 64px;
+    background:var(--term-bg);color:var(--term-ink);
+    border-radius:12px;overflow:hidden;
+    font-family:"JetBrains Mono";font-size:15px;line-height:1.7;
+    box-shadow:0 40px 80px -30px oklch(0 0 0 / 0.6);
+    transform:translateY(-36px);
+    border:1px solid oklch(1 0 0 / .06);
+  }
+  .vb-term-chrome{
+    display:flex;align-items:center;gap:10px;padding:12px 16px;
+    background:oklch(0 0 0 / .3);border-bottom:1px solid oklch(1 0 0 / .07);
+  }
+  .vb-term-dots{display:flex;gap:6px}
+  .vb-term-dots i{width:12px;height:12px;border-radius:50%;background:oklch(0.60 0.15 25)}
+  .vb-term-dots i:nth-child(2){background:oklch(0.78 0.13 85)}
+  .vb-term-dots i:nth-child(3){background:oklch(0.72 0.14 145)}
+  .vb-term-title{flex:1;text-align:center;font-size:11px;color:var(--term-dim);letter-spacing:.12em}
+  .vb-term-badge{font-size:10px;padding:3px 8px;border-radius:3px;background:var(--accent);color:var(--accent-ink);letter-spacing:.12em;font-weight:600}
+  .vb-term-body{padding:22px 24px}
+  .vb-term-body .pr{color:var(--term-green)}
+  .vb-term-body .dm{color:var(--term-dim)}
+  .vb-term-body .ok{color:var(--term-green)}
+  .vb-term-body .tl{color:var(--term-accent);background:oklch(1 0 0 / .05);padding:1px 6px;border-radius:3px}
+  .vb-term-body .mv{color:oklch(0.78 0.11 310)}
+  .caret-b::after{content:"▊";color:var(--term-green);animation:blink 1.1s steps(2) infinite}
+  @keyframes blink{50%{opacity:0}}
+
+  .vb-body{
+    padding:20px 64px 56px;flex:1;display:flex;flex-direction:column;
+  }
+  .vb-kpis{
+    display:grid;grid-template-columns:repeat(4,1fr);
+    border-top:1px solid var(--rule-strong);border-bottom:1px solid var(--rule-strong);
+    margin-bottom:36px;
+  }
+  .vb-kpis .kpi{padding:18px 14px;border-right:1px solid var(--rule);text-align:left}
+  .vb-kpis .kpi:last-child{border-right:none}
+  .vb-kpis .n{font-family:"Instrument Serif";font-size:52px;line-height:1;letter-spacing:-.02em}
+  .vb-kpis .n sup{font-size:.38em;vertical-align:top;margin-left:3px;color:var(--accent)}
+  .vb-kpis .l{font:500 10px/1.3 "JetBrains Mono";letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin-top:8px}
+
+  .vb-audiences{display:grid;grid-template-columns:repeat(2,1fr);gap:0;border-top:1px solid var(--rule);border-left:1px solid var(--rule)}
+  .vb-audiences .a{padding:20px;border-right:1px solid var(--rule);border-bottom:1px solid var(--rule);display:flex;flex-direction:column;gap:8px}
+  .vb-audiences .sym{font-family:"Instrument Serif";font-size:32px;line-height:1;color:var(--accent)}
+  .vb-audiences h4{font-family:"Instrument Serif";font-size:22px;line-height:1.05}
+  .vb-audiences p{font-size:12.5px;line-height:1.45;color:var(--ink-2);text-wrap:pretty}
+
+  .vb-pull{
+    font-family:"Instrument Serif";font-size:34px;line-height:1.1;letter-spacing:-.015em;
+    margin:36px 0 28px;text-align:center;max-width:24ch;margin-left:auto;margin-right:auto;
+  }
+  .vb-pull em{color:var(--accent);font-style:italic}
+
+  .vb-foot{
+    margin-top:auto;padding-top:28px;border-top:1px solid var(--rule-strong);
+    display:grid;grid-template-columns:1fr auto;gap:28px;align-items:center;
+  }
+  .vb-foot .c1{display:flex;flex-direction:column;gap:10px}
+  .vb-foot .cta{
+    display:inline-flex;align-items:center;gap:12px;
+    background:var(--ink);color:var(--paper);padding:14px 22px;border-radius:999px;
+    font:500 14px/1 "JetBrains Mono";letter-spacing:.04em;width:max-content;
+  }
+  .vb-foot .cta .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px color-mix(in oklch, var(--accent) 30%, transparent)}
+  .vb-foot .url{font:500 12.5px/1.5 "JetBrains Mono";color:var(--ink-2)}
+  .vb-foot .url b{color:var(--ink);font-weight:500}
+
+  /* ============================================================
+     VARIANT C — "POSTER" — Bold serif poster, minimal
+     ============================================================ */
+  .variant-poster{
+    padding:0;display:flex;flex-direction:column;height:100%;
+  }
+  .vc-ribbon{
+    background:var(--accent);color:var(--accent-ink);
+    padding:22px 64px;display:flex;justify-content:space-between;align-items:center;
+    font:500 12px/1 "JetBrains Mono";letter-spacing:.18em;text-transform:uppercase;
+  }
+  .vc-ribbon b{font-weight:600}
+  .vc-body{
+    flex:1;padding:64px 64px 48px;display:flex;flex-direction:column;
+  }
+  .vc-brand{margin-bottom:52px}
+  .vc-meta{
+    display:grid;grid-template-columns:repeat(4,auto);gap:36px;
+    font:500 11px/1.5 "JetBrains Mono";letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);
+    padding-bottom:32px;border-bottom:1px solid var(--rule-strong);margin-bottom:44px;
+  }
+  .vc-meta b{display:block;color:var(--ink);font-size:13px;margin-bottom:4px;letter-spacing:.08em}
+  .vc-headline{
+    font-family:"Instrument Serif";font-weight:400;color:var(--ink);
+    font-size:172px;line-height:.84;letter-spacing:-.035em;
+    text-wrap:balance;
+  }
+  .vc-headline em{color:var(--accent);font-style:italic}
+  .vc-sub{
+    font-family:"Instrument Serif";font-style:italic;font-size:36px;line-height:1.1;color:var(--ink-2);
+    margin-top:40px;max-width:20ch;letter-spacing:-.015em;
+  }
+  .vc-sub em{color:var(--accent);font-style:normal;font-family:"Geist";font-weight:500;font-size:.9em;letter-spacing:.01em}
+
+  .vc-badges{
+    margin-top:48px;display:flex;gap:10px;flex-wrap:wrap;
+  }
+  .vc-badges .b{
+    padding:10px 16px;border:1.5px solid var(--ink);border-radius:999px;
+    font:500 13px/1 "JetBrains Mono";letter-spacing:.04em;
+  }
+  .vc-badges .b.fill{background:var(--ink);color:var(--paper)}
+  .vc-badges .b .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-right:8px;vertical-align:middle}
+
+  .vc-divider{flex:1;display:flex;align-items:flex-end}
+  .vc-tools{
+    margin-top:auto;padding-top:36px;border-top:1px solid var(--rule-strong);
+    display:grid;grid-template-columns:repeat(3,1fr);gap:20px;
+  }
+  .vc-tools .t{display:flex;flex-direction:column;gap:4px}
+  .vc-tools .n{font-family:"Instrument Serif";font-size:46px;line-height:1;letter-spacing:-.02em}
+  .vc-tools .n sup{font-size:.38em;color:var(--accent);vertical-align:top;margin-left:2px}
+  .vc-tools .l{font:500 11px/1.4 "JetBrains Mono";letter-spacing:.08em;color:var(--ink-3);text-transform:uppercase}
+
+  .vc-foot{
+    margin-top:44px;padding-top:26px;border-top:1px solid var(--rule-strong);
+    display:grid;grid-template-columns:1fr auto;align-items:center;gap:24px;
+  }
+  .vc-foot .maker{
+    display:flex;gap:14px;align-items:center;
+  }
+  .vc-foot .maker .pt{width:64px;height:80px;border-radius:4px;overflow:hidden;background:var(--paper-2);border:1px solid var(--rule-strong);flex:0 0 64px}
+  .vc-foot .maker .pt img{width:100%;height:100%;object-fit:cover;filter:grayscale(.3) contrast(1.02)}
+  .vc-foot .maker .m1{font-family:"Instrument Serif";font-size:24px;line-height:1.05}
+  .vc-foot .maker .m2{font:500 11px/1.5 "JetBrains Mono";color:var(--ink-3);letter-spacing:.08em;margin-top:4px}
+  .vc-foot .maker .m2 b{color:var(--ink);font-weight:500}
+  .vc-foot .url{
+    font:500 14px/1 "JetBrains Mono";color:var(--ink);letter-spacing:.04em;text-align:right;
+  }
+  .vc-foot .url .k{display:block;color:var(--ink-3);font-size:10px;letter-spacing:.18em;margin-bottom:6px;text-transform:uppercase}
+  .vc-foot .url .a{color:var(--accent)}
+
+  /* ========= Tweak panel ========= */
+  .tweaks-panel{
+    position:fixed;right:24px;bottom:24px;width:280px;
+    background:oklch(0.14 0.01 260);color:oklch(0.96 0 0);
+    border:1px solid oklch(1 0 0 / 0.14);border-radius:14px;padding:18px;
+    z-index:9999;display:none;
+    box-shadow:0 30px 70px -20px oklch(0 0 0 / 0.8);
+    font-family:"Geist",system-ui;
+  }
+  .tweaks-panel.on{display:block}
+  .tweaks-panel h6{font:500 11px/1 "JetBrains Mono";letter-spacing:.16em;color:oklch(0.70 0 0);text-transform:uppercase;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center}
+  .tweaks-panel h6 .acc{color:oklch(0.78 0.14 55)}
+  .tw-row{margin-bottom:14px}
+  .tw-row label{display:block;font:500 10px/1 "JetBrains Mono";color:oklch(0.62 0 0);margin-bottom:7px;letter-spacing:.14em;text-transform:uppercase}
+  .tw-row .seg{display:flex;border:1px solid oklch(1 0 0 / 0.14);border-radius:8px;overflow:hidden}
+  .tw-row .seg button{flex:1;background:transparent;border:none;padding:9px 4px;font:500 11px/1 "JetBrains Mono";color:oklch(0.72 0 0);cursor:pointer;letter-spacing:.02em}
+  .tw-row .seg button:hover{color:oklch(0.96 0 0)}
+  .tw-row .seg button.on{background:oklch(0.58 0.19 25);color:oklch(0.98 0.01 85)}
+
+  .stage-caption{
+    font:500 11px/1.5 "JetBrains Mono";letter-spacing:.14em;text-transform:uppercase;
+    color:oklch(0.50 0.005 260);text-align:center;margin-top:8px;
+  }
+  .stage-caption b{color:oklch(0.85 0 0);font-weight:500}
+</style>
+</head>
+<body data-palette="paper" data-accent="claude">
+
+<template id="__bundler_thumbnail" data-bg-color="#f7f1e6">
+  <svg viewBox="0 0 850 2000" xmlns="http://www.w3.org/2000/svg">
+    <rect width="850" height="2000" fill="#f7f1e6"/>
+    <text x="425" y="900" text-anchor="middle" font-family="Georgia,serif" font-size="140" font-style="italic" fill="#2a2118">odoo</text>
+    <text x="425" y="1050" text-anchor="middle" font-family="Georgia,serif" font-size="140" font-style="italic" fill="#4C6DF5">claude</text>
+    <text x="425" y="1200" text-anchor="middle" font-family="Georgia,serif" font-size="140" font-style="italic" fill="#2a2118">mcp</text>
+    <rect x="60" y="60" width="730" height="1880" fill="none" stroke="#2a2118" stroke-width="4"/>
+  </svg>
+</template>
+
+<div class="stage">
+  <div class="stage-inner" id="scaleWrap">
+    <div class="banner-wrap">
+      <div class="banner" id="banner" data-bleed="false"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Tweaks panel -->
+<div class="tweaks-panel" id="tweaks">
+  <h6>Tweaks <span class="acc mono">●</span></h6>
+  <div class="tw-row">
+    <label>Layout variant</label>
+    <div class="seg" data-key="variant">
+      <button data-v="classic" class="on">Classic</button>
+      <button data-v="terminal">Terminal</button>
+      <button data-v="poster">Poster</button>
+    </div>
+  </div>
+  <div class="tw-row">
+    <label>Palette</label>
+    <div class="seg" data-key="palette">
+      <button data-v="paper" class="on">Paper</button>
+      <button data-v="ink">Ink</button>
+      <button data-v="cinnabar">Cinnabar</button>
+    </div>
+  </div>
+  <div class="tw-row">
+    <label>Accent</label>
+    <div class="seg" data-key="accent">
+      <button data-v="claude" class="on">Claude</button>
+      <button data-v="indigo">Indigo</button>
+      <button data-v="cinnabar">Cinn.</button>
+      <button data-v="moss">Moss</button>
+    </div>
+  </div>
+  <div class="tw-row">
+    <label>Show print guides</label>
+    <div class="seg" data-key="showBleed">
+      <button data-v="false" class="on">Off</button>
+      <button data-v="true">On</button>
+    </div>
+  </div>
+  <div class="tw-row">
+    <label>Show stand</label>
+    <div class="seg" data-key="showStand">
+      <button data-v="true" class="on">On</button>
+      <button data-v="false">Off</button>
+    </div>
+  </div>
+</div>
+
+<!-- Templates for each variant -->
+<template id="tpl-classic">
+  <div class="variant-classic">
+    <div class="va-head">
+      <div class="brand-block mono">
+        <span class="mark"></span>
+        <span>odoo<span class="slash">/</span>claude<span class="slash">/</span><span class="accent">mcp</span></span>
+      </div>
+      <div class="v">
+        <b>v2.10.0</b>
+        shipped 2026-04-19<br>
+        AGPL-3 · self-hosted
+      </div>
+    </div>
+
+    <div class="va-eyebrows mono">
+      <span>Production-grade</span>
+      <span>MCP server suite</span>
+      <span>Sofia · БГ</span>
+    </div>
+
+    <h1 class="va-headline">
+      Turn your&nbsp;Odoo<br>
+      into a <em>Claude</em><br>
+      native citizen.
+    </h1>
+
+    <p class="va-sub">
+      A self-hosted Model Context Protocol server suite that connects <b>Claude</b>, <b>Claude&nbsp;Code</b> and any MCP-compatible client to Odoo ERP, GitHub, filesystems, Kubernetes, Microsoft Teams and a browser-based terminal — all through a unified, authenticated gateway.
+    </p>
+
+    <div class="va-kpis">
+      <div class="kpi"><div class="n">9<sup>★</sup></div><div class="l">MCP servers</div></div>
+      <div class="kpi"><div class="n">197<sup>+</sup></div><div class="l">MCP tools</div></div>
+      <div class="kpi"><div class="n">15→19</div><div class="l">Odoo versions</div></div>
+      <div class="kpi"><div class="n">AGPL-3</div><div class="l">Open source</div></div>
+    </div>
+
+    <div class="va-arch">
+      <h2 class="arch-title">One <em>gateway</em>. Nine servers. 197<sup style="font-size:.55em;color:var(--accent)">+</sup> tools.</h2>
+      <p class="arch-sub">Any MCP client talks to one authenticated endpoint. Inside, a fan-out of purpose-built servers handles Odoo, code, infra and comms.</p>
+
+      <div class="tier-label">Clients · MCP over HTTPS</div>
+      <div class="clients">
+        <div class="pill">Claude.ai</div>
+        <div class="pill">Claude Code</div>
+        <div class="pill">Claude Desktop</div>
+        <div class="pill">IDE / CLI</div>
+      </div>
+
+      <div class="wire">
+        <svg width="260" height="40" viewBox="0 0 260 40" fill="none" aria-hidden="true">
+          <path d="M10 2 V18 Q10 28 24 28 H236 Q250 28 250 18 V2" stroke="currentColor" stroke-width="1.2" opacity=".35"/>
+          <path d="M130 28 V40" stroke="currentColor" stroke-width="1.2" opacity=".35"/>
+          <text x="130" y="22" text-anchor="middle" font-family="JetBrains Mono" font-size="8.5" letter-spacing="0.6" fill="currentColor" opacity=".6">BEARER · MCP/JSON-RPC</text>
+        </svg>
+      </div>
+
+      <div class="gate">
+        <span class="dot"></span><span class="gk">Unified&nbsp;MCP&nbsp;Gateway</span><span class="gs">&middot;&nbsp;server.py</span>
+        <span class="tag">LIVE</span>
+      </div>
+
+      <div class="tier-label" style="margin-top:24px">Server fan-out</div>
+      <div class="servers">
+        <div class="node star"><span class="ct">83</span><span class="n">odoo-rpc</span><span class="t">ERP core</span></div>
+        <div class="node"><span class="ct">34</span><span class="n">ee-mcp</span><span class="t">Enterprise</span></div>
+        <div class="node"><span class="ct">28</span><span class="n">oca-mcp</span><span class="t">OCA add-ons</span></div>
+        <div class="node"><span class="ct">18</span><span class="n">github</span><span class="t">Git ops</span></div>
+        <div class="node"><span class="ct">12</span><span class="n">filesystem</span><span class="t">Scoped I/O</span></div>
+        <div class="node"><span class="ct">9</span><span class="n">portainer</span><span class="t">Docker · K8s</span></div>
+        <div class="node"><span class="ct">8</span><span class="n">teams-mcp</span><span class="t">MS Teams</span></div>
+        <div class="node star"><span class="ct">5</span><span class="n">terminal</span><span class="t">Browser shell</span></div>
+      </div>
+
+      <div class="infra">
+        <span><b>PostgreSQL</b> · Odoo DBs</span>
+        <span><b>Redis</b> · sessions</span>
+        <span><b>K3s</b> · replicas</span>
+        <span><b>Traefik</b> · TLS</span>
+        <span><b>Bearer</b> · per-user</span>
+      </div>
+    </div>
+
+    <div class="va-reasons">
+      <div class="r">
+        <div class="idx">01 / 03</div>
+        <h3>Unified auth, multi-tenant.</h3>
+        <p>One Bearer token across every endpoint. Per-user profile isolation. Dozens of Odoo databases switched on the fly.</p>
+      </div>
+      <div class="r">
+        <div class="idx">02 / 03</div>
+        <h3>Claude.ai connector ready.</h3>
+        <p>Public HTTPS endpoint, Bearer auth. Register as a Custom Connector in Team or Enterprise — done in minutes.</p>
+      </div>
+      <div class="r">
+        <div class="idx">03 / 03</div>
+        <h3>First-class БГ support.</h3>
+        <p>НАП, VAT, Intrastat, Образец&nbsp;1. Maintained by the OCA <span class="mono" style="font-size:11px">l10n-bulgaria</span> lead.</p>
+      </div>
+    </div>
+
+    <div class="qr-block">
+      <div class="qr"><img src="assets/qr-bl-consulting.png" alt="QR to bl-consulting.net"></div>
+      <div class="qt">
+        <b>Сканирай за BL&nbsp;Consulting</b>
+        Odoo Silver Partner · OCA l10n-bulgaria<br>
+        Odoo внедряване &middot; MCP AI стек &middot; НАП
+        <div class="url mono">bl-consulting.net</div>
+      </div>
+    </div>
+
+    <div class="va-foot">
+      <div class="cta-line">
+        Nine servers. <em>One&nbsp;gateway.</em><br>
+        Every tool Claude can call, authenticated once.
+      </div>
+      <div class="contacts">
+        <span><b>Rosen Vladimirov</b></span>
+        <span>Partner · BL Consulting</span>
+        <span class="accent">vladimirov.rosen@gmail.com</span>
+        <span>bl-consulting.net</span>
+      </div>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-terminal">
+  <div class="variant-terminal">
+    <div class="vb-top">
+      <div class="brand-block mono">
+        <span class="mark"></span>
+        <span>odoo<span class="slash">/</span>claude<span class="slash">/</span><span class="accent">mcp</span></span>
+      </div>
+      <div class="eyebrow">Production-grade <span class="eyebrow-line"></span> v2.10.0 · 2026-04-19</div>
+      <h1>
+        Turn your Odoo<br>
+        into a <em>Claude</em><br>
+        native citizen.
+      </h1>
+    </div>
+
+    <div class="vb-term">
+      <div class="vb-term-chrome">
+        <div class="vb-term-dots"><i></i><i></i><i></i></div>
+        <div class="vb-term-title">claude · rosen@mcp-gateway · bash</div>
+        <div class="vb-term-badge">LIVE</div>
+      </div>
+      <div class="vb-term-body">
+        <div class="pr">$ claude mcp add odoo-mcp \</div>
+        <div>&nbsp;&nbsp;&nbsp;&nbsp;--url https://mcp.yourdomain.com/mcp \</div>
+        <div>&nbsp;&nbsp;&nbsp;&nbsp;--header "Authorization: Bearer $TOKEN"</div>
+        <div>&nbsp;</div>
+        <div class="ok">✓ Connected to odoo-mcp · 197 tools loaded</div>
+        <div class="ok">✓ Profile: rosen · 13 Odoo connections</div>
+        <div class="ok">✓ Memory pack: l10n_bg merged (42 entries)</div>
+        <div>&nbsp;</div>
+        <div class="pr">&gt; show unpaid invoices over €5,000</div>
+        <div>&nbsp;</div>
+        <div><span class="tl">[odoo_search_read]</span> account.move</div>
+        <div class="dm">&nbsp;&nbsp;domain: [state=posted, payment_state=not_paid,</div>
+        <div class="dm">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;amount_total_signed &gt; 5000]</div>
+        <div>&nbsp;</div>
+        <div class="ok">Found 7 records · Total: €42,380.50</div>
+        <div class="mv">&nbsp;&nbsp;· INV/2026/0412 · ACME BG EOOD &nbsp;€11,220.00</div>
+        <div class="mv">&nbsp;&nbsp;· INV/2026/0398 · Варна Порт ООД &nbsp;&nbsp;€8,400.00</div>
+        <div class="mv">&nbsp;&nbsp;· INV/2026/0381 · Softel BG &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;€7,950.00</div>
+        <div class="dm">&nbsp;&nbsp;· … 4 more<span class="caret-b"></span></div>
+      </div>
+    </div>
+
+    <div class="vb-body">
+      <div class="vb-kpis">
+        <div class="kpi"><div class="n">9<sup>★</sup></div><div class="l">MCP servers</div></div>
+        <div class="kpi"><div class="n">197<sup>+</sup></div><div class="l">Tools</div></div>
+        <div class="kpi"><div class="n">15→19</div><div class="l">Odoo versions</div></div>
+        <div class="kpi"><div class="n">AGPL-3</div><div class="l">Licence</div></div>
+      </div>
+
+      <div class="vb-audiences">
+        <div class="a">
+          <div class="sym">⟨/⟩</div>
+          <h4>Odoo Developers</h4>
+          <p>Live module development with Claude on your running instance. RPC deploys — no filesystem needed.</p>
+        </div>
+        <div class="a">
+          <div class="sym">✦</div>
+          <h4>Odoo Consultants</h4>
+          <p>Dozens of client databases from one session. Per-client memory, shared team knowledge.</p>
+        </div>
+        <div class="a">
+          <div class="sym">◉</div>
+          <h4>Business Users</h4>
+          <p>Ask Odoo in natural language. Invoice vision-OCR, semantic record search, email &amp; calendar.</p>
+        </div>
+        <div class="a">
+          <div class="sym">◆</div>
+          <h4>Platform Operators</h4>
+          <p>Multi-tenant hosting · usage billing · white-label terminal · K3s replica scaling.</p>
+        </div>
+      </div>
+
+      <p class="vb-pull">
+        Not a mockup.<br>
+        A <em>real session</em>.
+      </p>
+
+      <div class="vb-foot">
+        <div class="c1">
+          <div class="cta"><span class="dot"></span>github.com/rosenvladimirov/odoo-claude-mcp</div>
+          <div class="url">
+            <b>Rosen Vladimirov</b> · Partner, BL Consulting · OCA l10n-bulgaria<br>
+            vladimirov.rosen@gmail.com · bl-consulting.net
+          </div>
+        </div>
+        <div class="qr"><img src="assets/qr-bl-consulting.png" alt="QR to bl-consulting.net"></div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-poster">
+  <div class="variant-poster">
+    <div class="vc-ribbon mono">
+      <span>◆ &nbsp;Odoo · Claude · MCP</span>
+      <span>v<b>2.10.0</b> · 2026-04-19</span>
+      <span>197+ tools · 9 servers</span>
+      <span>AGPL-3 · Sofia · БГ</span>
+    </div>
+    <div class="vc-body">
+      <div class="brand-block mono vc-brand">
+        <span class="mark"></span>
+        <span>odoo<span class="slash">/</span>claude<span class="slash">/</span><span class="accent">mcp</span></span>
+      </div>
+
+      <div class="vc-meta mono">
+        <div><b>Format</b>Production-grade<br>MCP server suite</div>
+        <div><b>Scope</b>Odoo 15 → 19<br>Self-hosted</div>
+        <div><b>Endpoints</b>Claude.ai · Code<br>Desktop · IDE</div>
+        <div><b>Release</b>v2.10.0<br>2026-04-19</div>
+      </div>
+
+      <h1 class="vc-headline">
+        Odoo,<br>
+        meet <em>Claude</em>.
+      </h1>
+
+      <p class="vc-sub">
+        Nine servers. <em>One gateway.</em> Every tool Claude can call, authenticated once.
+      </p>
+
+      <div class="vc-badges mono">
+        <div class="b fill"><span class="dot"></span>Claude.ai connector</div>
+        <div class="b">Multi-tenant</div>
+        <div class="b">Qdrant · Ollama</div>
+        <div class="b">Docker · K3s</div>
+        <div class="b">l10n-bg native</div>
+      </div>
+
+      <div class="vc-divider"></div>
+
+      <div class="vc-tools">
+        <div class="t">
+          <span class="n">197<sup>+</sup></span>
+          <span class="l">MCP tools across the suite</span>
+        </div>
+        <div class="t">
+          <span class="n">9<sup>★</sup></span>
+          <span class="l">Authenticated servers, one gateway</span>
+        </div>
+        <div class="t">
+          <span class="n">5</span>
+          <span class="l">Odoo major versions · 15 → 19</span>
+        </div>
+      </div>
+
+      <div class="vc-foot">
+        <div class="maker">
+          <div class="pt"><img src="assets/rosen-portrait.jpeg" alt="Rosen Vladimirov"></div>
+          <div>
+            <div class="m1">Rosen Vladimirov &nbsp;·&nbsp; Boyan Yordanov.</div>
+            <div class="m2"><b>BL Consulting</b><br>OCA l10n-bulgaria maintainers</div>
+          </div>
+        </div>
+        <div class="url mono">
+          <span class="k">Clone the stack</span>
+          github.com/<span class="a">rosenvladimirov</span>/odoo-claude-mcp
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script>
+/* ============================================================
+   Scale the 850×2000 banner to fit the viewport
+   ============================================================ */
+const banner = document.getElementById('banner');
+const standTop = document.getElementById('standTop');
+const standBase = document.getElementById('standBase');
+const scaleWrap = document.getElementById('scaleWrap');
+
+function fitScale(){
+  const vw = window.innerWidth, vh = window.innerHeight;
+  // natural box: banner (850w) + meta-label (180w when visible) and banner+stand+caption height (~2080)
+  const wideMeta = false;
+  const naturalW = 850;
+  const naturalH = 2000;
+  const marginX = 0, marginY = 0;
+  const scale = 1;
+  const s = 1;
+  scaleWrap.style.transform = ``;
+}
+window.addEventListener('resize', fitScale);
+
+/* ============================================================
+   Render variant template into .banner
+   ============================================================ */
+function render(variant){
+  const tpl = document.getElementById('tpl-'+variant);
+  if(!tpl) return;
+  banner.innerHTML = '';
+  banner.appendChild(tpl.content.cloneNode(true));
+
+  /* print version: no variant label to update */
+}
+
+/* ============================================================
+   Tweaks
+   ============================================================ */
+function applyTweaks(t){
+  document.body.dataset.palette = t.palette;
+  document.body.dataset.accent = t.accent;
+  banner.dataset.bleed = 'false';
+  if(standTop) standTop.style.display = 'none';
+  if(standBase) standBase.style.display = 'none';
+  render('classic'); /* print-only: force classic */
+}
+
+function setTweak(key, val){
+  if(val==='true') val=true;
+  else if(val==='false') val=false;
+  TWEAKS[key]=val;
+  applyTweaks(TWEAKS);
+  document.querySelectorAll(`.tw-row .seg[data-key="${key}"] button`).forEach(b=>{
+    b.classList.toggle('on', String(b.dataset.v)===String(val));
+  });
+  window.parent.postMessage({type:'__edit_mode_set_keys', edits:{[key]:val}},'*');
+}
+
+document.querySelectorAll('.tw-row .seg').forEach(seg=>{
+  const key = seg.dataset.key;
+  seg.querySelectorAll('button').forEach(btn=>{
+    btn.addEventListener('click', ()=>setTweak(key, btn.dataset.v));
+  });
+});
+
+/* Initialize selected buttons from TWEAKS */
+function syncButtons(){
+  document.querySelectorAll('.tw-row .seg').forEach(seg=>{
+    const key = seg.dataset.key;
+    const val = TWEAKS[key];
+    seg.querySelectorAll('button').forEach(b=>{
+      b.classList.toggle('on', String(b.dataset.v)===String(val));
+    });
+  });
+}
+
+/* Edit-mode protocol */
+window.addEventListener('message', e=>{
+  const d = e.data || {};
+  if(d.type==='__activate_edit_mode') document.getElementById('tweaks').classList.add('on');
+  if(d.type==='__deactivate_edit_mode') document.getElementById('tweaks').classList.remove('on');
+});
+window.parent.postMessage({type:'__edit_mode_available'},'*');
+
+/* Boot */
+syncButtons();
+applyTweaks(TWEAKS);
+fitScale();
+window.addEventListener('load', fitScale);
+
+/* ============================================================
+   Auto-print: wait for fonts + a small safety delay, then print
+   ============================================================ */
+(async () => {
+  try { await document.fonts.ready; } catch(e){}
+  await new Promise(r => setTimeout(r, 600));
+  window.print();
+})();
+</script>
+</body>
+</html>

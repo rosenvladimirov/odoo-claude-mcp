@@ -1,0 +1,765 @@
+<!doctype html>
+<html lang="bg">
+<head>
+<meta charset="utf-8">
+<title>A5 Flyer · Odoo · Claude · MCP</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&family=Geist:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+<style>
+/* ============================================================
+   A5 GIVE-AWAY FLYER — PREPRESS
+   Trim:  148 × 210 mm
+   Bleed: 2 mm всички страни  →  Page: 152 × 214 mm
+   Safe:  10 mm от trim (съдържанието стои вътре в 128 × 190 mm)
+   ============================================================ */
+@page {
+  size: 152mm 214mm;
+  margin: 0;
+}
+@media print {
+  *, *::before, *::after {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    color-adjust: exact !important;
+  }
+  html, body {
+    width: 152mm !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: var(--paper) !important;
+  }
+  body {
+    display: block !important;
+    align-items: stretch !important;
+    justify-content: flex-start !important;
+  }
+  .stage, .wrap {
+    transform: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 152mm !important;
+    gap: 0 !important;
+    display: block !important;
+  }
+  .bleed-frame {
+    box-shadow: none !important;
+    page-break-after: always;
+    break-after: page;
+    page-break-inside: avoid;
+    break-inside: avoid;
+    background-color: var(--paper) !important;
+    width: 152mm !important;
+    height: 214mm !important;
+  }
+  .bleed-frame:last-child {
+    page-break-after: auto;
+    break-after: auto;
+  }
+  .sheet {
+    box-shadow: none !important;
+    /* Explicitly repeat the ruling backgrounds on print */
+    background-color: var(--paper) !important;
+    background-image:
+      repeating-linear-gradient(
+        to bottom,
+        transparent 0,
+        transparent 4.85mm,
+        rgba(42, 33, 24, 0.38) 4.85mm,
+        rgba(42, 33, 24, 0.38) 5mm
+      ) !important;
+    background-position: 0 28mm !important;
+    background-repeat: repeat !important;
+  }
+  /* Force Claude blue accents in print */
+  .edge-strip { background-color: #4C6DF5 !important; }
+  .logo-row .x, .logo-row .claude,
+  .title-area h1 em,
+  .motif.accent,
+  .reminder-card li .k,
+  .url { color: #4C6DF5 !important; }
+  .scrawl { color: #3E5AD9 !important; }
+  .qr { background: #fff !important; }
+  .qr img { filter: none !important; }
+}
+
+:root{
+  --paper: oklch(0.968 0.012 85);
+  --paper-2: oklch(0.945 0.015 82);
+  --ink: oklch(0.18 0.012 60);
+  --ink-2: oklch(0.35 0.010 60);
+  --ink-3: oklch(0.55 0.008 60);
+  --rule: oklch(0.18 0.012 60 / 0.22);
+  --rule-soft: oklch(0.18 0.012 60 / 0.11);
+  --accent: oklch(0.55 0.17 250);
+  --accent-ink: oklch(0.98 0.005 85);
+  --chip: oklch(0.92 0.015 80);
+
+  --f-serif: "Instrument Serif", Georgia, serif;
+  --f-mono: "JetBrains Mono", ui-monospace, monospace;
+  --f-sans: "Geist", -apple-system, "Helvetica Neue", Arial, sans-serif;
+}
+
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background: oklch(0.15 0.012 60);
+  color: var(--ink);
+  font-family: var(--f-sans);
+  min-height: 100vh;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 40px 20px;
+}
+
+/* Scaling wrapper for screen preview */
+.stage{
+  position: relative;
+  width: 152mm;
+  display: flex;
+  flex-direction: column;
+  gap: 30px;
+}
+@media print {
+  .stage{ gap: 0 !important; display: block !important; }
+  .bleed-frame + .bleed-frame { page-break-before: always; break-before: page; }
+}
+/* BLEED FRAME — the whole printable page (152 × 214 = trim 148×210 + 2mm bleed each side).
+   overflow:hidden here clips everything at the file edge; art can extend into bleed via
+   negative insets inside .sheet without leaking outside the page. */
+.bleed-frame{
+  position: relative;
+  width: 152mm;
+  height: 214mm;
+  background-color: var(--paper);
+  overflow: hidden;
+  box-shadow:
+    0 40px 60px -20px oklch(0 0 0 / 0.5),
+    0 0 0 1px oklch(1 0 0 / 0.04);
+  print-color-adjust: exact;
+  -webkit-print-color-adjust: exact;
+}
+/* The trim area. .sheet is positioned inside .bleed-frame at (2mm, 2mm) so trim
+   edges are exactly 2mm from the file edge. Internal art keeps its original
+   coordinates; edge-touching art uses negative insets to bleed out. */
+.sheet{
+  position: absolute;
+  top: 2mm;
+  left: 2mm;
+  width: 148mm;
+  height: 210mm;
+  background-color: var(--paper);
+  color: var(--ink);
+}
+/* Ruling as an explicit pseudo-element overlay — prints reliably */
+.sheet::before{
+  display: none;
+}
+/* Ruling as real DOM elements — prints reliably everywhere */
+.rules{
+  position: absolute;
+  inset: 28mm 0 0 0;
+  pointer-events: none;
+  z-index: 0;
+}
+.rules hr{
+  margin: 0;
+  border: 0;
+  height: 0.25mm;
+  background: #d6cfbf;
+  width: 100%;
+  print-color-adjust: exact;
+  -webkit-print-color-adjust: exact;
+}
+
+/* ========= Header =========
+   Extended 2mm into top bleed + 2mm each side.
+   Padding compensates so eyebrow/logo stay at original trim-relative position. */
+.header{
+  position: absolute;
+  top: -2mm; left: -2mm; right: -2mm;
+  height: 30mm;
+  padding: 9mm 12mm 0 12mm;
+  background: var(--paper);
+  z-index: 5;
+  border-bottom: 0.3mm solid var(--rule);
+}
+.eyebrow{
+  font: 500 8pt/1 var(--f-mono);
+  letter-spacing: .22em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  display: flex;
+  align-items: center;
+  gap: 3mm;
+}
+.eyebrow .dot{
+  width: 1.8mm; height: 1.8mm;
+  background: var(--accent);
+  border-radius: 50%;
+}
+.eyebrow .sep{ opacity: .4 }
+
+.logo-row{
+  margin-top: 3mm;
+  display: flex;
+  align-items: baseline;
+  gap: 0;
+  font-family: var(--f-serif);
+  font-weight: 400;
+  font-size: 24pt;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+.logo-row .w{ color: var(--ink) }
+.logo-row .x{ color: var(--accent); font-style: italic; margin: 0 0.5mm }
+.logo-row .claude{ color: var(--accent); font-style: italic }
+
+/* ========= Body — rules show through, content sits in the margin ========= */
+.body-area{
+  position: absolute;
+  top: 28mm;
+  left: 0;
+  right: 0;
+  bottom: 22mm;
+  padding: 0;
+}
+
+/* Left margin red line + gutter — classic notebook */
+.gutter{
+  position: absolute;
+  top: 0; bottom: 0;
+  left: 10mm;
+  width: 0;
+  border-left: 0.35mm solid color-mix(in oklch, var(--accent) 55%, transparent);
+}
+
+/* Scattered motifs in margins/gutter — monospace prompt commands */
+.motif{
+  position: absolute;
+  font: 500 6.5pt/1.3 var(--f-mono);
+  color: color-mix(in oklch, var(--ink-3) 75%, transparent);
+  letter-spacing: 0;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.motif.accent{ color: color-mix(in oklch, var(--accent) 85%, transparent) }
+.motif.box{
+  padding: 0.8mm 1.5mm;
+  border: 0.2mm solid var(--rule);
+  background: color-mix(in oklch, var(--paper) 100%, transparent);
+  border-radius: 0.6mm;
+}
+
+/* Page-bottom footer block — extended 2mm into bottom bleed + 2mm each side. */
+.footer{
+  position: absolute;
+  bottom: -2mm; left: -2mm; right: -2mm;
+  height: 24mm;
+  padding: 3mm 12mm 6mm 12mm;
+  background: var(--paper);
+  border-top: 0.3mm solid var(--rule);
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4mm;
+  align-items: end;
+  z-index: 5;
+}
+.foot-copy{
+  font: 500 7.5pt/1.35 var(--f-sans);
+  color: var(--ink-2);
+}
+.foot-copy .url{
+  font: 500 8pt/1 var(--f-mono);
+  color: var(--ink);
+  letter-spacing: .04em;
+}
+.foot-copy .tag{
+  display:inline-block;
+  margin-top: 1.5mm;
+  font: 500 6.5pt/1 var(--f-mono);
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.qr{
+  width: 18mm; height: 18mm;
+  background: #fff;
+  padding: 0.8mm;
+  border: 0.25mm solid var(--rule);
+  display:flex;align-items:center;justify-content:center;
+  position: relative;
+}
+.qr img{
+  width: 100%;
+  height: 100%;
+  display: block;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+/* ========= Header "spine" strip — little Claude-blue edge =========
+   Extended into left, top, bottom bleed. Visual width inside trim stays 3mm. */
+.edge-strip{
+  position: absolute;
+  top: -2mm;
+  left: -2mm;
+  width: 5mm;
+  bottom: -2mm;
+  background: var(--accent);
+}
+
+/* ========= Title block + reminder card inside the rules ========= */
+.title-area{
+  position: absolute;
+  z-index: 2;
+  background: var(--paper);
+  padding: 2mm 0;
+  top: 36mm;
+  left: 14mm;
+  right: 10mm;
+}
+.title-area h1{
+  font-family: var(--f-serif);
+  font-weight: 400;
+  font-size: 22pt;
+  line-height: 1.05;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+  margin: 0;
+  max-width: 110mm;
+}
+.title-area h1 em{
+  color: var(--accent);
+  font-style: italic;
+}
+.title-area .lede{
+  margin-top: 3mm;
+  font: 400 8.5pt/1.45 var(--f-sans);
+  color: var(--ink-2);
+  max-width: 120mm;
+}
+
+/* reminder card — for writing notes */
+.reminder-card{
+  position: absolute;
+  left: 14mm;
+  right: 10mm;
+  top: 88mm;
+  background: var(--paper);
+  border: 0.3mm solid var(--rule);
+  padding: 4mm 5mm 5mm;
+  z-index: 2;
+}
+.reminder-card::before{
+  content: "AI reminders";
+  position: absolute;
+  top: -2.3mm;
+  left: 4mm;
+  padding: 0.4mm 2mm;
+  background: var(--paper);
+  font: 500 6.5pt/1 var(--f-mono);
+  letter-spacing: .2em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.reminder-card ul{
+  list-style: none;
+  margin: 0; padding: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2.5mm 6mm;
+  font: 500 6.8pt/1.3 var(--f-mono);
+  color: var(--ink);
+}
+.reminder-card li{
+  display: flex;
+  gap: 2mm;
+  align-items: baseline;
+  white-space: nowrap;
+  overflow: hidden;
+  min-width: 0;
+}
+.reminder-card li::before{
+  content: "→";
+  color: var(--accent);
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+.reminder-card li .k{ color: var(--accent); flex: 0 0 auto; }
+.reminder-card li span:last-child{
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+/* Bulgarian copy is longer — shrink slightly */
+.reminder-card[data-lang="bg"] ul{ font-size: 6.3pt; gap: 2.2mm 5mm; }
+
+/* Notes block label */
+.notes-label{
+  position: absolute;
+  z-index: 2;
+  background: var(--paper);
+  padding: 1mm 0;
+  left: 14mm;
+  right: 10mm;
+  top: 138mm;
+  display: flex;
+  align-items: center;
+  gap: 3mm;
+  font: 500 6.5pt/1 var(--f-mono);
+  letter-spacing: .22em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  z-index: 2;
+  pointer-events: none;
+}
+.notes-label::before{
+  content: "";
+  flex: 0 0 auto;
+  width: 1.8mm; height: 1.8mm;
+  background: var(--accent);
+  border-radius: 50%;
+}
+.notes-label .rule{
+  flex: 1;
+  height: 0.2mm;
+  background: var(--ink-3);
+  opacity: .35;
+}
+
+/* Stamp/seal in lower right */
+.seal{
+  position: absolute;
+  z-index: 3;
+  right: 10mm;
+  bottom: 28mm;
+  font: 500 6pt/1.15 var(--f-mono);
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: color-mix(in oklch, var(--accent) 70%, transparent);
+  text-align: right;
+  transform: rotate(-4deg);
+  transform-origin: right bottom;
+  padding: 1.5mm 2mm;
+  border: 0.3mm solid color-mix(in oklch, var(--accent) 40%, transparent);
+  background: color-mix(in oklch, var(--paper) 96%, var(--accent) 4%);
+}
+
+/* Corner registration ticks (design affordance) */
+.tick{
+  position: absolute;
+  width: 4mm;
+  height: 4mm;
+  pointer-events: none;
+}
+.tick::before, .tick::after{
+  content: "";
+  position: absolute;
+  background: var(--ink-3);
+  opacity: .35;
+}
+.tick::before{ left:0; right:0; top: 50%; height: 0.2mm }
+.tick::after{ top:0; bottom:0; left: 50%; width: 0.2mm }
+.tick.tl{ top: 4mm; left: 4mm }
+.tick.tr{ top: 4mm; right: 4mm }
+.tick.bl{ bottom: 4mm; left: 4mm }
+.tick.br{ bottom: 4mm; right: 4mm }
+
+/* Identifier strip at very top-right */
+.id-strip{
+  position: absolute;
+  top: 7mm;
+  right: 10mm;
+  text-align: right;
+  font: 500 6pt/1.25 var(--f-mono);
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  z-index: 6;
+}
+.id-strip b{ color: var(--ink); font-weight: 500 }
+
+/* Handwritten scrawl — phone numbers drifting in the margin */
+.scrawl{
+  position: absolute;
+  font: italic 400 11pt/1 var(--f-serif);
+  color: color-mix(in oklch, var(--accent) 88%, var(--ink) 12%);
+  letter-spacing: 0.01em;
+  z-index: 5;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.scrawl::before{
+  content: "☎";
+  font-style: normal;
+  font-size: 7pt;
+  margin-right: 1.5mm;
+  vertical-align: 1mm;
+  opacity: .7;
+}
+.scrawl .who{
+  font: 500 5.5pt/1 var(--f-mono);
+  font-style: normal;
+  text-transform: uppercase;
+  letter-spacing: .12em;
+  color: var(--ink-3);
+  display: block;
+  margin-bottom: 0.8mm;
+  margin-left: 4mm;
+}
+</style>
+</head>
+<body>
+
+<template id="__bundler_thumbnail" data-bg-color="#F7F1E6">
+  <svg viewBox="0 0 400 560" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="20" width="8" height="520" fill="#4C6DF5"/>
+    <g fill="#2A2118" font-family="Georgia, serif" font-style="italic">
+      <text x="60" y="180" font-size="44">odoo</text>
+      <text x="170" y="180" font-size="44" fill="#4C6DF5">claude</text>
+      <text x="320" y="180" font-size="44">·</text>
+      <text x="340" y="180" font-size="44">mcp</text>
+    </g>
+    <text x="60" y="260" font-size="28" fill="#2A2118" font-family="Georgia, serif">A pocket notebook</text>
+    <text x="60" y="295" font-size="28" fill="#4C6DF5" font-family="Georgia, serif" font-style="italic">for AI builders.</text>
+    <g stroke="#2A2118" stroke-opacity="0.18" stroke-width="1">
+      <line x1="60" y1="350" x2="340" y2="350"/>
+      <line x1="60" y1="380" x2="340" y2="380"/>
+      <line x1="60" y1="410" x2="340" y2="410"/>
+      <line x1="60" y1="440" x2="340" y2="440"/>
+      <line x1="60" y1="470" x2="340" y2="470"/>
+    </g>
+  </svg>
+</template>
+
+
+<div class="stage">
+  <div class="bleed-frame">
+  <div class="sheet" id="sheet">
+
+    <!-- Claude-blue spine edge -->
+    <div class="edge-strip"></div>
+
+    <!-- Notebook ruling — real HRs for print reliability -->
+    <div class="rules" aria-hidden="true"><hr style="position:absolute;top:5mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:10mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:15mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:20mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:25mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:30mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:35mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:40mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:45mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:50mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:55mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:60mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:65mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:70mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:75mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:80mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:85mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:90mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:95mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:100mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:105mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:110mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:115mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:120mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:125mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:130mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:135mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:140mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:145mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:150mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:155mm;left:-2mm;right:-2mm" /></div>
+
+    <!-- Registration ticks -->
+    <div class="tick tl"></div>
+    <div class="tick tr"></div>
+    <div class="tick bl"></div>
+    <div class="tick br"></div>
+
+    <!-- Header -->
+    <header class="header">
+      <div class="eyebrow">
+        <span class="dot"></span>
+        <span>BL&nbsp;Consulting</span>
+        <span class="sep">/</span>
+        <span>Sofia</span>
+        <span class="sep">/</span>
+        <span>2026</span>
+      </div>
+      <div class="logo-row">
+        <span class="w">odoo</span>
+        <span class="x">×</span>
+        <span class="claude">claude</span>
+        <span class="x">·</span>
+        <span class="w">mcp</span>
+      </div>
+    </header>
+
+    <!-- ID strip -->
+    <div class="id-strip">
+      <div>SHEET <b>A5 · 148×210</b></div>
+      <div>NO. <b>001</b></div>
+    </div>
+
+    <!-- Title area -->
+    <div class="title-area">
+      <h1>A pocket notebook for people who <em>ship with AI.</em></h1>
+      <p class="lede">Take this. Write down one prompt you'll try tomorrow, one integration you want to build, and one reminder to give your model next time.</p>
+    </div>
+
+    <!-- Reminder card — real Odoo MCP tool names -->
+    <div class="reminder-card">
+      <ul>
+        <li><span class="k">tools/list</span><span>discover before you call</span></li>
+        <li><span class="k">search_records</span><span>domain, fields, limit</span></li>
+        <li><span class="k">get_record</span><span>model + id, minimal fields</span></li>
+        <li><span class="k">list_models</span><span>what's enabled for MCP</span></li>
+        <li><span class="k">create_record</span><span>values dict, confirm first</span></li>
+        <li><span class="k">update_record</span><span>id + values, never bulk blind</span></li>
+        <li><span class="k">delete_record</span><span>ask twice. then ask again</span></li>
+        <li><span class="k">server_info</span><span>version, auth, permissions</span></li>
+      </ul>
+    </div>
+
+    <!-- Notes label -->
+    <div class="notes-label">
+      <span>Notes &amp; prompts</span>
+      <span class="rule"></span>
+    </div>
+
+    <!-- Handwritten scrawl — phone numbers drifting in the margin -->
+    <span class="scrawl" style="left: 92mm; top: 74mm; transform: rotate(-3deg);">
+      <span class="who">Rosen</span>+359 886 100 204
+    </span>
+    <span class="scrawl" style="left: 18mm; top: 175mm; transform: rotate(2.5deg);">
+      <span class="who">Boyan</span>+359 888 563 496
+    </span>
+
+    <span class="motif" style="left: 2mm; top: 45mm; writing-mode: vertical-rl; transform: rotate(180deg)">$ claude mcp add odoo — uvx mcp-server-odoo</span>
+    <span class="motif accent" style="left: 2mm; top: 95mm; writing-mode: vertical-rl; transform: rotate(180deg)">POST /json/2/res.partner/search_read</span>
+    <span class="motif" style="left: 2mm; top: 140mm; writing-mode: vertical-rl; transform: rotate(180deg)">Authorization: Bearer &lt;api_key&gt;</span>
+
+    <span class="motif box" style="right: 10mm; top: 138mm;">→ search_records</span>
+    <span class="motif" style="right: 10mm; top: 148mm;">// 83 native + 105 proxied</span>
+    <span class="motif accent" style="right: 10mm; top: 156mm;">mcp.odoo-shell.space</span>
+    <span class="motif" style="right: 10mm; top: 164mm;">Odoo 15 → 19 · JSON/2 + XML-RPC</span>
+
+    <!-- Seal/stamp -->
+    <div class="seal">
+      Production&nbsp;grade<br>
+      MCP · stack&nbsp;2026
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <div class="foot-copy">
+        <div class="tag">Rosen Vladimirov &nbsp;·&nbsp; Boyan Yordanov &nbsp;·&nbsp; BL Consulting</div>
+        <div style="margin-top:1.5mm">
+          <span class="url">bl-consulting.net</span>
+        </div>
+        <div style="margin-top:0.8mm; font: 400 6pt/1.3 var(--f-mono); color: var(--ink-2)">
+          <span class="url">vladimirov.rosen@gmail.com</span>
+          <span style="margin: 0 1.5mm; color: var(--ink-3)">·</span>
+          <span class="url">byordanov@bl-consulting.net</span>
+        </div>
+      </div>
+      <div class="qr">
+        <img src="assets/qr-bl-consulting.png" alt="QR → bl-consulting.net">
+      </div>
+    </footer>
+
+  </div>
+  </div>
+
+  <!-- ============================================================
+       BACK SIDE — same layout, Bulgarian copy
+       ============================================================ -->
+  <div class="bleed-frame">
+  <div class="sheet" id="sheet-back">
+
+    <div class="edge-strip"></div>
+
+    <!-- Notebook ruling — real HRs for print reliability -->
+    <div class="rules" aria-hidden="true"><hr style="position:absolute;top:5mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:10mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:15mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:20mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:25mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:30mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:35mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:40mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:45mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:50mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:55mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:60mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:65mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:70mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:75mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:80mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:85mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:90mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:95mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:100mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:105mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:110mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:115mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:120mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:125mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:130mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:135mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:140mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:145mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:150mm;left:-2mm;right:-2mm" /><hr style="position:absolute;top:155mm;left:-2mm;right:-2mm" /></div>
+    <div class="tick tl"></div>
+    <div class="tick tr"></div>
+    <div class="tick bl"></div>
+    <div class="tick br"></div>
+
+    <header class="header">
+      <div class="eyebrow">
+        <span class="dot"></span>
+        <span>BL&nbsp;Consulting</span>
+        <span class="sep">/</span>
+        <span>София</span>
+        <span class="sep">/</span>
+        <span>2026</span>
+      </div>
+      <div class="logo-row">
+        <span class="w">odoo</span>
+        <span class="x">×</span>
+        <span class="claude">claude</span>
+        <span class="x">·</span>
+        <span class="w">mcp</span>
+      </div>
+    </header>
+
+    <div class="id-strip">
+      <div>ЛИСТ <b>A5 · 148×210</b></div>
+      <div>№ <b>002</b></div>
+    </div>
+
+    <div class="title-area">
+      <h1>Тетрадка за хора, които <em>пускат с AI.</em></h1>
+      <p class="lede">Вземи я. Запиши един промпт, който ще опиташ утре, една интеграция, която искаш да направиш, и едно напомняне, което да дадеш на модела следващия път.</p>
+    </div>
+
+    <div class="reminder-card" data-lang="bg">
+      <ul>
+        <li><span class="k">tools/list</span><span>открий преди да викаш</span></li>
+        <li><span class="k">search_records</span><span>domain, fields, limit</span></li>
+        <li><span class="k">get_record</span><span>модел + id, само нужните</span></li>
+        <li><span class="k">list_models</span><span>видими за MCP</span></li>
+        <li><span class="k">create_record</span><span>values, потвърди първо</span></li>
+        <li><span class="k">update_record</span><span>id + values, без bulk</span></li>
+        <li><span class="k">delete_record</span><span>питай два пъти</span></li>
+        <li><span class="k">server_info</span><span>версия, auth, права</span></li>
+      </ul>
+    </div>
+
+    <div class="notes-label">
+      <span>Бележки и промптове</span>
+      <span class="rule"></span>
+    </div>
+
+    <!-- Handwritten scrawl — phone numbers drifting in the margin -->
+    <span class="scrawl" style="left: 92mm; top: 74mm; transform: rotate(-3deg);">
+      <span class="who">Rosen</span>+359 886 100 204
+    </span>
+    <span class="scrawl" style="left: 18mm; top: 175mm; transform: rotate(2.5deg);">
+      <span class="who">Boyan</span>+359 888 563 496
+    </span>
+
+    <span class="motif" style="left: 2mm; top: 45mm; writing-mode: vertical-rl; transform: rotate(180deg)">$ claude mcp add odoo — uvx mcp-server-odoo</span>
+    <span class="motif accent" style="left: 2mm; top: 95mm; writing-mode: vertical-rl; transform: rotate(180deg)">POST /json/2/res.partner/search_read</span>
+    <span class="motif" style="left: 2mm; top: 140mm; writing-mode: vertical-rl; transform: rotate(180deg)">Authorization: Bearer &lt;api_key&gt;</span>
+
+    <span class="motif box" style="right: 10mm; top: 138mm;">→ search_records</span>
+    <span class="motif" style="right: 10mm; top: 148mm;">// 83 native + 105 proxied</span>
+    <span class="motif accent" style="right: 10mm; top: 156mm;">mcp.odoo-shell.space</span>
+    <span class="motif" style="right: 10mm; top: 164mm;">Odoo 15 → 19 · JSON/2 + XML-RPC</span>
+
+    <div class="seal">
+      Качество&nbsp;за&nbsp;продукция<br>
+      MCP · stack&nbsp;2026
+    </div>
+
+    <footer class="footer">
+      <div class="foot-copy">
+        <div class="tag">Росен Владимиров &nbsp;·&nbsp; Боян Йорданов &nbsp;·&nbsp; BL Consulting</div>
+        <div style="margin-top:1.5mm">
+          <span class="url">bl-consulting.net</span>
+        </div>
+        <div style="margin-top:0.8mm; font: 400 6pt/1.3 var(--f-mono); color: var(--ink-2)">
+          <span class="url">vladimirov.rosen@gmail.com</span>
+          <span style="margin: 0 1.5mm; color: var(--ink-3)">·</span>
+          <span class="url">byordanov@bl-consulting.net</span>
+        </div>
+      </div>
+      <div class="qr">
+        <img src="assets/qr-bl-consulting.png" alt="QR → bl-consulting.net">
+      </div>
+    </footer>
+
+  </div>
+  </div>
+</div>
+
+<script>
+/* Auto-print for prepress PDF export */
+(async () => {
+  try { await document.fonts.ready; } catch(e){}
+  await new Promise(r => setTimeout(r, 700));
+  window.print();
+})();
+</script>
+</body>
+</html>
