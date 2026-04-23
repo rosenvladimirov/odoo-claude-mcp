@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "2.21.0"
+__version__ = "2.22.0"
 
 import asyncio
 import json
@@ -4074,77 +4074,168 @@ def _open_connection_manager() -> dict:
         return {"error": f"Failed to launch: {e}", "script": script}
 
 
+# ── SSH connection manager ────────────────────────────────────────────────────
+# Keeps one ControlMaster socket per (user, host, port) so that repeated
+# calls reuse the existing TCP connection instead of opening a new one.
+# This prevents fail2ban bans caused by bursts of short-lived connections.
+#
+# Priority order:
+#   1. SSH bridge (laptop agent via WebSocket)  — if SSH_BRIDGE_URL is set
+#      and at least one laptop bridge is connected.
+#   2. Direct SSH with ControlMaster            — always available as fallback.
+
+import threading as _threading
+_ssh_masters: dict = {}          # (user, host, port) → ControlPath str
+_ssh_masters_lock = _threading.Lock()
+_SSH_CTRL_DIR = Path("/tmp/.ssh-mux")
+
+
+def _ensure_ssh_master(user: str, host: str, port: int,
+                       key_filename: str | None = None) -> str:
+    """Return a live ControlMaster socket path, creating one if needed."""
+    _SSH_CTRL_DIR.mkdir(mode=0o700, exist_ok=True)
+    key = (user, host, port)
+    with _ssh_masters_lock:
+        ctrl = _ssh_masters.get(key)
+        if ctrl and Path(ctrl).exists():
+            return ctrl
+        ctrl = str(_SSH_CTRL_DIR / f"{user}@{host}:{port}")
+        _ssh_masters[key] = ctrl
+
+    home_ssh = Path.home() / ".ssh"
+    key_candidates = [str(home_ssh / k)
+                      for k in ("id_ed25519", "id_ecdsa", "id_rsa")
+                      if (home_ssh / k).exists()]
+    if key_filename:
+        key_candidates = [key_filename] + key_candidates
+
+    ssh_cmd = [
+        "ssh",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "BatchMode=yes",
+        "-o", f"ControlPath={ctrl}",
+        "-o", "ControlMaster=yes",
+        "-o", "ControlPersist=1h",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=6",
+        "-p", str(port),
+    ]
+    for k in key_candidates:
+        ssh_cmd += ["-i", k]
+    ssh_cmd += [f"{user}@{host}", "true"]
+
+    import subprocess as _sp
+    _sp.Popen(ssh_cmd, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+    # Give the master a moment to create the socket
+    import time as _time
+    for _ in range(20):
+        if Path(ctrl).exists():
+            break
+        _time.sleep(0.1)
+    return ctrl
+
+
+def _ssh_via_bridge(host: str, user: str, command: str,
+                    port: int = 22, timeout: int = 30) -> dict | None:
+    """Try to execute via the SSH bridge server. Returns None if unavailable."""
+    bridge_url = os.environ.get("SSH_BRIDGE_URL", "").rstrip("/")
+    bridge_token = os.environ.get("SSH_BRIDGE_TOKEN") or os.environ.get("BRIDGE_TOKEN", "")
+    if not bridge_url or not bridge_token:
+        return None
+    try:
+        import urllib.request as _ur
+        import json as _json
+        payload = _json.dumps({"host": host, "user": user, "port": port,
+                               "cmd": command, "timeout": timeout}).encode()
+        req = _ur.Request(
+            f"{bridge_url}/exec",
+            data=payload,
+            headers={"Content-Type": "application/json",
+                     "X-Bridge-Token": bridge_token},
+            method="POST",
+        )
+        with _ur.urlopen(req, timeout=timeout + 10) as resp:
+            data = _json.loads(resp.read())
+        if data.get("error") and "No SSH bridge" in data["error"]:
+            return None  # no laptop connected — fall through to direct SSH
+        return {
+            "status": "ok" if data.get("returncode", -1) == 0 else "error",
+            "exit_code": data.get("returncode", -1),
+            "stdout": data.get("stdout", "").strip(),
+            "stderr": data.get("stderr", "").strip(),
+            "host": f"{user}@{host}:{port}",
+            "command": command,
+            "via": "bridge",
+        }
+    except Exception as e:
+        return {"status": "error", "error": f"bridge: {e}",
+                "host": f"{user}@{host}:{port}"}
+
+
 def _ssh_execute(host: str, user: str, command: str, port: int = 22,
                   key_filename: str = None, timeout: int = 30,
                   forward_agent: bool = False) -> dict:
-    """Execute a command on remote server via SSH using paramiko.
+    """Execute a command on a remote server via SSH.
 
-    If forward_agent=True, the local SSH agent is forwarded to the remote
-    server so it can authenticate with third parties (e.g. GitHub) using
-    your local keys — without storing any keys on the remote server.
+    Routing:
+      1. SSH bridge (laptop WebSocket agent) — if SSH_BRIDGE_URL env is set.
+      2. Direct SSH with ControlMaster      — persistent socket, avoids
+         repeated TCP handshakes that would trigger fail2ban.
     """
-    import paramiko
-    from paramiko.agent import AgentRequestHandler
+    # 1. Try bridge first
+    bridge_result = _ssh_via_bridge(host, user, command, port, timeout)
+    if bridge_result is not None:
+        return bridge_result
 
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    # 2. Direct SSH via ControlMaster (subprocess — agent forwarding works
+    #    naturally because the MCP container has SSH_AUTH_SOCK or key files).
+    import subprocess as _sp
+
+    ctrl = _ensure_ssh_master(user, host, port, key_filename)
+
+    home_ssh = Path.home() / ".ssh"
+    key_candidates = [str(home_ssh / k)
+                      for k in ("id_ed25519", "id_ecdsa", "id_rsa")
+                      if (home_ssh / k).exists()]
+    if key_filename:
+        key_candidates = [key_filename] + key_candidates
+
+    ssh_cmd = [
+        "ssh",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "BatchMode=yes",
+        "-o", f"ControlPath={ctrl}",
+        "-o", "ControlMaster=auto",
+        "-o", "ControlPersist=1h",
+        "-o", f"ConnectTimeout={min(timeout, 15)}",
+        "-p", str(port),
+    ]
+    if forward_agent:
+        ssh_cmd += ["-A"]
+    for k in key_candidates:
+        ssh_cmd += ["-i", k]
+    ssh_cmd += [f"{user}@{host}", command]
+
     try:
-        connect_kwargs = {"hostname": host, "username": user, "port": port, "timeout": 10}
-        if key_filename:
-            connect_kwargs["key_filename"] = key_filename
-        else:
-            connect_kwargs["allow_agent"] = True
-            connect_kwargs["look_for_keys"] = True
-            home_ssh = Path.home() / ".ssh"
-            key_candidates = [home_ssh / k for k in ("id_ed25519", "id_ecdsa", "id_rsa")
-                              if (home_ssh / k).exists() and os.access(str(home_ssh / k), os.R_OK)]
-            if key_candidates:
-                connect_kwargs["key_filename"] = [str(k) for k in key_candidates]
-
-        client.connect(**connect_kwargs)
-
-        # Open channel with agent forwarding
-        transport = client.get_transport()
-        channel = transport.open_session()
-
-        if forward_agent:
-            AgentRequestHandler(channel)
-
-        channel.exec_command(command)
-
-        # Read output with timeout
-        channel.settimeout(timeout)
-        stdout_data = b""
-        stderr_data = b""
-        while True:
-            if channel.recv_ready():
-                stdout_data += channel.recv(65536)
-            if channel.recv_stderr_ready():
-                stderr_data += channel.recv_stderr(65536)
-            if channel.exit_status_ready():
-                # Drain remaining
-                while channel.recv_ready():
-                    stdout_data += channel.recv(65536)
-                while channel.recv_stderr_ready():
-                    stderr_data += channel.recv_stderr(65536)
-                break
-
-        exit_code = channel.recv_exit_status()
-        out = stdout_data.decode("utf-8", errors="replace")
-        err = stderr_data.decode("utf-8", errors="replace")
+        proc = _sp.run(ssh_cmd, capture_output=True, timeout=timeout)
+        out = proc.stdout.decode("utf-8", errors="replace")
+        err = proc.stderr.decode("utf-8", errors="replace")
         return {
-            "status": "ok",
-            "exit_code": exit_code,
+            "status": "ok" if proc.returncode == 0 else "error",
+            "exit_code": proc.returncode,
             "stdout": out.strip(),
             "stderr": err.strip(),
             "host": f"{user}@{host}:{port}",
             "command": command,
             "agent_forwarded": forward_agent,
+            "via": "direct",
         }
+    except _sp.TimeoutExpired:
+        return {"status": "error", "error": "timeout",
+                "host": f"{user}@{host}:{port}"}
     except Exception as e:
-        return {"status": "error", "error": str(e), "host": f"{user}@{host}:{port}"}
-    finally:
-        client.close()
+        return {"status": "error", "error": str(e),
+                "host": f"{user}@{host}:{port}"}
 
 
 def _get_ssh_config(connection_alias: str) -> dict:
