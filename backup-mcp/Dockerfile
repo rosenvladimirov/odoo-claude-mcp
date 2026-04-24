@@ -6,17 +6,17 @@ LABEL description="Backup MCP server (stdio→SSE via supergateway) — stock sn
 # Install supergateway + official filesystem MCP server (reused as storage backend for now)
 RUN npm install -g supergateway @modelcontextprotocol/server-filesystem
 
-# Create backups directory (shared volume mount point)
-RUN mkdir -p /backups && chown node:node /backups
+# Do NOT pre-create /backups in the image. If the mount target exists at build
+# time, the Docker daemon will try to chmod the newly-attached volume to inherit
+# the image dir's perms — which s3fs (via the marcelo-ochoa plugin) rejects with
+# "input/output error". Let the volume driver be the sole creator of /backups
+# at container start. We run as root at /; the filesystem MCP server doesn't
+# need privilege; the s3fs plugin handles uid/gid via its opts.
 
-USER node
-WORKDIR /backups
+WORKDIR /
 
 ENV MCP_PORT=8092
 
 EXPOSE ${MCP_PORT}
 
-# /backups is the allowed root — shared with odoo-rpc-mcp via mcp-backups volume.
-# Stock tools write JSON snapshots here before destructive ops; this plugin exposes
-# read/list/delete via MCP tools. Future: GUI, S3 Contabo sync, archive rotation.
 CMD ["sh", "-c", "supergateway --stdio 'npx -y @modelcontextprotocol/server-filesystem /backups' --port ${MCP_PORT}"]
