@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "2.23.0"
+__version__ = "2.24.0"
 
 import asyncio
 import json
@@ -160,10 +160,25 @@ def _discover_proxy_tools(only_services: set | None = None):
                         inputSchema=t.get("inputSchema", {"type": "object", "properties": {}}),
                     ))
                 logger.info(f"Proxy: discovered {len(raw_tools)} tools from {svc_name}")
+                try:
+                    import metrics
+                    metrics.observe_proxy_discovery(svc_name, "ok")
+                except Exception:
+                    pass
             else:
                 logger.warning(f"Proxy: {svc_name} returned no tools or error")
+                try:
+                    import metrics
+                    metrics.observe_proxy_discovery(svc_name, "empty")
+                except Exception:
+                    pass
         except Exception as e:
             logger.warning(f"Proxy: failed to discover {svc_name}: {e}")
+            try:
+                import metrics
+                metrics.observe_proxy_discovery(svc_name, "error")
+            except Exception:
+                pass
 
     logger.info(f"Proxy: total {len(PROXY_TOOLS)} proxied tools registered")
 
@@ -1068,6 +1083,11 @@ def _backup_write(operation: str, connection_alias: str, payload: dict) -> dict:
         date_dir.mkdir(parents=True, exist_ok=True)
         text = json.dumps(enriched, ensure_ascii=False, indent=2, default=str)
         fpath.write_text(text, encoding="utf-8")
+        try:
+            import metrics
+            metrics.observe_backup_write(operation, connection_alias)
+        except Exception:
+            pass
         return {"path": str(fpath), "size_bytes": len(text.encode("utf-8"))}
     except Exception as exc:
         return {"error": f"Backup write failed at {fpath}: {exc}",
@@ -4155,10 +4175,16 @@ async def list_tools() -> list[Tool]:
 
 @mcp_server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    _m_status = "ok"
     try:
         # ── Feature flag guard ──
         if DISABLED_FEATURES and (_tool_disabled(name) or
                 (name in PROXY_TOOLS and PROXY_TOOLS[name]["service"] in DISABLED_FEATURES)):
+            try:
+                import metrics
+                metrics.observe_tool_call(name, "disabled")
+            except Exception:
+                pass
             return [TextContent(type="text", text=json.dumps(
                 {"error": f"Tool '{name}' is disabled on this server (MCP_DISABLE_FEATURES)."}))]
         # ── Handle proxied tools directly in async context ──
@@ -4183,9 +4209,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
         if len(text) > 100_000:
             text = text[:100_000] + "\n... (truncated, use limit/fields to narrow)"
+        try:
+            import metrics
+            metrics.observe_tool_call(name, _m_status)
+        except Exception:
+            pass
         return [TextContent(type="text", text=text)]
     except Exception as e:
         logger.error(f"Tool {name} error: {e}")
+        try:
+            import metrics
+            metrics.observe_tool_call(name, "error")
+        except Exception:
+            pass
         return [TextContent(type="text", text=f"Error: {e}")]
 
 
@@ -8651,8 +8687,14 @@ def create_app():
 
     # Raw ASGI app — no Starlette routing (avoids 307 redirects)
     secret_token = os.environ.get("MCP_SECRET_TOKEN", "")
+    require_auth = os.environ.get("MCP_REQUIRE_AUTH", "1") == "1"
     oauth_client_id = os.environ.get("MCP_OAUTH_CLIENT_ID", "mcp-client")
     oauth_client_secret = os.environ.get("MCP_OAUTH_CLIENT_SECRET", secret_token)
+    if require_auth and not secret_token:
+        logger.warning(
+            "MCP_REQUIRE_AUTH=1 but MCP_SECRET_TOKEN is empty — every /mcp request "
+            "will be rejected. Set MCP_SECRET_TOKEN or MCP_REQUIRE_AUTH=0 (NOT for prod)."
+        )
     ollama_upstream = os.environ.get("OLLAMA_UPSTREAM", "http://ollama:11434").rstrip("/")
     ollama_api_key = os.environ.get("OLLAMA_API_KEY", "").strip()
     protected_paths = {"/mcp", "/sse", "/messages", "/api/session/register",
@@ -8866,9 +8908,12 @@ def create_app():
             is_public = check_path in public_paths
             if needs_auth and not is_public:
                 headers = dict(scope.get("headers", []))
-                # Skip enforcement entirely if no auth is configured AND
-                # the caller is not using the unified schema.
-                if secret_token or headers.get(b"x-odoo-url"):
+                # Enforce auth when require_auth=1 (default from 2.24), or when
+                # secret_token is configured, or when the caller is using the
+                # unified X-Odoo-* schema. Only skip if require_auth=0 AND no
+                # token is set AND no X-Odoo-* header present.
+                enforce = require_auth or secret_token or headers.get(b"x-odoo-url")
+                if enforce:
                     ok, _caller = _check_auth_and_resolve(headers)
                     if not ok:
                         from starlette.responses import JSONResponse
@@ -9172,10 +9217,23 @@ def create_app():
             response = JSONResponse({
                 "status": "ok",
                 "service": "odoo-rpc-mcp",
+                "version": __version__,
                 "connections": len(manager.connections) if manager else 0,
                 "aliases": list(manager.connections.keys()) if manager else [],
                 "timestamp": datetime.now().isoformat(),
             })
+            await response(scope, receive, send)
+        elif path == "/metrics" and scope["type"] == "http":
+            # Prometheus scrape endpoint (no auth by convention — bind to
+            # backend network only in production). 2.x ships the scaffold;
+            # full integration (scraping + Grafana) is 3.x.
+            try:
+                import metrics as _metrics
+                body, ctype, status = _metrics.render()
+            except Exception as _exc:
+                body, ctype, status = (f"# error: {_exc}\n".encode(), "text/plain", 500)
+            from starlette.responses import Response
+            response = Response(content=body, media_type=ctype, status_code=status)
             await response(scope, receive, send)
         elif path.startswith("/admin/memory/") and scope["type"] == "http":
             # Licensed memory admin endpoints — used by the Odoo billing
@@ -9813,8 +9871,24 @@ if __name__ == "__main__":
 
     threading.Thread(target=_startup_discover, daemon=True).start()
 
+    # Initialise Prometheus metrics scaffold (2.x baseline; full integration
+    # is 3.x — scraping config not included here).
+    try:
+        import metrics as _metrics
+        _metrics.init(version=__version__)
+    except Exception as _exc:
+        logger.warning(f"metrics init failed: {_exc}")
+
+    # Kick off backup auto-rotation (if APScheduler + config present).
+    try:
+        import admin_backup as _abk
+        _abk.start_scheduler()
+    except Exception as _exc:
+        logger.warning(f"backup rotation scheduler init failed: {_exc}")
+
     logger.info(f"Odoo RPC MCP server starting on {MCP_HOST}:{MCP_PORT}")
     logger.info(f"  Streamable HTTP: http://{MCP_HOST}:{MCP_PORT}/mcp")
     logger.info(f"  SSE (legacy):    http://{MCP_HOST}:{MCP_PORT}/sse")
     logger.info(f"  Health:          http://{MCP_HOST}:{MCP_PORT}/health")
+    logger.info(f"  Metrics:         http://{MCP_HOST}:{MCP_PORT}/metrics")
     uvicorn.run(app, host=MCP_HOST, port=MCP_PORT, log_level="info")

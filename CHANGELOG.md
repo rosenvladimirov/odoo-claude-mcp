@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.24.0] — 2026-04-24 — Final 2.x polish: admin managers, HTTP auth, metrics scaffold
+
+This is the **final minor on the 2.x track** before production freeze.
+Six phases shipped together.
+
+### Added — Phase 1: Backup Manager (`/admin/backups`)
+- New module `admin_backup.py` wired into `admin_ui.get_routes()` via an
+  extension mechanism. Nav links added to `admin_ui.py`.
+- Per-tenant scope: main admin sees every `mcp-backup-*` bucket; client
+  admins see only their own `mcp-backup-<CLIENT_ID>`.
+- UI: tabbed bucket switcher, stats bar, day-grouped file list, inline
+  JSON viewer, bulk delete-prefix, ZIP export, retention editor modal.
+- Destructive ops require the `X-Admin-Rechallenge` header with the
+  admin's password (re-verified against the user auth store).
+- Auto-rotation:
+  - Config in `/shared-data/backup_rotation.json` (or
+    `BACKUP_ROTATION_CONFIG` env override). Per-bucket `keep_days` +
+    `min_objects`, daily `run_at`, IANA `timezone`, defaults.
+  - `rotate_once(dry_run=False)` applies policy across allowed buckets.
+  - `start_scheduler()` installs an APScheduler cron (silent no-op if
+    APScheduler missing — manual rotation stays functional).
+  - Log file at `/shared-data/backup_rotation.log` + audit table.
+
+### Added — Phase 2: Filestore Manager (`/admin/filestore`)
+- New module `admin_filestore.py` — browse/edit the `/shared-data`
+  volume (sandbox root configurable via `SHARED_DATA_ROOT`). Tree +
+  detail UI, breadcrumbs, inline textarea editor for common extensions
+  (`.md .json .yml .yaml .xml .py .sh .html .css .js .csv .ini .toml
+  .conf .log`), image preview for PNG/JPG/WEBP/GIF/SVG/BMP.
+- Full CRUD: list, read, write, upload (multipart, `ADMIN_FS_MAX_UPLOAD_MB`
+  default 50), rm, mkdir, mv. Path-traversal protection via
+  `Path.resolve()` + `relative_to(SANDBOX_ROOT)` guard.
+- `ADMIN_FS_READONLY=1` env flag disables all destructive ops; readonly
+  badge shown in UI.
+- Destructive ops require `X-Admin-Rechallenge` (same pattern as Phase 1).
+
+### Security — Phase 3: HTTP auth on `/mcp`
+- Today's discovery: `http://poligroup:8084/mcp` accepted every request
+  with no auth header, because the old enforcement skipped requests that
+  didn't carry `X-Odoo-*` when `MCP_SECRET_TOKEN` was empty.
+- Now: new env var `MCP_REQUIRE_AUTH` (default `1`). When set the server
+  rejects protected paths unconditionally if the caller presents no
+  credentials — regardless of whether `MCP_SECRET_TOKEN` is configured.
+- Startup warning if `MCP_REQUIRE_AUTH=1` and `MCP_SECRET_TOKEN` is
+  empty (every request will 401 until the token is set).
+- `/health` and `/metrics` stay open (load balancer probes, scrape).
+
+### Added — Phase 4: plugin version pins (no `:latest` in production)
+- Built + pushed 1.0.0 semver tags to Docker Hub:
+  - `vladimirovrosen/odoo-filesystem-mcp:1.0.0`
+  - `vladimirovrosen/odoo-portainer-mcp:1.0.0`
+  - `vladimirovrosen/odoo-oca-mcp:1.0.0`
+  - `vladimirovrosen/odoo-ee-mcp:1.0.0`
+- External images pinned by digest (captured 2026-04-24):
+  - `vladimirovrosen/odoo-claude-terminal@sha256:047e865131e1afd86eb…`
+  - `ghcr.io/github/github-mcp-server@sha256:26db03408086a99cf1916348…`
+- New overlay `docker-compose.prod-pins.yml` documents the production
+  `image:` lines so any fresh stack deploy is reproducible.
+- `:latest` tags remain as an emergency-downgrade pointer.
+
+### Added — Phase 5: Prometheus `/metrics` scaffold
+- New module `metrics.py` with Counters/Gauges:
+  - `mcp_tool_calls_total{tool, status}` Counter
+  - `mcp_proxy_discoveries_total{service, outcome}` Counter
+  - `mcp_backup_writes_total{operation, tenant}` Counter
+  - `mcp_active_sessions` Gauge
+  - `mcp_http_requests_total{method, path_group, status}` Counter
+  - `mcp_build_info{version}` Gauge (always 1, version label)
+- Hooked at call sites: `call_tool`, `_discover_proxy_tools`,
+  `_backup_write`. Gracefully no-ops when `prometheus-client` is not
+  installed.
+- Public `/metrics` endpoint — text/plain Prometheus format, no auth
+  (convention). **Intended to be reachable from backend network only**
+  — full scraping config + Grafana dashboards live in 3.x.
+- New env `MCP_METRICS_ENABLED=1` (default) toggles emission.
+
+### Dependencies (requirements.txt)
+- Added: `boto3>=1.34.0`, `prometheus-client>=0.20.0`,
+  `APScheduler>=3.10.0` (optional — scheduler is best-effort).
+
+### Release — Phase 6
+- `__version__` and `VERSION` bumped to 2.24.0.
+- Docker: `vladimirovrosen/odoo-rpc-mcp:2.24.0` + `:latest` + `:stable`
+  (re-points from 2.19.0).
+- Memory/docs updated: `project_mcp_v2_24_0_plan.md`, MEMORY index entry.
+
+### Known follow-ups (explicitly deferred to 3.x)
+- Prometheus scraping config + Grafana dashboards + alerting.
+- Portainer proxy tools absent from main's `tools/list` today — investigate.
+- SSH bridge server deployment on poligroup (today only on odoo-dev-server).
+- `ssh_execute` tool: `/home/mcp/.ssh/id_ed25519` perm denial; add
+  SSH-agent-forward support so no bind-mounted key is required.
+- Monaco editor (instead of plain textarea) in the filestore manager.
+- Alerting integration (webhook/Slack/email) triggered from `/metrics`.
+
 ## [2.23.0] — 2026-04-24 — Stock initial-balance toolkit + backup plugin + feature flags
 
 ### Added — backup-mcp plugin

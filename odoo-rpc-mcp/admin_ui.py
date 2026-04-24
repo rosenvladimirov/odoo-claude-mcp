@@ -569,6 +569,8 @@ def _nav(sess: dict | None) -> str:
       <ul class="navbar-nav me-auto">
         <li class="nav-item"><a class="nav-link" href="{ADMIN_PATH_PREFIX}/dashboard">Dashboard</a></li>
         <li class="nav-item"><a class="nav-link" href="{ADMIN_PATH_PREFIX}/connections">Odoo връзки</a></li>
+        <li class="nav-item"><a class="nav-link" href="{ADMIN_PATH_PREFIX}/backups">Backups</a></li>
+        <li class="nav-item"><a class="nav-link" href="{ADMIN_PATH_PREFIX}/filestore">Filestore</a></li>
         {admin_link}
       </ul>
       <div class="d-flex align-items-center gap-3">
@@ -2044,4 +2046,21 @@ def get_routes() -> list:
         Route(f"{p}/api/connections/{{alias}}", _api_connection_crud, methods=["GET","PUT","DELETE"]),
         Route(f"{p}/api/users", _api_users, methods=["GET","POST"]),
         Route(f"{p}/api/users/{{login}}/genkey", _api_user_genkey, methods=["POST"]),
-    ]
+    ] + _extension_routes()
+
+
+def _extension_routes() -> list:
+    """Append routes from optional sibling modules (backup manager, filestore)."""
+    out: list = []
+    for mod_name in ("admin_backup", "admin_filestore"):
+        try:
+            mod = __import__(mod_name)
+            if hasattr(mod, "get_routes"):
+                r = mod.get_routes() or []
+                out.extend(r)
+                _logger.info("mounted %d routes from %s", len(r), mod_name)
+        except ImportError:
+            continue
+        except Exception as exc:
+            _logger.error("failed to load %s: %s", mod_name, exc)
+    return out

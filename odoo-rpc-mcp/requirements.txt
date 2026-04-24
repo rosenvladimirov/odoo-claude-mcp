@@ -17,3 +17,10 @@ itsdangerous>=2.2.0
 # before sending the PDF to Claude. If missing the sanitizer falls
 # back to returning the original bytes + logs a warning.
 pypdf>=4.0.0
+# 2.24.0: admin backup manager needs boto3 (Contabo S3 via eu2.contabostorage.com).
+boto3>=1.34.0
+# 2.24.0: Prometheus /metrics scaffold. Full scraping stack is 3.x.
+prometheus-client>=0.20.0
+# 2.24.0: optional — APScheduler drives daily backup auto-rotation when present.
+# Missing → manual rotation only (endpoint + admin UI button still work).
+APScheduler>=3.10.0
