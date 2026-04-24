@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "2.22.0"
+__version__ = "2.23.0"
 
 import asyncio
 import json
@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
@@ -41,6 +42,38 @@ from telegram_service import TelegramServiceManager
 import ai_usage_log
 import ai_vision_service
 import ai_invoice_engine
+
+# ─── Feature flags ───────────────────────────────────────────
+# MCP_DISABLE_FEATURES=ssh,portainer,github,google,telegram,memory,ai,public,website,web,proxy
+# Comma-separated list of feature groups to hide from tool listing and block on call.
+# Proxy service names (portainer, github, …) are also accepted — they skip discovery.
+_RAW_DISABLE = os.environ.get("MCP_DISABLE_FEATURES", "")
+DISABLED_FEATURES: set[str] = {f.strip().lower() for f in _RAW_DISABLE.split(",") if f.strip()}
+
+# Map feature name → tool name prefixes / exact names to suppress
+_FEATURE_PREFIXES: dict[str, tuple] = {
+    "ssh":       ("ssh_", "git_remote"),
+    "google":    ("google_",),
+    "telegram":  ("telegram_",),
+    "memory":    ("memory_",),
+    "proxy":     ("proxy_call", "proxy_discover", "proxy_refresh"),
+    "ai":        ("ai_",),
+    "public":    ("public_access_",),
+    "website":   ("odoo_website_",),
+    "web":       ("odoo_web_",),
+}
+
+def _tool_disabled(tool_name: str) -> bool:
+    """Return True if this tool belongs to a disabled feature group."""
+    for feature, prefixes in _FEATURE_PREFIXES.items():
+        if feature in DISABLED_FEATURES:
+            if any(tool_name == p or tool_name.startswith(p) for p in prefixes):
+                return True
+    return False
+
+if DISABLED_FEATURES:
+    import logging as _log
+    _log.getLogger(__name__).info(f"Disabled features: {sorted(DISABLED_FEATURES)}")
 
 # ─── MCP Proxy (client for sub-services) ────────────────────
 
@@ -106,6 +139,9 @@ def _discover_proxy_tools(only_services: set | None = None):
     services = _get_proxy_services()
     if only_services:
         services = {k: v for k, v in services.items() if k in only_services}
+    # Skip proxy services that are in DISABLED_FEATURES
+    if DISABLED_FEATURES:
+        services = {k: v for k, v in services.items() if k not in DISABLED_FEATURES}
 
     for svc_name, svc_config in services.items():
         try:
@@ -985,6 +1021,57 @@ def _md_to_html(text: str) -> str:
 
 def _conn(args: dict) -> OdooConnection:
     return _mgr().get(args.get("connection", "default"))
+
+
+# ── TZ + backup helpers (used by stock_initial_* tools) ──
+
+BACKUP_ROOT = Path(os.environ.get("MCP_BACKUP_DIR", "/backups"))
+
+
+def _resolve_tz(tz_name: str):
+    """Validate a timezone name and return a ZoneInfo. Raises ValueError on bad input.
+    Caller always passes explicit tz (user's tz) — never default to UTC silently."""
+    if not tz_name or not isinstance(tz_name, str):
+        raise ValueError("tz is required. Pass the caller's timezone (e.g. 'Europe/Sofia').")
+    try:
+        return ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        raise ValueError(f"Unknown timezone '{tz_name}'. Use IANA names like 'Europe/Sofia', 'UTC'.")
+
+
+def _local_eod_to_utc(date_str: str, tz: Any) -> datetime:
+    """Convert YYYY-MM-DD + 23:59:59 in user tz → UTC datetime.
+    Used for stock initial balance end-of-day timestamps."""
+    try:
+        y, m, d = (int(x) for x in date_str.split("-"))
+    except Exception:
+        raise ValueError(f"Invalid date '{date_str}'. Use YYYY-MM-DD.")
+    local_dt = datetime(y, m, d, 23, 59, 59, tzinfo=tz)
+    return local_dt.astimezone(timezone.utc)
+
+
+def _backup_write(operation: str, connection_alias: str, payload: dict) -> dict:
+    """Persist a backup JSON snapshot to the shared backup volume.
+    Path: /backups/<YYYY-MM-DD>/<operation>_<HHMMSSfff>_<conn>.json
+    Returns {path, size_bytes} (or {error} if the volume is not mounted)."""
+    now = datetime.now(timezone.utc)
+    date_dir = BACKUP_ROOT / now.strftime("%Y-%m-%d")
+    fname = f"{operation}_{now.strftime('%H%M%S%f')}_{connection_alias}.json"
+    fpath = date_dir / fname
+    enriched = {
+        "backup_date_utc": now.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+        "operation": operation,
+        "connection": connection_alias,
+        **payload,
+    }
+    try:
+        date_dir.mkdir(parents=True, exist_ok=True)
+        text = json.dumps(enriched, ensure_ascii=False, indent=2, default=str)
+        fpath.write_text(text, encoding="utf-8")
+        return {"path": str(fpath), "size_bytes": len(text.encode("utf-8"))}
+    except Exception as exc:
+        return {"error": f"Backup write failed at {fpath}: {exc}",
+                "hint": "Is the 'mcp-backups' volume mounted rw at /backups?"}
 
 
 def _odoo_major_version(conn: OdooConnection) -> int:
@@ -2931,6 +3018,109 @@ TOOLS = [
             "required": ["record_id"],
         },
     ),
+    Tool(
+        name="odoo_stock_initial_import",
+        description=(
+            "Import opening stock balances (initial inventory) via direct SQL INSERT, bypassing "
+            "ORM overrides (e.g. custom modules that null out stock.move.name). "
+            "Version-aware: v14-v18 creates stock.move + stock.move.line + stock.valuation.layer + "
+            "stock.quant; v19 creates stock.move (with value/price_unit/remaining_qty/remaining_value/"
+            "is_valued=true/is_in=true fields — SVL does not exist) + stock.move.line + stock.quant. "
+            "All datetimes anchored at 23:59:59 in the caller's timezone, converted to UTC before INSERT. "
+            "Writes a JSON snapshot to /backups/<YYYY-MM-DD>/ before execution. "
+            "ALWAYS use dry_run=true first to preview the plan and catch category/location/product errors. "
+            "For real_time valuation, follow up with odoo_stock_initial_opening_journal to book the "
+            "account entry (SQL INSERT does NOT create account.move)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "company_id": {"type": "integer", "description": "Target company for the opening balance"},
+                "accounting_date": {"type": "string", "description": "YYYY-MM-DD — accounting date (usually last day of prior fiscal year, e.g. '2025-12-31')"},
+                "tz": {"type": "string", "description": "IANA timezone of the caller (e.g. 'Europe/Sofia', 'UTC'). 23:59:59 in this tz is converted to UTC for INSERT."},
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "product_id": {"type": "integer"},
+                            "location_id": {"type": "integer", "description": "Destination internal stock.location"},
+                            "quantity": {"type": "number"},
+                            "unit_cost": {"type": "number", "description": "Per-unit cost (currency-agnostic, matches company currency)"},
+                            "value": {"type": "number", "description": "Total value for this line = unit_cost * quantity. Supplied explicitly to allow rounding control."},
+                            "lot_id": {"type": "integer", "description": "Optional stock.lot / stock.production.lot ID for tracked products"},
+                        },
+                        "required": ["product_id", "location_id", "quantity", "unit_cost", "value"],
+                    },
+                    "description": "Opening balance rows. One entry per (product, location, lot).",
+                },
+                "reference_prefix": {"type": "string", "default": "Product Quantity Updated", "description": "Prefix for stock.move name/reference. Final form: '<prefix> [Accounted on YYYY-MM-DD]'."},
+                "dry_run": {"type": "boolean", "default": True, "description": "If true, only preview + pre-flight checks. Set false to execute."},
+            },
+            "required": ["company_id", "accounting_date", "tz", "items"],
+        },
+    ),
+    Tool(
+        name="odoo_stock_initial_delete",
+        description=(
+            "Delete wrong opening stock balances — cascade-removes stock.move (is_inventory=TRUE) "
+            "records, their stock.move.line, and (v14-v18) stock.valuation.layer; then zeros out "
+            "stock.quant on affected (product, location, lot). "
+            "Bypasses Odoo's ORM guard 'You can not delete product moves if the picking is done' via "
+            "raw SQL in an ir.actions.server + env.cr.commit(). "
+            "Version-aware: v14-v18 DELETEs SVL→SML→SM; v19 DELETEs SML→SM (SVL doesn't exist). "
+            "PRE-FLIGHT: refuses if any affected SVL/stock.move has account_move_id set (orphan "
+            "journal entries would remain). Caller must reverse those first. "
+            "ALWAYS writes a full JSON backup to /backups/<YYYY-MM-DD>/ BEFORE any delete. "
+            "ALWAYS use dry_run=true first to see the impact scope."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "company_id": {"type": "integer", "description": "Company scope — only records with this company_id are touched"},
+                "tz": {"type": "string", "description": "IANA timezone of the caller. Used to interpret date_from/date_to (start_of_day / end_of_day in this tz → UTC)."},
+                "date_from": {"type": "string", "description": "Optional YYYY-MM-DD, start-of-day in tz. Filters stock.move.date >= UTC(date_from 00:00 tz)."},
+                "date_to": {"type": "string", "description": "Optional YYYY-MM-DD, end-of-day in tz. Filters stock.move.date <= UTC(date_to 23:59:59 tz)."},
+                "location_ids": {"type": "array", "items": {"type": "integer"}, "description": "Optional list of stock.location IDs to filter by (either src or dst). If omitted, all locations in company."},
+                "dry_run": {"type": "boolean", "default": True, "description": "If true, only preview + backup preview. Set false to execute (backup is still written)."},
+            },
+            "required": ["company_id", "tz"],
+        },
+    ),
+    Tool(
+        name="odoo_stock_initial_opening_journal",
+        description=(
+            "Book the opening-balance journal entry for a previous SQL-inserted initial stock "
+            "(complements odoo_stock_initial_import — SVL/stock.move written via raw SQL do NOT "
+            "auto-create account.move even for real_time valuation). "
+            "Creates ONE account.move (MISC journal, state=posted) with: "
+            "DR lines grouped by category.property_stock_valuation_account_id (e.g. 302 Materials, "
+            "303 Products); CR contra account (default: code '122000' Retained earnings from prior years). "
+            "Version-aware: v14-v18 reads stock.valuation.layer for the date; v19 reads stock.move "
+            "(is_inventory=true, is_valued=true) for the same date — totals the 'value' column. "
+            "DUPLICATE GUARD: before create, scans account.move.line for the same accounts on the "
+            "same date — if any posted lines found, refuses and returns them (Alpinter lesson: "
+            "comprehensive opening entries often already include the stock lines). "
+            "ALWAYS use dry_run=true first."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "company_id": {"type": "integer"},
+                "accounting_date": {"type": "string", "description": "YYYY-MM-DD — date of the opening balance (matches the SQL-inserted stock records)"},
+                "tz": {"type": "string", "description": "IANA timezone of the caller (used to bracket the date for UTC query)."},
+                "contra_account_id": {"type": "integer", "description": "Contra account (CR side). If omitted, searches for account with code '122000' in this company."},
+                "journal_id": {"type": "integer", "description": "Journal for the entry. If omitted, searches for first general-type journal (MISC) in this company."},
+                "ref": {"type": "string", "description": "account.move.ref value. Default: 'Opening balance initial stock <date>'."},
+                "skip_if_exists_on_date": {"type": "boolean", "default": True, "description": "If true, refuse when posted account.move.line exist on accounting_date for any of the stock valuation accounts."},
+                "dry_run": {"type": "boolean", "default": True, "description": "If true, only preview the lines + duplicate check. Set false to create + post."},
+            },
+            "required": ["company_id", "accounting_date", "tz"],
+        },
+    ),
     # ── Google Services ──
     Tool(
         name="google_auth",
@@ -3954,7 +4144,10 @@ TOOLS = [
 @mcp_server.list_tools()
 async def list_tools() -> list[Tool]:
     base = [t for t in TOOLS if t.name != "odoo_disconnect"] if SINGLE_CONNECTION else list(TOOLS)
-    # Append dynamically discovered proxy tools
+    # Apply feature flags
+    if DISABLED_FEATURES:
+        base = [t for t in base if not _tool_disabled(t.name)]
+    # Append dynamically discovered proxy tools (already filtered at discovery time)
     if PROXY_TOOL_DEFS:
         base.extend(PROXY_TOOL_DEFS)
     return base
@@ -3963,6 +4156,11 @@ async def list_tools() -> list[Tool]:
 @mcp_server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     try:
+        # ── Feature flag guard ──
+        if DISABLED_FEATURES and (_tool_disabled(name) or
+                (name in PROXY_TOOLS and PROXY_TOOLS[name]["service"] in DISABLED_FEATURES)):
+            return [TextContent(type="text", text=json.dumps(
+                {"error": f"Tool '{name}' is disabled on this server (MCP_DISABLE_FEATURES)."}))]
         # ── Handle proxied tools directly in async context ──
         if name in PROXY_TOOLS:
             info = PROXY_TOOLS[name]
@@ -7242,6 +7440,631 @@ def _execute_tool(name: str, args: dict) -> Any:
                 "record": post_rec[0] if post_rec else None,
                 "account_move": post_move[0] if post_move else None,
             },
+        }
+
+    elif name == "odoo_stock_initial_import":
+        company_id = int(args["company_id"])
+        accounting_date = str(args["accounting_date"])
+        tz_name = str(args["tz"])
+        items = args.get("items") or []
+        ref_prefix = args.get("reference_prefix") or "Product Quantity Updated"
+        dry_run = bool(args.get("dry_run", True))
+
+        if not items:
+            return {"error": "items list is empty"}
+        try:
+            tz = _resolve_tz(tz_name)
+            utc_dt = _local_eod_to_utc(accounting_date, tz)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        utc_sql = utc_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        svl_exists = conn.execute_kw(
+            "ir.model", "search_count", [[["model", "=", "stock.valuation.layer"]]],
+        )
+        version_branch = "v18" if svl_exists else "v19"
+        major = _odoo_major_version(conn)
+
+        vloc = conn.execute_kw(
+            "stock.location", "search_read",
+            [[["usage", "=", "inventory"], ["company_id", "in", [False, company_id]]]],
+            {"fields": ["id", "name", "complete_name"], "limit": 1},
+        )
+        if not vloc:
+            return {"error": "No inventory adjustment virtual location found (usage='inventory')"}
+        vloc_id = vloc[0]["id"]
+
+        product_ids = sorted({int(it["product_id"]) for it in items})
+        location_ids = sorted({int(it["location_id"]) for it in items})
+        products = conn.execute_kw(
+            "product.product", "read", [product_ids],
+            {"fields": ["id", "default_code", "name", "categ_id", "is_storable",
+                        "type", "tracking", "uom_id", "product_tmpl_id"]},
+        )
+        prod_by_id = {p["id"]: p for p in products}
+        missing_products = [pid for pid in product_ids if pid not in prod_by_id]
+        if missing_products:
+            return {"error": f"Unknown product_ids: {missing_products}"}
+
+        locations = conn.execute_kw(
+            "stock.location", "read", [location_ids],
+            {"fields": ["id", "name", "complete_name", "usage", "company_id"]},
+        )
+        loc_by_id = {l["id"]: l for l in locations}
+        missing_locs = [lid for lid in location_ids if lid not in loc_by_id]
+        if missing_locs:
+            return {"error": f"Unknown location_ids: {missing_locs}"}
+        for lid, lrec in loc_by_id.items():
+            lcomp = lrec["company_id"][0] if lrec.get("company_id") else None
+            if lcomp not in (None, company_id):
+                return {"error": f"Location {lid} company={lcomp} does not match requested {company_id}"}
+            if lrec["usage"] != "internal":
+                return {"error": f"Location {lid} usage='{lrec['usage']}' — must be 'internal'"}
+
+        categ_ids = sorted({p["categ_id"][0] for p in products if p.get("categ_id")})
+        categs = conn.execute_kw(
+            "product.category", "read", [categ_ids],
+            {"fields": ["id", "name", "complete_name", "property_valuation", "property_cost_method"]},
+        )
+        categ_by_id = {c["id"]: c for c in categs}
+
+        # Pre-flight: refuse if any target quant has on-hand > 0 (avoid double-posting).
+        existing_quants = conn.execute_kw(
+            "stock.quant", "search_read",
+            [[["product_id", "in", product_ids], ["location_id", "in", location_ids],
+              ["company_id", "=", company_id]]],
+            {"fields": ["id", "product_id", "location_id", "lot_id", "quantity",
+                        "reserved_quantity", "in_date"]},
+        )
+        nonzero_quants = [q for q in existing_quants if float(q.get("quantity") or 0) != 0.0]
+
+        ref_label = f"{ref_prefix} [Accounted on {accounting_date}]"
+        total_value = sum(float(it["value"]) for it in items)
+        total_qty = sum(float(it["quantity"]) for it in items)
+
+        items_detail = []
+        for it in items:
+            p = prod_by_id[int(it["product_id"])]
+            l = loc_by_id[int(it["location_id"])]
+            items_detail.append({
+                "product_id": p["id"],
+                "product_code": p.get("default_code"),
+                "product_name": p.get("name"),
+                "location_id": l["id"],
+                "location_name": l["complete_name"],
+                "quantity": float(it["quantity"]),
+                "unit_cost": float(it["unit_cost"]),
+                "value": float(it["value"]),
+                "lot_id": int(it["lot_id"]) if it.get("lot_id") else None,
+                "tracking": p.get("tracking"),
+            })
+
+        preview = {
+            "tz": tz_name,
+            "accounting_date": accounting_date,
+            "utc_timestamp": utc_sql,
+            "version_branch": version_branch,
+            "odoo_major": major,
+            "company_id": company_id,
+            "virtual_location_id": vloc_id,
+            "items_count": len(items),
+            "total_quantity": total_qty,
+            "total_value": total_value,
+            "reference": ref_label,
+            "categories": categ_by_id,
+            "items": items_detail,
+            "existing_quants_at_target": existing_quants,
+            "nonzero_existing_quants_count": len(nonzero_quants),
+        }
+
+        if nonzero_quants:
+            preview["error"] = (
+                f"{len(nonzero_quants)} existing stock.quant have non-zero quantity for the "
+                "targeted (product, location). Run odoo_stock_initial_delete first, or adjust inputs."
+            )
+            return preview
+
+        if dry_run:
+            preview["dry_run"] = True
+            preview["note"] = (f"No changes made. Would write backup then execute {len(items)} "
+                               f"SQL INSERTs in {version_branch} branch.")
+            return preview
+
+        alias = args.get("connection") or "default"
+        bkp = _backup_write("stock_initial_import", alias, {
+            "company_id": company_id,
+            "plan": preview,
+            "pre_state": {"stock_quant": existing_quants},
+        })
+        if "error" in bkp:
+            return {"error": f"Refusing to proceed without backup. {bkp['error']}", "hint": bkp.get("hint")}
+
+        sm_model = conn.execute_kw(
+            "ir.model", "search_read", [[["model", "=", "stock.move"]]],
+            {"fields": ["id"], "limit": 1},
+        )
+        if not sm_model:
+            return {"error": "Could not resolve ir.model id for stock.move"}
+
+        uid = conn.uid if hasattr(conn, "uid") else 1
+        date_lit = json.dumps(utc_sql)
+        ref_lit = json.dumps(ref_label)
+
+        stmts = []
+        # Remove any zero-qty stock_quant rows to avoid UNIQUE clashes on re-insert.
+        if existing_quants:
+            existing_ids = ",".join(str(q["id"]) for q in existing_quants)
+            stmts.append(f"env.cr.execute(\"DELETE FROM stock_quant WHERE id IN ({existing_ids})\")")
+
+        for it in items:
+            pid = int(it["product_id"])
+            lid = int(it["location_id"])
+            qty = float(it["quantity"])
+            unit_cost = float(it["unit_cost"])
+            value = float(it["value"])
+            lot_id = int(it["lot_id"]) if it.get("lot_id") else None
+            lot_sql = str(lot_id) if lot_id else "NULL"
+            p = prod_by_id[pid]
+            uom_id = p["uom_id"][0] if p.get("uom_id") else None
+            if not uom_id:
+                return {"error": f"Product {pid} has no uom_id"}
+            src_loc = vloc_id
+            dst_loc = lid
+
+            if version_branch == "v18":
+                stmts.append(
+                    f"env.cr.execute(\"INSERT INTO stock_move "
+                    f"(name, reference, state, date, company_id, product_id, product_uom, "
+                    f"product_uom_qty, quantity, location_id, location_dest_id, is_inventory, "
+                    f"procure_method, create_uid, write_uid, create_date, write_date) VALUES "
+                    f"({ref_lit}, {ref_lit}, 'done', {date_lit}, {company_id}, {pid}, {uom_id}, "
+                    f"{qty}, {qty}, {src_loc}, {dst_loc}, TRUE, 'make_to_stock', {uid}, {uid}, "
+                    f"{date_lit}, {date_lit}) RETURNING id\"); sm_id = env.cr.fetchone()[0]"
+                )
+                stmts.append(
+                    f"env.cr.execute(\"INSERT INTO stock_move_line "
+                    f"(move_id, company_id, product_id, product_uom_id, quantity, location_id, "
+                    f"location_dest_id, lot_id, state, date, create_uid, write_uid, create_date, write_date) "
+                    f"VALUES (%s, {company_id}, {pid}, {uom_id}, {qty}, {src_loc}, {dst_loc}, {lot_sql}, "
+                    f"'done', {date_lit}, {uid}, {uid}, {date_lit}, {date_lit})\", (sm_id,))"
+                )
+                stmts.append(
+                    f"env.cr.execute(\"INSERT INTO stock_valuation_layer "
+                    f"(company_id, product_id, stock_move_id, quantity, uom_id, unit_cost, value, "
+                    f"remaining_qty, remaining_value, description, create_uid, write_uid, create_date, write_date) "
+                    f"VALUES ({company_id}, {pid}, %s, {qty}, {uom_id}, {unit_cost}, {value}, {qty}, {value}, "
+                    f"{ref_lit}, {uid}, {uid}, {date_lit}, {date_lit})\", (sm_id,))"
+                )
+            else:  # v19
+                stmts.append(
+                    f"env.cr.execute(\"INSERT INTO stock_move "
+                    f"(name, reference, state, date, company_id, product_id, product_uom, "
+                    f"product_uom_qty, quantity, location_id, location_dest_id, is_inventory, "
+                    f"is_valued, is_in, value, price_unit, remaining_qty, remaining_value, "
+                    f"procure_method, create_uid, write_uid, create_date, write_date) VALUES "
+                    f"({ref_lit}, {ref_lit}, 'done', {date_lit}, {company_id}, {pid}, {uom_id}, "
+                    f"{qty}, {qty}, {src_loc}, {dst_loc}, TRUE, TRUE, TRUE, {value}, {unit_cost}, "
+                    f"{qty}, {value}, 'make_to_stock', {uid}, {uid}, {date_lit}, {date_lit}) "
+                    f"RETURNING id\"); sm_id = env.cr.fetchone()[0]"
+                )
+                stmts.append(
+                    f"env.cr.execute(\"INSERT INTO stock_move_line "
+                    f"(move_id, company_id, product_id, product_uom_id, quantity, location_id, "
+                    f"location_dest_id, lot_id, state, date, create_uid, write_uid, create_date, write_date) "
+                    f"VALUES (%s, {company_id}, {pid}, {uom_id}, {qty}, {src_loc}, {dst_loc}, {lot_sql}, "
+                    f"'done', {date_lit}, {uid}, {uid}, {date_lit}, {date_lit})\", (sm_id,))"
+                )
+            stmts.append(
+                f"env.cr.execute(\"INSERT INTO stock_quant "
+                f"(product_id, location_id, lot_id, company_id, quantity, reserved_quantity, in_date, "
+                f"create_uid, write_uid, create_date, write_date) VALUES "
+                f"({pid}, {dst_loc}, {lot_sql}, {company_id}, {qty}, 0, {date_lit}, {uid}, {uid}, "
+                f"{date_lit}, {date_lit})\")"
+            )
+
+        stmts.append("env.cr.commit()")
+        code = "\n".join(stmts)
+        sa_id = conn.execute_kw(
+            "ir.actions.server", "create",
+            [{"name": "MCP stock initial import", "model_id": sm_model[0]["id"],
+              "state": "code", "code": code}],
+        )
+        try:
+            conn.execute_kw("ir.actions.server", "run", [[sa_id]])
+        finally:
+            conn.execute_kw("ir.actions.server", "unlink", [[sa_id]])
+
+        post_quants = conn.execute_kw(
+            "stock.quant", "search_read",
+            [[["product_id", "in", product_ids], ["location_id", "in", location_ids],
+              ["company_id", "=", company_id]]],
+            {"fields": ["id", "product_id", "location_id", "lot_id", "quantity", "in_date"]},
+        )
+        return {
+            "dry_run": False,
+            "success": True,
+            "version_branch": version_branch,
+            "items_inserted": len(items),
+            "total_value": total_value,
+            "total_quantity": total_qty,
+            "backup": bkp,
+            "post": {"stock_quant": post_quants},
+        }
+
+    elif name == "odoo_stock_initial_delete":
+        company_id = int(args["company_id"])
+        tz_name = str(args["tz"])
+        date_from = args.get("date_from")
+        date_to = args.get("date_to")
+        location_ids = args.get("location_ids")
+        dry_run = bool(args.get("dry_run", True))
+
+        try:
+            tz = _resolve_tz(tz_name)
+        except ValueError as exc:
+            return {"error": str(exc)}
+
+        svl_exists = conn.execute_kw(
+            "ir.model", "search_count", [[["model", "=", "stock.valuation.layer"]]],
+        )
+        version_branch = "v18" if svl_exists else "v19"
+
+        domain = [["is_inventory", "=", True], ["company_id", "=", company_id]]
+        if date_from:
+            try:
+                y, m, d = (int(x) for x in date_from.split("-"))
+                utc_from = datetime(y, m, d, 0, 0, 0, tzinfo=tz).astimezone(timezone.utc)
+                domain.append(["date", ">=", utc_from.strftime("%Y-%m-%d %H:%M:%S")])
+            except Exception:
+                return {"error": f"Invalid date_from '{date_from}'. Use YYYY-MM-DD."}
+        if date_to:
+            try:
+                y, m, d = (int(x) for x in date_to.split("-"))
+                utc_to = datetime(y, m, d, 23, 59, 59, tzinfo=tz).astimezone(timezone.utc)
+                domain.append(["date", "<=", utc_to.strftime("%Y-%m-%d %H:%M:%S")])
+            except Exception:
+                return {"error": f"Invalid date_to '{date_to}'. Use YYYY-MM-DD."}
+        loc_filter_ids = None
+        if location_ids:
+            loc_filter_ids = [int(x) for x in location_ids]
+            domain += ["|", ["location_id", "in", loc_filter_ids],
+                       ["location_dest_id", "in", loc_filter_ids]]
+
+        move_fields = ["id", "name", "date", "product_id", "quantity", "location_id",
+                       "location_dest_id", "company_id", "state", "is_inventory"]
+        if version_branch == "v19":
+            move_fields += ["value", "is_valued", "account_move_id"]
+        sms = conn.execute_kw("stock.move", "search_read", [domain], {"fields": move_fields})
+        if not sms:
+            return {"error": f"No stock.move (is_inventory=True) for company {company_id} "
+                             "matching filters.", "domain": domain, "version_branch": version_branch}
+        move_ids = [m["id"] for m in sms]
+
+        smls = conn.execute_kw(
+            "stock.move.line", "search_read", [[["move_id", "in", move_ids]]],
+            {"fields": ["id", "move_id", "product_id", "quantity", "lot_id",
+                        "location_id", "location_dest_id"]},
+        )
+
+        svls = []
+        if version_branch == "v18":
+            svls = conn.execute_kw(
+                "stock.valuation.layer", "search_read", [[["stock_move_id", "in", move_ids]]],
+                {"fields": ["id", "stock_move_id", "product_id", "value", "unit_cost", "account_move_id"]},
+            )
+            accounted = [s for s in svls if s.get("account_move_id")]
+            acc_field_source = "stock.valuation.layer.account_move_id"
+        else:
+            accounted = [m for m in sms if m.get("account_move_id")]
+            acc_field_source = "stock.move.account_move_id"
+
+        if accounted:
+            return {
+                "error": f"{len(accounted)} records have {acc_field_source} set. "
+                         "Reverse the associated account.move entries first, then re-run delete.",
+                "accounted_ids": [r["id"] for r in accounted][:20],
+                "version_branch": version_branch,
+            }
+
+        prod_ids = sorted({m["product_id"][0] for m in sms if m.get("product_id")})
+        loc_ids_all = set()
+        for m in sms:
+            if m.get("location_id"):
+                loc_ids_all.add(m["location_id"][0])
+            if m.get("location_dest_id"):
+                loc_ids_all.add(m["location_dest_id"][0])
+        loc_ids_all = sorted(loc_ids_all)
+
+        quants = conn.execute_kw(
+            "stock.quant", "search_read",
+            [[["product_id", "in", prod_ids], ["location_id", "in", loc_ids_all],
+              ["company_id", "=", company_id]]],
+            {"fields": ["id", "product_id", "location_id", "lot_id", "quantity",
+                        "reserved_quantity", "in_date"]},
+        )
+
+        alias = args.get("connection") or "default"
+        bkp = _backup_write("stock_initial_delete", alias, {
+            "company_id": company_id,
+            "version_branch": version_branch,
+            "filters": {"date_from": date_from, "date_to": date_to,
+                        "location_ids": location_ids, "tz": tz_name},
+            "affected": {
+                "stock_move": sms,
+                "stock_move_line": smls,
+                "stock_valuation_layer": svls,
+                "stock_quant_before": quants,
+            },
+        })
+        if "error" in bkp:
+            return {"error": f"Refusing to proceed without backup. {bkp['error']}", "hint": bkp.get("hint")}
+
+        preview = {
+            "tz": tz_name,
+            "version_branch": version_branch,
+            "company_id": company_id,
+            "filters": {"date_from": date_from, "date_to": date_to, "location_ids": location_ids},
+            "stock_move_count": len(sms),
+            "stock_move_line_count": len(smls),
+            "stock_valuation_layer_count": len(svls),
+            "stock_quant_to_zero": len(quants),
+            "backup": bkp,
+            "sample_moves": sms[:5],
+        }
+        if dry_run:
+            preview["dry_run"] = True
+            preview["note"] = "No changes made. Set dry_run=false to execute (backup has been written)."
+            return preview
+
+        sm_model = conn.execute_kw(
+            "ir.model", "search_read", [[["model", "=", "stock.move"]]],
+            {"fields": ["id"], "limit": 1},
+        )
+        if not sm_model:
+            return {"error": "Could not resolve ir.model id for stock.move"}
+
+        uid = conn.uid if hasattr(conn, "uid") else 1
+        move_tuple = ",".join(str(i) for i in move_ids)
+        loc_tuple = ",".join(str(i) for i in loc_ids_all) or "0"
+        prod_tuple = ",".join(str(i) for i in prod_ids) or "0"
+
+        stmts = []
+        if version_branch == "v18":
+            stmts.append(
+                f"env.cr.execute(\"DELETE FROM stock_valuation_layer WHERE stock_move_id IN ({move_tuple})\"); "
+                f"svl_n = env.cr.rowcount"
+            )
+        stmts.append(
+            f"env.cr.execute(\"DELETE FROM stock_move_line WHERE move_id IN ({move_tuple})\"); "
+            f"sml_n = env.cr.rowcount"
+        )
+        stmts.append(
+            f"env.cr.execute(\"DELETE FROM stock_move WHERE id IN ({move_tuple})\"); "
+            f"sm_n = env.cr.rowcount"
+        )
+        stmts.append(
+            f"env.cr.execute(\"UPDATE stock_quant SET quantity=0, reserved_quantity=0, "
+            f"write_date=NOW(), write_uid={uid} WHERE company_id={company_id} AND "
+            f"product_id IN ({prod_tuple}) AND location_id IN ({loc_tuple})\"); "
+            f"sq_n = env.cr.rowcount"
+        )
+        stmts.append("env.cr.commit()")
+        code = "\n".join(stmts)
+
+        sa_id = conn.execute_kw(
+            "ir.actions.server", "create",
+            [{"name": "MCP stock initial delete", "model_id": sm_model[0]["id"],
+              "state": "code", "code": code}],
+        )
+        try:
+            conn.execute_kw("ir.actions.server", "run", [[sa_id]])
+        finally:
+            conn.execute_kw("ir.actions.server", "unlink", [[sa_id]])
+
+        remaining = conn.execute_kw("stock.move", "search_count", [[["id", "in", move_ids]]])
+        post_quants = conn.execute_kw(
+            "stock.quant", "search_read", [[["id", "in", [q["id"] for q in quants]]]],
+            {"fields": ["id", "quantity"]},
+        )
+        return {
+            "dry_run": False,
+            "success": remaining == 0,
+            "version_branch": version_branch,
+            "stock_move_remaining": remaining,
+            "stock_quant_post": post_quants,
+            "backup": bkp,
+        }
+
+    elif name == "odoo_stock_initial_opening_journal":
+        company_id = int(args["company_id"])
+        accounting_date = str(args["accounting_date"])
+        tz_name = str(args["tz"])
+        contra_override = args.get("contra_account_id")
+        journal_override = args.get("journal_id")
+        ref_arg = args.get("ref")
+        skip_dup = bool(args.get("skip_if_exists_on_date", True))
+        dry_run = bool(args.get("dry_run", True))
+
+        try:
+            tz = _resolve_tz(tz_name)
+            y, m, d = (int(x) for x in accounting_date.split("-"))
+        except (ValueError, Exception) as exc:
+            return {"error": f"tz/accounting_date invalid: {exc}"}
+
+        utc_start = datetime(y, m, d, 0, 0, 0, tzinfo=tz).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        utc_end = datetime(y, m, d, 23, 59, 59, tzinfo=tz).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+        svl_exists = conn.execute_kw(
+            "ir.model", "search_count", [[["model", "=", "stock.valuation.layer"]]],
+        )
+        version_branch = "v18" if svl_exists else "v19"
+
+        if version_branch == "v18":
+            recs = conn.execute_kw(
+                "stock.valuation.layer", "search_read",
+                [[["company_id", "=", company_id],
+                  ["create_date", ">=", utc_start], ["create_date", "<=", utc_end]]],
+                {"fields": ["id", "product_id", "value", "quantity", "account_move_id"]},
+            )
+        else:
+            recs = conn.execute_kw(
+                "stock.move", "search_read",
+                [[["company_id", "=", company_id], ["is_inventory", "=", True],
+                  ["is_valued", "=", True],
+                  ["date", ">=", utc_start], ["date", "<=", utc_end]]],
+                {"fields": ["id", "product_id", "value", "quantity", "account_move_id"]},
+            )
+
+        if not recs:
+            return {"error": f"No {version_branch} stock valuation records found on {accounting_date} "
+                             f"(tz={tz_name}) for company {company_id}."}
+        already_accounted = [r for r in recs if r.get("account_move_id")]
+        if already_accounted:
+            return {"error": f"{len(already_accounted)} records already have account_move_id. "
+                             "Reverse those first.",
+                    "already_accounted_ids": [r["id"] for r in already_accounted][:20]}
+
+        product_ids = sorted({r["product_id"][0] for r in recs})
+        products = conn.execute_kw(
+            "product.product", "read", [product_ids],
+            {"fields": ["id", "categ_id", "default_code", "name"]},
+        )
+        categ_ids = sorted({p["categ_id"][0] for p in products})
+        categs = conn.execute_kw(
+            "product.category", "read", [categ_ids],
+            {"fields": ["id", "name", "complete_name",
+                        "property_stock_valuation_account_id", "property_valuation"]},
+        )
+        cat_by_id = {c["id"]: c for c in categs}
+        prod_to_cat = {p["id"]: p["categ_id"][0] for p in products}
+
+        sums_by_acc = {}
+        for r in recs:
+            pid = r["product_id"][0]
+            cat = cat_by_id[prod_to_cat[pid]]
+            val_acc = cat.get("property_stock_valuation_account_id")
+            if not val_acc:
+                return {"error": f"Category '{cat['complete_name']}' has no "
+                                 "property_stock_valuation_account_id"}
+            acc_id = val_acc[0]
+            b = sums_by_acc.setdefault(acc_id, {"debit": 0.0, "cat_names": set(), "rec_ids": []})
+            b["debit"] += float(r["value"])
+            b["cat_names"].add(cat["complete_name"])
+            b["rec_ids"].append(r["id"])
+
+        for b in sums_by_acc.values():
+            b["debit"] = round(b["debit"], 2)
+            b["cat_names"] = sorted(b["cat_names"])
+        total_debit = round(sum(b["debit"] for b in sums_by_acc.values()), 2)
+
+        if contra_override:
+            contra_acc = int(contra_override)
+        else:
+            cands = conn.execute_kw(
+                "account.account", "search_read",
+                [[["code", "=", "122000"], ["company_ids", "in", company_id]]],
+                {"fields": ["id", "code", "name"], "limit": 1},
+            )
+            if not cands:
+                cands = conn.execute_kw(
+                    "account.account", "search_read", [[["code", "=", "122000"]]],
+                    {"fields": ["id", "code", "name"], "limit": 1},
+                )
+            if not cands:
+                return {"error": "No account with code '122000' found. "
+                                 "Pass contra_account_id explicitly."}
+            contra_acc = cands[0]["id"]
+
+        if journal_override:
+            journal_id = int(journal_override)
+        else:
+            journals = conn.execute_kw(
+                "account.journal", "search_read",
+                [[["type", "=", "general"], ["company_id", "=", company_id]]],
+                {"fields": ["id", "name", "code"], "limit": 1},
+            )
+            if not journals:
+                return {"error": "No general-type journal found. Pass journal_id explicitly."}
+            journal_id = journals[0]["id"]
+
+        stock_accs = list(sums_by_acc.keys())
+        existing_lines = conn.execute_kw(
+            "account.move.line", "search_read",
+            [[["account_id", "in", stock_accs], ["date", "=", accounting_date],
+              ["company_id", "=", company_id], ["parent_state", "=", "posted"]]],
+            {"fields": ["id", "account_id", "debit", "credit", "move_id", "ref"]},
+        )
+
+        ref_label = ref_arg or f"Opening balance initial stock {accounting_date}"
+        dr_lines = []
+        for acc_id, b in sums_by_acc.items():
+            dr_lines.append({
+                "account_id": acc_id,
+                "debit": b["debit"],
+                "credit": 0.0,
+                "name": f"Initial stock — {', '.join(b['cat_names'])}",
+                "source_record_count": len(b["rec_ids"]),
+            })
+        cr_line = {"account_id": contra_acc, "debit": 0.0, "credit": total_debit, "name": ref_label}
+
+        preview = {
+            "tz": tz_name,
+            "accounting_date": accounting_date,
+            "version_branch": version_branch,
+            "company_id": company_id,
+            "journal_id": journal_id,
+            "contra_account_id": contra_acc,
+            "total": total_debit,
+            "records_found": len(recs),
+            "dr_lines": dr_lines,
+            "cr_line": cr_line,
+            "ref": ref_label,
+            "existing_lines_on_date": existing_lines,
+        }
+
+        if existing_lines and skip_dup:
+            preview["error"] = (
+                f"Found {len(existing_lines)} posted account.move.line for accounts {stock_accs} "
+                f"on {accounting_date}. Opening balance may already be booked. "
+                "Pass skip_if_exists_on_date=false to override."
+            )
+            return preview
+
+        if dry_run:
+            preview["dry_run"] = True
+            preview["note"] = "No changes made. Set dry_run=false to create + post."
+            return preview
+
+        line_ids = []
+        for l in dr_lines:
+            line_ids.append((0, 0, {"account_id": l["account_id"], "debit": l["debit"],
+                                    "credit": 0.0, "name": l["name"]}))
+        line_ids.append((0, 0, {"account_id": cr_line["account_id"], "debit": 0.0,
+                                "credit": cr_line["credit"], "name": cr_line["name"]}))
+
+        new_move_id = conn.execute_kw(
+            "account.move", "create",
+            [{"journal_id": journal_id, "date": accounting_date, "ref": ref_label,
+              "company_id": company_id, "line_ids": line_ids}],
+        )
+        conn.execute_kw("account.move", "action_post", [[new_move_id]])
+
+        alias = args.get("connection") or "default"
+        new_move = conn.execute_kw(
+            "account.move", "read", [[new_move_id]],
+            {"fields": ["id", "name", "state", "date", "ref", "amount_total", "line_ids"]},
+        )
+        bkp = _backup_write("stock_initial_opening_journal", alias, {
+            "plan": preview,
+            "created_move": new_move[0] if new_move else None,
+        })
+        return {
+            "dry_run": False,
+            "success": True,
+            "version_branch": version_branch,
+            "account_move_id": new_move_id,
+            "account_move": new_move[0] if new_move else None,
+            "backup": bkp,
         }
 
     # ── AI Tokenizer (l10n_bg_claude_terminal v1.23+) ──

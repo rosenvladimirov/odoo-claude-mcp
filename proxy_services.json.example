@@ -25,5 +25,9 @@
   "ee": {
     "transport": "sse",
     "url": "http://ee-mcp:8090/sse"
+  },
+  "backup": {
+    "transport": "sse",
+    "url": "http://backup-mcp:8092/sse"
   }
 }

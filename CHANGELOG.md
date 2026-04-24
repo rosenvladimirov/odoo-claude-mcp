@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.23.0] — 2026-04-24 — Stock initial-balance toolkit + backup plugin + feature flags
+
+### Added — backup-mcp plugin
+- New container `mcp-backup` (port 8092, backend network), cloned from `filesystem-mcp`
+  pattern. Shared volume `mcp-backups` mounted rw at `/backups` in both `mcp-backup`
+  (exposes list/read/delete via MCP filesystem protocol) and `mcp-odoo-rpc` (writes
+  JSON snapshots before destructive stock ops). Future track: own UI + S3 Contabo
+  sync + archive rotation.
+- `proxy_services.json` entry `backup` → `http://backup-mcp:8092/sse`.
+- Helper `_backup_write(operation, connection, payload)` in `server.py` — writes
+  `/backups/<YYYY-MM-DD>/<op>_<HHMMSSfff>_<conn>.json`. Override path via
+  `MCP_BACKUP_DIR` env var.
+
+### Added — tz helpers (mandatory tz on all new datetime-sensitive tools)
+- `_resolve_tz(tz_name)` — strict IANA validation via `zoneinfo`. Raises if missing.
+- `_local_eod_to_utc(date, tz)` — converts caller-local 23:59:59 → UTC datetime
+  for end-of-year opening-balance timestamps.
+- Design rule: every new tool that writes dates to Odoo REQUIRES a `tz` parameter
+  from the caller (the user's timezone) — no silent UTC fallback.
+
+### Added — 3 stock initial-balance tools (v18 + v19 version-aware)
+- `odoo_stock_initial_import` — SQL INSERT of opening stock balances, bypasses ORM
+  overrides (e.g. custom `stock.move.create` that nulls `name`). Creates
+  `stock.move` + `stock.move.line` + `stock.quant`; v14-v18 also inserts
+  `stock.valuation.layer`; v19 stores value/price_unit/remaining_qty/remaining_value/
+  is_valued/is_in directly on `stock.move` (SVL model doesn't exist). Refuses
+  if any target `stock.quant` already has non-zero on-hand. Auto-resolves virtual
+  inventory location (`usage=inventory`). Writes backup before INSERT.
+- `odoo_stock_initial_delete` — cascade delete of wrong opening balances
+  (`stock.move.is_inventory=TRUE`). v18: DELETE SVL → SML → SM + UPDATE quants.
+  v19: DELETE SML → SM + UPDATE quants. Pre-flight guard: refuses if any affected
+  SVL/stock.move has `account_move_id` set (would orphan journal entries). Full
+  pre-delete snapshot written to `/backups` ALWAYS — even for dry_run previews.
+- `odoo_stock_initial_opening_journal` — creates ONE `account.move` (MISC journal,
+  posted) for the initial-balance value: DR per-category stock valuation accounts,
+  CR contra (default `122000` Retained earnings). Duplicate guard scans for
+  posted `account.move.line` on the target accounts + date before create
+  (Alpinter lesson — comprehensive openings often already include stock lines).
+  v18 sums `stock.valuation.layer.value`; v19 sums `stock.move.value` for
+  `is_inventory=TRUE AND is_valued=TRUE`.
+
+### Added — `MCP_DISABLE_FEATURES` env var (client-stack hardening)
+- Comma-separated feature groups: `ssh, portainer, github, google, telegram,
+  memory, ai, public, website, web, proxy`. Tools with matching prefixes are
+  hidden from `list_tools` and blocked in `call_tool`. Proxy service names
+  also accepted — they skip discovery entirely. Used on client stacks
+  (mcp-115572378, -115353345, -203709674, -130931201, -208609891) to expose
+  only core Odoo RPC + chosen plugins.
+- `_tool_disabled()` predicate + filter in `list_tools`, `call_tool`, and
+  `_discover_proxy_tools`.
+
 ## [2.19.0] — 2026-04-21 — AI OCR gap-closure set (Trust Foundation + 13 gaps)
 
 ### Trust Foundation (P0 — confidence-based auto-post)

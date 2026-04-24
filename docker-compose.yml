@@ -95,6 +95,7 @@ services:
       - ${SSH_AUTH_SOCK:-/dev/null}:/ssh-agent:ro
       - ./proxy_services.json:/data/proxy_services.json:ro
       - mcp-repos:/repos:ro
+      - mcp-backups:/backups:rw
     labels:
       - "com.blconsulting.service=mcp-odoo-rpc"
 
@@ -254,10 +255,31 @@ services:
     labels:
       - "com.blconsulting.service=mcp-filesystem"
 
+  # ─── Backup MCP (stock snapshots, DB dumps, future S3 sync) ──
+  # BACKEND ONLY — shared volume mcp-backups rw with odoo-rpc-mcp.
+  # Stock tools write JSON snapshots before destructive ops; plugin
+  # exposes list/read/delete/archive via MCP tools.
+  backup-mcp:
+    build:
+      context: ./backup-mcp
+      dockerfile: Dockerfile
+    container_name: mcp-backup
+    restart: unless-stopped
+    networks:
+      - backend
+    environment:
+      - MCP_PORT=8092
+    volumes:
+      - mcp-backups:/backups
+    labels:
+      - "com.blconsulting.service=mcp-backup"
+
 volumes:
   claude-user-data:
     driver: local
   mcp-repos:
+    driver: local
+  mcp-backups:
     driver: local
   qdrant-storage:
     driver: local
