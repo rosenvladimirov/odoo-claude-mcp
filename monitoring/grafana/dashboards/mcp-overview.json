@@ -1,0 +1,98 @@
+{
+  "title": "MCP Overview",
+  "uid": "mcp-overview",
+  "tags": ["mcp"],
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "tenant",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "query": "label_values(mcp_build_info, tenant)",
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {"selected": true, "text": "All", "value": "$__all"}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Active tenants",
+      "gridPos": {"h": 3, "w": 4, "x": 0, "y": 0},
+      "targets": [{"expr": "count(count by (tenant) (mcp_build_info{tenant=~\"$tenant\"}))"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Active sessions (total)",
+      "gridPos": {"h": 3, "w": 4, "x": 4, "y": 0},
+      "targets": [{"expr": "sum(mcp_active_sessions{tenant=~\"$tenant\"})"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Tool calls / 5m",
+      "gridPos": {"h": 3, "w": 4, "x": 8, "y": 0},
+      "targets": [{"expr": "sum(rate(mcp_tool_calls_total{tenant=~\"$tenant\"}[5m])) * 300"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Error rate %",
+      "gridPos": {"h": 3, "w": 4, "x": 12, "y": 0},
+      "targets": [{"expr": "100 * sum(rate(mcp_tool_calls_total{status=\"error\",tenant=~\"$tenant\"}[5m])) / sum(rate(mcp_tool_calls_total{tenant=~\"$tenant\"}[5m]))"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}, {"value": 1, "color": "yellow"}, {"value": 5, "color": "red"}]}}}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Tool calls per second (by tenant)",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 3},
+      "targets": [{"expr": "sum by (tenant) (rate(mcp_tool_calls_total{tenant=~\"$tenant\"}[1m]))", "legendFormat": "{{tenant}}"}]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Top 10 tools (by call rate)",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 3},
+      "targets": [{"expr": "topk(10, sum by (tool) (rate(mcp_tool_calls_total{tenant=~\"$tenant\"}[5m])))", "legendFormat": "{{tool}}"}]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "HTTP requests (by path group + status)",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 12},
+      "targets": [{"expr": "sum by (path_group, status) (rate(mcp_http_requests_total{tenant=~\"$tenant\"}[1m]))", "legendFormat": "{{path_group}} {{status}}"}]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Backup writes (by operation)",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 12},
+      "targets": [{"expr": "sum by (operation, tenant) (increase(mcp_backup_writes_total{tenant=~\"$tenant\"}[1h]))", "legendFormat": "{{tenant}} / {{operation}}"}]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Proxy discoveries (by outcome)",
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 21},
+      "targets": [{"expr": "sum by (service, outcome) (increase(mcp_proxy_discoveries_total{tenant=~\"$tenant\"}[5m]))", "legendFormat": "{{service}} {{outcome}}"}]
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Build info per tenant",
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 21},
+      "targets": [{"expr": "mcp_build_info{tenant=~\"$tenant\"}", "instant": true, "format": "table"}]
+    }
+  ]
+}

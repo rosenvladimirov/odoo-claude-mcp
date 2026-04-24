@@ -1,0 +1,42 @@
+# Prometheus scrape config for the MCP fleet on poligroup.
+# Targets are resolved via the shared odoo-claude-mcp_backend network.
+
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  external_labels:
+    cluster: poligroup
+
+scrape_configs:
+  # MCP main stack
+  - job_name: mcp-main
+    static_configs:
+      - targets: ["mcp-odoo-rpc:8084"]
+        labels:
+          tenant: main
+
+  # MCP client stacks
+  - job_name: mcp-clients
+    static_configs:
+      - targets: ["odoo-rpc-mcp-115572378:8094"]
+        labels: { tenant: "115572378" }
+      - targets: ["odoo-rpc-mcp-115353345:8095"]
+        labels: { tenant: "115353345" }
+      - targets: ["odoo-rpc-mcp-203709674:8096"]
+        labels: { tenant: "203709674" }
+      - targets: ["odoo-rpc-mcp-130931201:8097"]
+        labels: { tenant: "130931201" }
+      - targets: ["odoo-rpc-mcp-208609891:8098"]
+        labels: { tenant: "208609891" }
+
+  # Host (poligroup) metrics
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter-monitoring:9100"]
+        labels:
+          host: poligroup
+
+  # Prometheus self-scrape (for meta dashboards)
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

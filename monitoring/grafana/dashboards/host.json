@@ -1,0 +1,65 @@
+{
+  "title": "Host — poligroup",
+  "uid": "host-poligroup",
+  "tags": ["mcp", "host"],
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "CPU % (1 - idle)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [{"expr": "100 * (1 - avg by (cpu) (rate(node_cpu_seconds_total{mode=\"idle\"}[1m])))", "legendFormat": "cpu{{cpu}}"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "max": 100, "min": 0}}
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Memory %",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [{"expr": "100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)", "legendFormat": "used"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "max": 100, "min": 0}}
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Disk usage %",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [{"expr": "100 * (1 - node_filesystem_avail_bytes{mountpoint=\"/rootfs\"} / node_filesystem_size_bytes{mountpoint=\"/rootfs\"})", "legendFormat": "/"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "max": 100, "min": 0}}
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Network traffic (Mb/s)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [
+        {"expr": "rate(node_network_receive_bytes_total{device!~\"lo|docker.*|veth.*|br-.*\"}[1m]) * 8 / 1e6", "legendFormat": "rx {{device}}"},
+        {"expr": "rate(node_network_transmit_bytes_total{device!~\"lo|docker.*|veth.*|br-.*\"}[1m]) * 8 / 1e6", "legendFormat": "tx {{device}}"}
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Load average",
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 16},
+      "targets": [
+        {"expr": "node_load1", "legendFormat": "1m"},
+        {"expr": "node_load5", "legendFormat": "5m"},
+        {"expr": "node_load15", "legendFormat": "15m"}
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Disk IO ops/s",
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 16},
+      "targets": [
+        {"expr": "rate(node_disk_reads_completed_total[1m])", "legendFormat": "read {{device}}"},
+        {"expr": "rate(node_disk_writes_completed_total[1m])", "legendFormat": "write {{device}}"}
+      ]
+    }
+  ]
+}

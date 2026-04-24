@@ -1,0 +1,88 @@
+# mcp-monitoring — standalone Prometheus + Grafana stack.
+#
+# Deployed at /opt/mcp-monitoring/ on poligroup. Scrapes the MCP `/metrics`
+# endpoints of all 6 stacks (main + 5 clients) via the shared backend
+# Docker network (odoo-claude-mcp_backend), so no public traffic touches
+# /metrics for scraping.
+#
+# Grafana is exposed publicly through the `mcpworks.net` Cloudflare tunnel
+# at grafana.mcpworks.net.
+#
+# Usage:
+#   docker compose --env-file stack.env up -d
+
+networks:
+  odoo-claude-mcp_backend:
+    external: true
+  cloudflare-net:
+    external: true
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: prometheus-monitoring
+    restart: unless-stopped
+    networks:
+      - odoo-claude-mcp_backend
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=${PROM_RETENTION:-90d}"
+      - "--web.enable-lifecycle"
+      - "--web.external-url=http://prometheus-monitoring:9090"
+    labels:
+      - "com.blconsulting.service=prometheus-monitoring"
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: node-exporter-monitoring
+    restart: unless-stopped
+    networks:
+      - odoo-claude-mcp_backend
+    pid: host
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--path.rootfs=/rootfs"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+    labels:
+      - "com.blconsulting.service=node-exporter-monitoring"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: grafana-monitoring
+    restart: unless-stopped
+    networks:
+      - odoo-claude-mcp_backend
+      - cloudflare-net
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_SERVER_ROOT_URL=https://grafana.mcpworks.net
+      - GF_SERVER_SERVE_FROM_SUB_PATH=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_LOG_LEVEL=warn
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    labels:
+      - "com.blconsulting.service=grafana-monitoring"
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus-data:
+    name: mcp-monitoring_prometheus-data
+  grafana-data:
+    name: mcp-monitoring_grafana-data
