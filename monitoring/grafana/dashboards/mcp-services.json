@@ -1,0 +1,169 @@
+{
+  "title": "MCP Services — Filestore & Backup",
+  "uid": "mcp-services",
+  "tags": ["mcp", "services"],
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {"from": "now-24h", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "tenant",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+        "query": "label_values(mcp_build_info, tenant)",
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {"selected": true, "text": "All", "value": "$__all"}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Proxy services (via prefix: <service>__<tool>)",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0}
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Tool calls / second — by proxy service",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 1},
+      "description": "Derived from mcp_tool_calls_total by extracting the service prefix (tool name pattern '<service>__<name>'). Includes backup, filesystem, contabo, cloudflare, oca, ee.",
+      "targets": [{
+        "expr": "sum by (service) (label_replace(rate(mcp_tool_calls_total{tenant=~\"$tenant\",tool=~\".+__.+\"}[5m]), \"service\", \"$1\", \"tool\", \"(.+?)__.+\"))",
+        "legendFormat": "{{service}}"
+      }]
+    },
+    {
+      "id": 3,
+      "type": "bargauge",
+      "title": "Tool calls (last 24h) — by proxy service",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 1},
+      "targets": [{
+        "expr": "sort_desc(sum by (service) (label_replace(increase(mcp_tool_calls_total{tenant=~\"$tenant\",tool=~\".+__.+\"}[24h]), \"service\", \"$1\", \"tool\", \"(.+?)__.+\")))",
+        "legendFormat": "{{service}}",
+        "instant": true
+      }],
+      "options": {"orientation": "horizontal", "showUnfilled": true},
+      "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "palette-classic"}}}
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Backup manager — JSON snapshot writes",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 9}
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Backups / 24h (total)",
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 10},
+      "targets": [{
+        "expr": "sum(increase(mcp_backup_writes_total{tenant=~\"$tenant\"}[24h]))"
+      }],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Unique ops (24h)",
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 10},
+      "targets": [{
+        "expr": "count(count by (operation) (increase(mcp_backup_writes_total{tenant=~\"$tenant\"}[24h]) > 0))"
+      }],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Tenants with backups (24h)",
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 10},
+      "targets": [{
+        "expr": "count(count by (tenant) (increase(mcp_backup_writes_total{tenant=~\"$tenant\"}[24h]) > 0))"
+      }],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Backup writes / hour — by tenant",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 10},
+      "targets": [{
+        "expr": "sum by (tenant) (increase(mcp_backup_writes_total{tenant=~\"$tenant\"}[1h]))",
+        "legendFormat": "{{tenant}}"
+      }]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Backup writes / hour — by operation",
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 14},
+      "targets": [{
+        "expr": "sum by (operation) (increase(mcp_backup_writes_total{tenant=~\"$tenant\"}[1h]))",
+        "legendFormat": "{{operation}}"
+      }]
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Filestore (backup-mcp / filesystem-mcp proxy tools)",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 21}
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Filestore read/write ops — by tool",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 22},
+      "description": "Filesystem MCP protocol tools served by backup-mcp + filesystem-mcp plugins.",
+      "targets": [{
+        "expr": "sum by (tool) (rate(mcp_tool_calls_total{tenant=~\"$tenant\",tool=~\"(backup|filesystem)__.+\"}[5m]))",
+        "legendFormat": "{{tool}}"
+      }]
+    },
+    {
+      "id": 22,
+      "type": "piechart",
+      "title": "Filestore ops (last 24h) — by tool",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 22},
+      "targets": [{
+        "expr": "topk(12, sum by (tool) (increase(mcp_tool_calls_total{tenant=~\"$tenant\",tool=~\"(backup|filesystem)__.+\"}[24h])))",
+        "legendFormat": "{{tool}}",
+        "instant": true
+      }],
+      "options": {"legend": {"displayMode": "table", "values": ["value"]}}
+    },
+    {
+      "id": 23,
+      "type": "table",
+      "title": "Error rate — by tool (filestore + backup + contabo)",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 30},
+      "description": "Tools where errors occurred in the last hour, sorted by error count. Empty table = no errors.",
+      "targets": [{
+        "expr": "topk(20, sum by (tool, tenant) (increase(mcp_tool_calls_total{status=\"error\",tenant=~\"$tenant\",tool=~\"(backup|filesystem|contabo)__.+\"}[1h])))",
+        "legendFormat": "",
+        "instant": true,
+        "format": "table"
+      }]
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Sub-plugin health (proxy discovery)",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 38}
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Proxy discovery outcomes / 5m",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 39},
+      "description": "Each service is rediscovered periodically. 'ok' = healthy; 'empty'/'error' = failed check.",
+      "targets": [{
+        "expr": "sum by (service, outcome) (increase(mcp_proxy_discoveries_total{tenant=~\"$tenant\"}[5m]))",
+        "legendFormat": "{{service}} — {{outcome}}"
+      }]
+    }
+  ]
+}
