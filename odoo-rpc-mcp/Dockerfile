@@ -28,6 +28,9 @@ COPY --chmod=644 ai_usage_log.py .
 COPY --chmod=644 ai_vision_service.py .
 COPY --chmod=644 ai_invoice_engine.py .
 COPY --chmod=644 admin_ui.py .
+COPY --chmod=644 admin_backup.py .
+COPY --chmod=644 admin_filestore.py .
+COPY --chmod=644 metrics.py .
 COPY --chmod=644 bg_validators.py .
 COPY --chmod=644 pdf_sanitizer.py .
 
