@@ -8526,12 +8526,19 @@ def _execute_tool(name: str, args: dict) -> Any:
     # ── Claude Terminal — onboarding ZIP config ──
     elif name == "mcp_terminal_get_config":
         import base64 as _b64
+        import io as _io
         import json as _json
         import os as _os
         import secrets as _secrets
         import string as _string
-        import subprocess as _subprocess
-        import tempfile as _tempfile
+
+        try:
+            import pyzipper as _pyzipper
+        except ImportError:
+            return {"error": (
+                "pyzipper not installed in MCP server image. "
+                "Add `pyzipper>=0.3.6` to requirements.txt and rebuild."
+            )}
 
         tenant_code = _ai_tenant_code(conn, args.get("tenant_code"))
         include_anthropic = bool(args.get("include_anthropic", True))
@@ -8590,27 +8597,19 @@ def _execute_tool(name: str, args: dict) -> Any:
         alphabet = _string.ascii_letters + _string.digits
         temp_password = "".join(_secrets.choice(alphabet) for _ in range(20))
 
-        # Use system `zip` CLI (ZipCrypto, readable by Python stdlib zipfile)
-        # to write a password-protected archive. Pyzipper would write AES-only
-        # which the wizard's stdlib reader can't decrypt.
-        with _tempfile.TemporaryDirectory() as tmpdir:
-            json_path = _os.path.join(tmpdir, "config.json")
-            zip_path = _os.path.join(tmpdir, "config.zip")
-            with open(json_path, "w", encoding="utf-8") as f:
-                _json.dump(cfg, f, indent=2, ensure_ascii=False)
-            try:
-                _subprocess.run(
-                    ["zip", "-j", "-q", "-P", temp_password, zip_path, json_path],
-                    check=True,
-                    capture_output=True,
-                    timeout=10,
-                )
-            except FileNotFoundError:
-                return {"error": "`zip` CLI not installed in MCP server image"}
-            except _subprocess.CalledProcessError as exc:
-                return {"error": f"zip failed: {exc.stderr.decode('utf-8', 'ignore')}"}
-            with open(zip_path, "rb") as f:
-                zip_bytes = f.read()
+        # Build AES-256-encrypted zip in memory via pyzipper. The wizard side
+        # (l10n_bg_claude_terminal) also uses pyzipper to read it back —
+        # stdlib zipfile cannot decrypt AES (only legacy ZipCrypto).
+        buf = _io.BytesIO()
+        with _pyzipper.AESZipFile(
+            buf,
+            "w",
+            compression=_pyzipper.ZIP_DEFLATED,
+            encryption=_pyzipper.WZ_AES,
+        ) as zf:
+            zf.setpassword(temp_password.encode("utf-8"))
+            zf.writestr("config.json", _json.dumps(cfg, indent=2, ensure_ascii=False))
+        zip_bytes = buf.getvalue()
 
         return {
             "tenant_code": tenant_code,

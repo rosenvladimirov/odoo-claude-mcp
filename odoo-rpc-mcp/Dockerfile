@@ -15,7 +15,7 @@ LABEL description="Odoo RPC MCP Server (XML-RPC/JSON-RPC)"
 WORKDIR /app
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl zip && \
+    apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --chmod=644 requirements.txt .

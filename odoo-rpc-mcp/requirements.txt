@@ -24,3 +24,7 @@ prometheus-client>=0.20.0
 # 2.24.0: optional — APScheduler drives daily backup auto-rotation when present.
 # Missing → manual rotation only (endpoint + admin UI button still work).
 APScheduler>=3.10.0
+# 2.25.0: pyzipper — AES-encrypted ZIP write/read. Used by mcp_terminal_get_config
+# tool to package config keys with a temp password for the Odoo Setup Wizard.
+# stdlib zipfile can only READ encrypted zips, not WRITE. pyzipper extends it.
+pyzipper>=0.3.6
