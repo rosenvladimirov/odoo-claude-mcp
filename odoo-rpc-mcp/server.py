@@ -8585,6 +8585,12 @@ def _execute_tool(name: str, args: dict) -> Any:
                     _os.environ.get(f"EMBEDDING_API_KEY_{slug}")
                     or _os.environ.get("EMBEDDING_API_KEY", "")
                 ),
+                # Per-user terminal-control-mcp web UI URL (saved by wizard
+                # to res.users.claude_terminal_url for each selected user).
+                "claude_terminal_url": (
+                    _os.environ.get(f"CLAUDE_TERMINAL_URL_{slug}")
+                    or _os.environ.get("CLAUDE_TERMINAL_URL", "")
+                ),
             },
             "users": {},
         }
