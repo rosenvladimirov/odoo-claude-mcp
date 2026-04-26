@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "2.24.0"
+__version__ = "2.25.0"
 
 import asyncio
 import json
@@ -4156,6 +4156,35 @@ TOOLS = [
                 },
             },
             "required": ["step_name", "source_model", "source_id"],
+        },
+    ),
+    # ── Claude Terminal — onboarding ZIP config ───────
+    Tool(
+        name="mcp_terminal_get_config",
+        description=(
+            "Generate a password-protected ZIP archive with the Claude "
+            "Terminal configuration keys (MCP, Anthropic, Qdrant, Embeddings) "
+            "for the requesting tenant. Returns base64-encoded ZIP + a "
+            "temporary password (shown ONCE — copy it now). Use the password "
+            "in the Odoo Setup Wizard (Settings → Technical → Настройка с "
+            "ZIP конфигурация) to apply the config across res.company + "
+            "res.users records in 5 guided steps."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "tenant_code": {
+                    "type": "string",
+                    "description": "Override tenant slug. Defaults to caller's db/alias.",
+                    "default": "",
+                },
+                "include_anthropic": {
+                    "type": "boolean",
+                    "description": "Whether to embed the Anthropic API key in the bundle.",
+                    "default": True,
+                },
+            },
         },
     ),
 ]
@@ -8494,6 +8523,110 @@ def _execute_tool(name: str, args: dict) -> Any:
             "ctx": updated_ctx,
         }
 
+    # ── Claude Terminal — onboarding ZIP config ──
+    elif name == "mcp_terminal_get_config":
+        import base64 as _b64
+        import json as _json
+        import os as _os
+        import secrets as _secrets
+        import string as _string
+        import subprocess as _subprocess
+        import tempfile as _tempfile
+
+        tenant_code = _ai_tenant_code(conn, args.get("tenant_code"))
+        include_anthropic = bool(args.get("include_anthropic", True))
+        slug = tenant_code.upper().replace("-", "_").replace(".", "_")
+
+        # Build config payload — values pulled from per-tenant or global env vars
+        cfg = {
+            "company": {
+                "claude_mcp_url": (
+                    _os.environ.get(f"MCP_PUBLIC_URL_{slug}")
+                    or _os.environ.get("MCP_PUBLIC_URL", "https://mcp.odoo-shell.space")
+                ),
+                "claude_mcp_token": (
+                    _os.environ.get(f"MCP_CLIENT_TOKEN_{slug}")
+                    or _os.environ.get("MCP_CLIENT_TOKEN", "")
+                ),
+                "claude_mcp_client_id": tenant_code,
+                "claude_mcp_api_key": (
+                    _os.environ.get(f"MCP_API_KEY_{slug}")
+                    or _os.environ.get("MCP_API_KEY", "")
+                ),
+                "claude_qdrant_url": (
+                    _os.environ.get(f"QDRANT_URL_{slug}")
+                    or _os.environ.get("QDRANT_URL", "")
+                ),
+                "claude_qdrant_api_key": (
+                    _os.environ.get(f"QDRANT_API_KEY_{slug}")
+                    or _os.environ.get("QDRANT_API_KEY", "")
+                ),
+                "claude_qdrant_collection_prefix": tenant_code,
+                "claude_ollama_url": (
+                    _os.environ.get(f"OLLAMA_URL_{slug}")
+                    or _os.environ.get("OLLAMA_URL", "")
+                ),
+                "claude_ollama_model": (
+                    _os.environ.get(f"OLLAMA_MODEL_{slug}")
+                    or _os.environ.get("OLLAMA_MODEL", "llama3.2:latest")
+                ),
+                "claude_embedding_provider": (
+                    _os.environ.get(f"EMBEDDING_PROVIDER_{slug}")
+                    or _os.environ.get("EMBEDDING_PROVIDER", "ollama")
+                ),
+                "claude_embedding_api_key": (
+                    _os.environ.get(f"EMBEDDING_API_KEY_{slug}")
+                    or _os.environ.get("EMBEDDING_API_KEY", "")
+                ),
+            },
+            "users": {},
+        }
+        if include_anthropic:
+            api_key, _base = _ai_tenant_credentials(tenant_code)
+            if api_key:
+                cfg["users"]["claude_api_key"] = api_key
+
+        # Generate temp password — 20 chars, alphanum, cryptographically random
+        alphabet = _string.ascii_letters + _string.digits
+        temp_password = "".join(_secrets.choice(alphabet) for _ in range(20))
+
+        # Use system `zip` CLI (ZipCrypto, readable by Python stdlib zipfile)
+        # to write a password-protected archive. Pyzipper would write AES-only
+        # which the wizard's stdlib reader can't decrypt.
+        with _tempfile.TemporaryDirectory() as tmpdir:
+            json_path = _os.path.join(tmpdir, "config.json")
+            zip_path = _os.path.join(tmpdir, "config.zip")
+            with open(json_path, "w", encoding="utf-8") as f:
+                _json.dump(cfg, f, indent=2, ensure_ascii=False)
+            try:
+                _subprocess.run(
+                    ["zip", "-j", "-q", "-P", temp_password, zip_path, json_path],
+                    check=True,
+                    capture_output=True,
+                    timeout=10,
+                )
+            except FileNotFoundError:
+                return {"error": "`zip` CLI not installed in MCP server image"}
+            except _subprocess.CalledProcessError as exc:
+                return {"error": f"zip failed: {exc.stderr.decode('utf-8', 'ignore')}"}
+            with open(zip_path, "rb") as f:
+                zip_bytes = f.read()
+
+        return {
+            "tenant_code": tenant_code,
+            "zip_filename": f"claude_terminal_config_{tenant_code}.zip",
+            "zip_base64": _b64.b64encode(zip_bytes).decode("ascii"),
+            "zip_size_bytes": len(zip_bytes),
+            "temp_password": temp_password,
+            "instructions": (
+                f"⚠ ВАЖНО: Временна парола: '{temp_password}' — запазете я СЕГА, "
+                f"няма да бъде показана отново.\n"
+                f"1. Запазете zip_base64 като файл с име {tenant_code}_config.zip\n"
+                f"2. В Odoo: Settings → Technical → Настройка с ZIP конфигурация\n"
+                f"3. Качете zip-а и въведете паролата по-горе."
+            ),
+        }
+
     # ── Google Services ──
     elif name == "google_auth":
         if google_mgr is None:
@@ -8787,8 +8920,26 @@ def create_app():
         # ── OAuth 2.0 metadata ─────────────────────────────────────
         if path == "/.well-known/oauth-authorization-server" and scope["type"] == "http":
             from starlette.responses import JSONResponse
-            host = dict(scope.get("headers", [])).get(b"host", b"localhost").decode()
-            scheme = "https" if "443" in str(scope.get("server", ("", ""))) or host.endswith((".space", ".com", ".net")) else "http"
+            headers = dict(scope.get("headers", []))
+            host = headers.get(b"x-forwarded-host", headers.get(b"host", b"localhost")).decode()
+            # Scheme detection (ordered by trust):
+            # 1) CF-Visitor (user-visible scheme from Cloudflare proxy)
+            # 2) Private-IP heuristic → http (no TLS for localhost/RFC1918)
+            # 3) Public FQDN → https (assume TLS at CF/LB)
+            # We intentionally do NOT trust X-Forwarded-Proto, because Cloudflare
+            # tunnels frequently forward origin as http:// even when the user is
+            # on https — so honouring that header yields wrong OAuth metadata.
+            cf_visitor = headers.get(b"cf-visitor", b"").decode()
+            is_private = host.startswith(("localhost", "127.", "10.",
+                                          "192.168.", "172.")) or "." not in host
+            if '"scheme":"https"' in cf_visitor:
+                scheme = "https"
+            elif '"scheme":"http"' in cf_visitor:
+                scheme = "http"
+            elif is_private:
+                scheme = "http"
+            else:
+                scheme = "https"
             base = f"{scheme}://{host}"
             response = JSONResponse({
                 "issuer": base,
