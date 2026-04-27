@@ -289,9 +289,39 @@ stacks per tenant, ships licensed memory packs.
 **Dependency on the MCP stack:** uses the `MCP_ADMIN_TOKEN` endpoint
 family (`/admin/memory/*`) added in `odoo-rpc-mcp` 2.8.0.
 
+### `odoo-mcp-theme` — Custom Odoo website theme (free / AGPL-3)
+
+Editorial **"paper" theme** purpose-built for the MCP Works landing
+site and any Odoo website that wants a clean, content-first
+presentation. Used in production at [mcpworks.net](https://mcpworks.net).
+
+**Repo:**
+[`rosenvladimirov/odoo-mcp-theme`](https://github.com/rosenvladimirov/odoo-mcp-theme)
+· branch **19.0** · current: **19.0.x**
+
+**What it ships:**
+
+- **OKLCH paper/ink + indigo** colour system — perceptually-uniform
+  palette that prints well, scans well, and adapts to dark mode without
+  losing contrast
+- **Custom snippets** — pricing cards (5-tier layout), feature grids,
+  setup-wizard CTAs, demo-link blocks, MCP architecture diagrams
+- **Vertical timeline language switcher** — replaces Odoo's default
+  language dropdown with a sidebar timeline (works well for trilingual
+  EN / BG / RU sites)
+- **Editorial typography** — measured for long-form posts, runs ≤ 70
+  chars per line, optimised vertical rhythm
+- **Fully `#wrapwrap`-scoped** — no leakage into Odoo backend or
+  Website Builder editor (avoids the `$o-color-palettes-name` global
+  leak that breaks editor UI in older themes)
+
+Installable on any Odoo 19 instance. Drop it into your addons path,
+install via Apps, then assign in **Website → Configuration → Themes**.
+
 ### Installation order
 
 ```
+odoo-mcp-theme            ← optional: editorial website skin
 l10n_bg_claude_terminal   ← every user of the MCP terminal
        ↓
 l10n_bg_ai_billing        ← hosting providers / resellers / BL-tier ops
@@ -299,6 +329,8 @@ l10n_bg_ai_billing        ← hosting providers / resellers / BL-tier ops
 
 `l10n_bg_ai_billing` depends on `l10n_bg_claude_terminal` — installing
 the billing module auto-pulls the terminal integration.
+`odoo-mcp-theme` is independent and can be used with or without the
+MCP stack.
 
 ---
 
