@@ -236,6 +236,16 @@ docker compose up -d --build
 > docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
 > ```
 
+> **Optional услуги (Portainer / Teams).** Default `docker compose up -d` стартира само ядрото (Odoo RPC, Filesystem, OCA, EE, GitHub, Qdrant, Ollama, Claude Terminal). За да включиш **Portainer MCP** или **Microsoft Teams MCP**, използвай Compose profile:
+> ```bash
+> docker compose --profile portainer up -d   # ядро + Portainer
+> docker compose --profile teams     up -d   # ядро + Teams
+> docker compose --profile full      up -d   # всичко
+> ```
+> Всяка optional услуга има собствени required env vars (виж `.env.example`). Без тях контейнерът се рестартира до безкрай, затова са изключени по default.
+
+> **First-run troubleshooting.** Ако `docker compose ps` показва `mcp-odoo-rpc` в `Restarting`, значи .env стойностите (`ODOO_URL`, `ODOO_DB`, `ODOO_USERNAME`, `ODOO_API_KEY`/`ODOO_PASSWORD`) не сочат към reachable Odoo. Edit-вай `.env` и пусни пак `docker compose up -d`. Healthcheck-а `curl http://localhost:8084/health` ще succeed-не само след като `mcp-odoo-rpc` е `Up`.
+
 Това ще:
 - Компилира ttyd от сорс (отнема 2-3 мин при първи build)
 - Инсталира Claude Code CLI (`@anthropic-ai/claude-code`)

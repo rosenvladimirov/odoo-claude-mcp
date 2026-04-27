@@ -81,6 +81,16 @@ curl http://localhost:8084/health
 > ```
 > This turns `cloudflare-net` into a regular Docker bridge network created on demand.
 
+> **Optional services (Portainer / Teams).** The default `docker compose up -d` starts only the core stack (Odoo RPC, Filesystem, OCA, EE, GitHub, Qdrant, Ollama, Claude Terminal). To also enable the **Portainer MCP** or **Microsoft Teams MCP**, opt in with a Compose profile:
+> ```bash
+> docker compose --profile portainer up -d        # core + Portainer
+> docker compose --profile teams     up -d        # core + Teams
+> docker compose --profile full      up -d        # everything
+> ```
+> Each optional service has its own required env vars (see `.env.example`). Without them the service container would crash-loop, so they're skipped by default.
+
+> **First-run troubleshooting.** If `docker compose ps` shows `mcp-odoo-rpc` in `Restarting` state, it means the values in `.env` (`ODOO_URL`, `ODOO_DB`, `ODOO_USERNAME`, `ODOO_API_KEY`/`ODOO_PASSWORD`) don't point to a reachable Odoo instance. Edit `.env` to match a real Odoo and re-run `docker compose up -d`. The healthcheck `curl http://localhost:8084/health` will succeed only after `mcp-odoo-rpc` is `Up`.
+
 ### Option 2: Quick installer script
 
 **Linux / macOS:**

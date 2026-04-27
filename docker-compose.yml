@@ -100,8 +100,10 @@ services:
       - "com.blconsulting.service=mcp-odoo-rpc"
 
   # ─── Portainer MCP (Docker management via Portainer API) ──
-  # BACKEND ONLY — accessible via proxy or claude-terminal
+  # OPTIONAL — only starts with `--profile portainer` or `--profile full`
+  # Requires PORTAINER_URL + PORTAINER_TOKEN in .env
   portainer-mcp:
+    profiles: ["portainer", "full"]
     build:
       context: ./portainer-mcp
       dockerfile: Dockerfile
@@ -125,8 +127,10 @@ services:
       - "com.blconsulting.service=mcp-portainer"
 
   # ─── Microsoft Teams MCP (Teams messaging) ─────────────────
-  # BACKEND ONLY — accessible via proxy or claude-terminal
+  # OPTIONAL — only starts with `--profile teams` or `--profile full`
+  # Requires TEAMS_APP_ID + TEAMS_APP_PASSWORD + tenant config in .env
   teams-mcp:
+    profiles: ["teams", "full"]
     build:
       context: ./teams-mcp
       dockerfile: Dockerfile
