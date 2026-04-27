@@ -4,6 +4,8 @@
 
 **Production-grade Model Context Protocol (MCP) server suite for Odoo ERP**
 
+**Odoo MCP server for Claude Code and Claude.ai** — turn any **self-hosted Odoo** instance (15 → 19) into an **AI assistant** via the **Model Context Protocol**. 197+ tools, multi-tenant, **Bulgaria localization** (НАП, ДДС, ЕИК) included.
+
 _Connect Claude, Claude Code, and any MCP-compatible client to Odoo, GitHub, filesystem, Portainer, Teams, and more — through a unified, authenticated gateway._
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
@@ -32,7 +34,7 @@ _Connect Claude, Claude Code, and any MCP-compatible client to Odoo, GitHub, fil
 
 ---
 
-## 🎯 What is this?
+## 🎯 What is odoo-claude-mcp?
 
 `odoo-claude-mcp` is a **self-hosted MCP server suite** that turns any Odoo instance into a first-class citizen in the Claude ecosystem. It exposes Odoo data and operations through the Model Context Protocol, while bundling complementary MCP servers for everything an Odoo developer, consultant, or business user needs — GitHub, OCA modules, Kubernetes/Portainer, Microsoft Teams, and a full Claude Code terminal running in the browser.
 
@@ -75,13 +77,13 @@ curl http://localhost:8084/health
 **Linux / macOS:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rosenvladimirov/odoo-claude-mcp/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/rosenvladimirov/odoo-claude-mcp/2.0/install.sh | bash
 ```
 
 **Windows (PowerShell as Administrator):**
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/rosenvladimirov/odoo-claude-mcp/main/install.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/rosenvladimirov/odoo-claude-mcp/2.0/install.ps1 | iex
 ```
 
 ### Option 3: Connect to Claude Code
