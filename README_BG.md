@@ -6,6 +6,18 @@ Docker базиран мост между [Claude Code CLI](https://docs.anthrop
 
 ---
 
+<div align="center">
+
+### Виж как Claude редактира жива поръчка в Odoo — реален CRUD, реално авто-преизчисление
+
+![Claude Code редактира Odoo поръчка в реално време](docs/demo-preview.gif)
+
+**▶ Гледай пълното 4-минутно демо:** [Running Odoo 18 Entirely Through AI — Claude Code + MCP Server](https://www.youtube.com/watch?v=1zPNxUV76ws)
+
+</div>
+
+---
+
 ## Архитектура
 
 ```

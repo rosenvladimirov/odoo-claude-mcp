@@ -20,6 +20,18 @@ _Connect Claude, Claude Code, and any MCP-compatible client to Odoo, GitHub, fil
 
 ---
 
+<div align="center">
+
+### See Claude editing a live Odoo sale order — real CRUD, real auto-recalculation
+
+![Claude Code editing Odoo sale order in real time](docs/demo-preview.gif)
+
+**▶ Watch the full 4-minute demo:** [Running Odoo 18 Entirely Through AI — Claude Code + MCP Server](https://www.youtube.com/watch?v=1zPNxUV76ws)
+
+</div>
+
+---
+
 ## 🎯 What is this?
 
 `odoo-claude-mcp` is a **self-hosted MCP server suite** that turns any Odoo instance into a first-class citizen in the Claude ecosystem. It exposes Odoo data and operations through the Model Context Protocol, while bundling complementary MCP servers for everything an Odoo developer, consultant, or business user needs — GitHub, OCA modules, Kubernetes/Portainer, Microsoft Teams, and a full Claude Code terminal running in the browser.
