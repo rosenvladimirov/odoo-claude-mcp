@@ -1,0 +1,15 @@
+#
+# Local / standalone deployment override.
+#
+# Use when you do NOT have a Cloudflare tunnel sidecar on the host.
+# Promotes `cloudflare-net` from an external network (created by the
+# cloudflared deployment) to a regular project-scoped bridge network,
+# so `docker compose up -d` works on a fresh host without prerequisites.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+#
+networks:
+  cloudflare-net:
+    external: false
+    driver: bridge

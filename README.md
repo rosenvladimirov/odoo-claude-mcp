@@ -64,6 +64,9 @@ cd odoo-claude-mcp
 cp .env.example .env
 nano .env                    # set ODOO_URL, DB, credentials, tokens
 
+# Create the shared Cloudflare tunnel network (one-time per host)
+docker network create cloudflare-net
+
 # Start the stack
 docker compose up -d
 
@@ -71,6 +74,12 @@ docker compose up -d
 docker compose ps
 curl http://localhost:8084/health
 ```
+
+> **No Cloudflare tunnel?** If you're deploying locally without a Cloudflare sidecar, use the override file instead of creating the external network:
+> ```bash
+> docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+> ```
+> This turns `cloudflare-net` into a regular Docker bridge network created on demand.
 
 ### Option 2: Quick installer script
 

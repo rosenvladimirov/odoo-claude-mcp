@@ -224,8 +224,17 @@ ODOO_PROTOCOL=xmlrpc        # xmlrpc (Odoo 8+) или jsonrpc (Odoo 14+)
 ### 2. Стартиране
 
 ```bash
+# Създай споделената Cloudflare tunnel мрежа (еднократно за хоста)
+docker network create cloudflare-net
+
+# Стартирай стака
 docker compose up -d --build
 ```
+
+> **Без Cloudflare tunnel?** Ако deploy-ваш локално без cloudflared sidecar, ползвай override файла вместо external мрежа:
+> ```bash
+> docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+> ```
 
 Това ще:
 - Компилира ttyd от сорс (отнема 2-3 мин при първи build)
