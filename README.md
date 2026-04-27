@@ -215,11 +215,12 @@ A complete **xterm.js + tmux + Claude Code** setup running in a Docker container
 
 ---
 
-## 📦 Companion Odoo Modules
+## 📦 Companion Odoo Modules & Theme
 
-The MCP stack is paired with two **Odoo modules** that live in the BG
-localization repos. Together they turn any Odoo instance into a fully
-MCP-aware, multi-tenant, billing-ready AI workstation.
+The MCP stack is paired with several **Odoo modules and a website
+theme**. Together they turn any Odoo instance into a fully MCP-aware,
+multi-tenant, billing-ready AI workstation — with an optional editorial
+website skin on top.
 
 ### `l10n_bg_claude_terminal` — Odoo ↔ MCP integration (free / LGPL-3)
 
@@ -229,9 +230,16 @@ major series has a dedicated branch).
 
 **Repos:**
 
-- **Odoo 18**: [`OCA/l10n-bulgaria` → `l10n_bg_claude_terminal`](https://github.com/rosenvladimirov/l10n-bulgaria/tree/18.0/l10n_bg_claude_terminal) · current: **18.0.1.28.0**
-- **Odoo 19**: [`OCA/l10n-bulgaria` → `l10n_bg_claude_terminal`](https://github.com/rosenvladimirov/l10n-bulgaria/tree/19.0/l10n_bg_claude_terminal) · current: **19.0.1.24.0**
+- **Odoo 18**: [`l10n-bulgaria` → `l10n_bg_claude_terminal`](https://github.com/rosenvladimirov/l10n-bulgaria/tree/18.0/l10n_bg_claude_terminal) · current: **18.0.1.28.0**
+- **Odoo 19**: [`l10n-bulgaria` → `l10n_bg_claude_terminal`](https://github.com/rosenvladimirov/l10n-bulgaria/tree/19.0/l10n_bg_claude_terminal) · current: **19.0.1.24.0**
 - **Odoo 16**: same repo, branch `16.0`
+
+> 🌍 **Non-Bulgarian deployments?** Use the international fork
+> [`rosenvladimirov/odoo-mcp-terminal`](https://github.com/rosenvladimirov/odoo-mcp-terminal)
+> — same module, redistributed **without** the BG localization
+> dependencies (no НАП fields, no Bulgarian transliteration mixin).
+> Branches `16.0` / `18.0` / `19.0`, AGPL-3.0. Recommended for any
+> Odoo instance outside Bulgaria.
 
 **What it adds to Odoo:**
 
@@ -612,7 +620,7 @@ This project is licensed under the **AGPL-3.0** license. See [LICENSE](LICENSE) 
 
 ## 👤 Maintainer
 
-**Rosen Vladimirov** — Founder, [BL Consulting](https://bl-consulting.net)
+**Rosen Vladimirov** — Partner, [BL Consulting](https://bl-consulting.net)
 Odoo Silver Partner · OCA `l10n-bulgaria` maintainer · 10+ years of Odoo specialization
 
 📧 Email: vladimirov.rosen@gmail.com
