@@ -12,7 +12,7 @@ _Connect Claude, Claude Code, and any MCP-compatible client to Odoo, GitHub, fil
 [![Docker](https://img.shields.io/badge/Docker-Compose%20%7C%20K3s-2496ED)](https://www.docker.com)
 [![Made by BL Consulting](https://img.shields.io/badge/Made%20by-BL%20Consulting-714B67)](https://bl-consulting.net)
 
-[Quick Start](#-quick-start) · [Architecture](#-architecture) · [MCP Servers](#-mcp-servers) · [Deployment](#-deployment) · [Claude.ai Connector](#-claudeai-connector) · [Documentation](#-documentation)
+[Quick Start](#-quick-start) · [Why this vs alternatives?](#-why-this-vs-alternatives) · [Use Cases](#-use-cases) · [Architecture](#-architecture) · [MCP Servers](#-mcp-servers) · [Companion Modules](#-companion-odoo-modules--theme) · [Deployment](#%EF%B8%8F-deployment)
 
 **[🇧🇬 Български README](README_BG.md)**
 
@@ -50,65 +50,107 @@ Unlike single-purpose MCP wrappers, this stack is built for **real production us
 
 ---
 
-## 🛤 Two Tracks — Which Branch Do You Want?
+## 🚀 Quick Start
 
-This project ships on **two parallel branches**, each targeting a different
-audience. Pick the track that matches your role.
+### Option 1: Docker Compose (local dev)
 
-### 🧑‍💼 Track 2.x — End Users (current stable, `branch 2.0`)
+```bash
+git clone https://github.com/rosenvladimirov/odoo-claude-mcp.git
+cd odoo-claude-mcp
 
-**Who:** Odoo end-users, accountants, Bulgarian SMEs, developers who work
-with a single Odoo stack, content teams managing website/blog.
+# Configure
+cp .env.example .env
+nano .env                    # set ODOO_URL, DB, credentials, tokens
 
-**What you get:**
+# Start the stack
+docker compose up -d
 
-- All **188+ MCP tools** for day-to-day Odoo work (CRUD, search, RPC,
-  introspection, attachments, reports, web session)
-- **Multi-language field management** (`odoo_translate_field` +
-  `odoo_translate_html` + 2 helpers — covers blog.post, product
-  descriptions, website pages, arch_db) ★ new in 2.10
-- **Website snippet management** (list / add / update / remove
-  snippets on blog posts and pages, with background image swaps and
-  substitutions) ★ new in 2.10
-- **Bulgaria localization** (fiscal positions, VAT, НАП integration)
-- **AI tokenizer** (Qdrant + Ollama embeddings per Odoo record)
-- **Memory system** (shared + per-user + licensed memory packs)
-- **Google / Telegram / Teams** integration
-- **Claude.ai connector** — Bearer-token HTTPS endpoint ready
+# Verify
+docker compose ps
+curl http://localhost:8084/health
+```
 
-**Docker tags:** `:latest`, `:stable`, `:2.x.y` (current: **2.10.0**)
+### Option 2: Quick installer script
 
-**Documentation:** this README
+**Linux / macOS:**
 
-### 🔧 Track 3.x — Implementers / Integrators (preview, `branch 3.0`)
+```bash
+curl -fsSL https://raw.githubusercontent.com/rosenvladimirov/odoo-claude-mcp/main/install.sh | bash
+```
 
-**Who:** Odoo implementation partners, OCA community contributors,
-SaaS MSPs running multiple client instances, integrator agencies.
+**Windows (PowerShell as Administrator):**
 
-**What's planned (development — not production yet):**
+```powershell
+iwr -useb https://raw.githubusercontent.com/rosenvladimirov/odoo-claude-mcp/main/install.ps1 | iex
+```
 
-- **Admin lifecycle tools** — `odoo_module_install/upgrade/uninstall/
-  diff`, `odoo_config_apply`, `odoo_health_check`, `odoo_backup_db /
-  restore_db`
-- **Industry skill packs** — Manufacturing, Retail, Services, BG
-  Localization, AI Accounting Assistant. Each pack = modules +
-  `ai.skill` records + memory packs + pipeline steps.
-- **Demo builder** — one-command generator of fresh demo
-  environments (`mcp demo create --industry=... --seed=...`).
-  Tenant + Odoo DB + demo data + skills + memory in < 5 minutes.
-- **Module dev + test toolkit** — `odoo_module_scaffold / lint /
-  test / install_from_path / explain`, `odoo_xml_validate`.
+### Option 3: Connect to Claude Code
 
-**Docker tags:** `:next`, `:3.x.y`
+After the stack is running, add it to Claude Code:
 
-**Documentation:** [`docs/integrator-platform.md`](docs/integrator-platform.md)
-(coming soon — see project memory `roadmap_integrator_platform.md`
-for the full 4-track spec)
+```bash
+claude mcp add odoo-mcp \
+  --url https://your-domain.com/mcp \
+  --header "Authorization: Bearer YOUR_TOKEN"
+```
 
-**Positioning:** the 3.x track shifts buyer persona from the final
-Odoo user to the integrator / partner / agency — giving them the
-tools to deploy, configure, and demo Odoo + AI workflows for their
-own clients at scale.
+Or use the included `.mcp.json`:
+
+```bash
+cp claude-terminal/.mcp.json ~/.config/claude-code/mcp.json
+```
+
+---
+
+## ⚖️ Why this vs alternatives?
+
+| Capability | Raw XML-RPC | Single-purpose MCP-Odoo wrappers | **odoo-claude-mcp** |
+|---|---|---|---|
+| **Auth** | Per-call password | Single shared token | ✅ Bearer + per-user profiles + OAuth |
+| **Multi-tenant** | ❌ One DB per process | ⚠️ Single connection | ✅ N tenants per stack |
+| **Tools available** | ~6 RPC verbs | 20–40 | ✅ **197+** (92 native + 105 proxied) |
+| **Memory / context layer** | ❌ | ❌ | ✅ Qdrant vector + Ollama embeddings, per-user + shared |
+| **Skills / orchestration** | ❌ | ❌ | ✅ `ai.skill` records + memory packs |
+| **Web terminal in browser** | ❌ | ❌ | ✅ xterm.js + tmux + Claude Code |
+| **GitHub / Portainer / Teams / OCA** | ❌ | ❌ | ✅ 8 federated MCP servers |
+| **Bulgaria localization** | ❌ | ❌ | ✅ НАП-ready, fiscal positions, VAT |
+| **Production deployment** | DIY | Docker only | ✅ Docker Compose + K3s/Kustomize |
+| **Audit logging / rate limit** | ❌ | ⚠️ | ✅ Per-user logs, Cloudflare AI Gateway |
+| **License** | LGPL (client lib) | Mixed (some MIT, some commercial) | ✅ AGPL-3.0 (open, share-alike) |
+
+The shorter version: most other MCP-Odoo bridges are great for "one developer wants to talk to one Odoo." `odoo-claude-mcp` is for **teams, agencies, and SaaS providers** that need multi-user, multi-database, audited deployments with a unified AI surface.
+
+---
+
+## 🎨 Use Cases
+
+### For Odoo Developers
+
+- **Live module development** with Claude assisting directly on your running instance
+- **RPC-based module deployment** — update code, views, data without filesystem access
+- **Multi-environment workflows** — dev, staging, production from a single Claude session
+- **OCA contribution flows** — clone, search, test, submit PRs through Claude
+
+### For Odoo Consultants
+
+- **Manage multiple client databases** from one authenticated session
+- **Per-client memory** — Claude remembers context for each customer
+- **Shared team knowledge** — `memory_share` distributes institutional know-how
+- **НАП / Bulgaria localization** — built-in tools for fiscal positions, VAT compliance
+
+### For Business Users
+
+- **"Ask Claude about our sales data"** — natural language queries against real Odoo records
+- **Document extraction workflows** — vision LLMs parse invoices into `account.move`
+- **Semantic search** — find similar records, contracts, tickets across the whole database
+- **Email & calendar integration** — Claude coordinates work across Odoo, Gmail, Calendar
+
+### For Platform Operators (SaaS / MSP)
+
+- **Multi-tenant hosting** — each client gets an isolated MCP endpoint
+- **Billing integration** — usage tracking per tenant via Cloudflare AI Gateway
+- **White-label terminals** — brand `claude-terminal` for your customers
+- **Kubernetes scaling** — scale MCP replicas independently based on load
 
 ---
 
@@ -342,58 +384,6 @@ MCP stack.
 
 ---
 
-## 🚀 Quick Start
-
-### Option 1: Docker Compose (local dev)
-
-```bash
-git clone https://github.com/rosenvladimirov/odoo-claude-mcp.git
-cd odoo-claude-mcp
-
-# Configure
-cp .env.example .env
-nano .env                    # set ODOO_URL, DB, credentials, tokens
-
-# Start the stack
-docker compose up -d
-
-# Verify
-docker compose ps
-curl http://localhost:8084/health
-```
-
-### Option 2: Quick installer script
-
-**Linux / macOS:**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/rosenvladimirov/odoo-claude-mcp/main/install.sh | bash
-```
-
-**Windows (PowerShell as Administrator):**
-
-```powershell
-iwr -useb https://raw.githubusercontent.com/rosenvladimirov/odoo-claude-mcp/main/install.ps1 | iex
-```
-
-### Option 3: Connect to Claude Code
-
-After the stack is running, add it to Claude Code:
-
-```bash
-claude mcp add odoo-mcp \
-  --url https://your-domain.com/mcp \
-  --header "Authorization: Bearer YOUR_TOKEN"
-```
-
-Or use the included `.mcp.json`:
-
-```bash
-cp claude-terminal/.mcp.json ~/.config/claude-code/mcp.json
-```
-
----
-
 ## ☸️ Deployment
 
 ### Kubernetes / K3s (recommended for production)
@@ -515,38 +505,6 @@ Pre-packaged NSIS installer (`packaging/windows/`) produced automatically via Gi
 
 ---
 
-## 🎨 Use Cases
-
-### For Odoo Developers
-
-- **Live module development** with Claude assisting directly on your running instance
-- **RPC-based module deployment** — update code, views, data without filesystem access
-- **Multi-environment workflows** — dev, staging, production from a single Claude session
-- **OCA contribution flows** — clone, search, test, submit PRs through Claude
-
-### For Odoo Consultants
-
-- **Manage multiple client databases** from one authenticated session
-- **Per-client memory** — Claude remembers context for each customer
-- **Shared team knowledge** — `memory_share` distributes institutional know-how
-- **НАП / Bulgaria localization** — built-in tools for fiscal positions, VAT compliance
-
-### For Business Users
-
-- **"Ask Claude about our sales data"** — natural language queries against real Odoo records
-- **Document extraction workflows** — vision LLMs parse invoices into `account.move`
-- **Semantic search** — find similar records, contracts, tickets across the whole database
-- **Email & calendar integration** — Claude coordinates work across Odoo, Gmail, Calendar
-
-### For Platform Operators (SaaS / MSP)
-
-- **Multi-tenant hosting** — each client gets an isolated MCP endpoint
-- **Billing integration** — usage tracking per tenant via Cloudflare AI Gateway
-- **White-label terminals** — brand `claude-terminal` for your customers
-- **Kubernetes scaling** — scale MCP replicas independently based on load
-
----
-
 ## 🔐 Security
 
 - **No credentials in code** — all secrets via environment variables or Kubernetes secrets
@@ -573,6 +531,69 @@ This project is maintained by the **[OCA `l10n-bulgaria`](https://github.com/OCA
 - **НАП справка-декларация** — SQL-engine based audit reports
 
 See the [Bulgaria-specific OCA modules](https://github.com/OCA/l10n-bulgaria) for the complete ecosystem.
+
+---
+
+## 🛤 Two Tracks — Which Branch Do You Want?
+
+This project ships on **two parallel branches**, each targeting a different
+audience. Most users want **Track 2.x**; the 3.x track is for integrators
+building hosted offerings on top of the stack.
+
+### 🧑‍💼 Track 2.x — End Users (current stable, `branch 2.0`)
+
+**Who:** Odoo end-users, accountants, Bulgarian SMEs, developers who work
+with a single Odoo stack, content teams managing website/blog.
+
+**What you get:**
+
+- All **188+ MCP tools** for day-to-day Odoo work (CRUD, search, RPC,
+  introspection, attachments, reports, web session)
+- **Multi-language field management** (`odoo_translate_field` +
+  `odoo_translate_html` + 2 helpers — covers blog.post, product
+  descriptions, website pages, arch_db) ★ new in 2.10
+- **Website snippet management** (list / add / update / remove
+  snippets on blog posts and pages, with background image swaps and
+  substitutions) ★ new in 2.10
+- **Bulgaria localization** (fiscal positions, VAT, НАП integration)
+- **AI tokenizer** (Qdrant + Ollama embeddings per Odoo record)
+- **Memory system** (shared + per-user + licensed memory packs)
+- **Google / Telegram / Teams** integration
+- **Claude.ai connector** — Bearer-token HTTPS endpoint ready
+
+**Docker tags:** `:latest`, `:stable`, `:2.x.y` (current: **2.10.0**)
+
+**Documentation:** this README
+
+### 🔧 Track 3.x — Implementers / Integrators (preview, `branch 3.0`)
+
+**Who:** Odoo implementation partners, OCA community contributors,
+SaaS MSPs running multiple client instances, integrator agencies.
+
+**What's planned (development — not production yet):**
+
+- **Admin lifecycle tools** — `odoo_module_install/upgrade/uninstall/
+  diff`, `odoo_config_apply`, `odoo_health_check`, `odoo_backup_db /
+  restore_db`
+- **Industry skill packs** — Manufacturing, Retail, Services, BG
+  Localization, AI Accounting Assistant. Each pack = modules +
+  `ai.skill` records + memory packs + pipeline steps.
+- **Demo builder** — one-command generator of fresh demo
+  environments (`mcp demo create --industry=... --seed=...`).
+  Tenant + Odoo DB + demo data + skills + memory in < 5 minutes.
+- **Module dev + test toolkit** — `odoo_module_scaffold / lint /
+  test / install_from_path / explain`, `odoo_xml_validate`.
+
+**Docker tags:** `:next`, `:3.x.y`
+
+**Documentation:** [`docs/integrator-platform.md`](docs/integrator-platform.md)
+(coming soon — see project memory `roadmap_integrator_platform.md`
+for the full 4-track spec)
+
+**Positioning:** the 3.x track shifts buyer persona from the final
+Odoo user to the integrator / partner / agency — giving them the
+tools to deploy, configure, and demo Odoo + AI workflows for their
+own clients at scale.
 
 ---
 
@@ -618,6 +639,14 @@ This project is licensed under the **AGPL-3.0** license. See [LICENSE](LICENSE) 
 
 ---
 
+## ⭐ Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=rosenvladimirov/odoo-claude-mcp&type=Date)](https://star-history.com/#rosenvladimirov/odoo-claude-mcp&Date)
+
+If this project helps you, please consider [starring the repo](https://github.com/rosenvladimirov/odoo-claude-mcp) — it helps others discover the work and motivates further development.
+
+---
+
 ## 👤 Maintainer
 
 **Rosen Vladimirov** — Partner, [BL Consulting](https://bl-consulting.net)
@@ -632,7 +661,5 @@ Odoo Silver Partner · OCA `l10n-bulgaria` maintainer · 10+ years of Odoo speci
 ---
 
 **Made with ❤️ and ☕ in Bulgaria** 🇧🇬
-
-_If this project helps you, consider [starring it on GitHub](https://github.com/rosenvladimirov/odoo-claude-mcp) ⭐_
 
 </div>
