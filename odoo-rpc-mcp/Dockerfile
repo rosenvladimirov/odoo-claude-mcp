@@ -33,6 +33,7 @@ COPY --chmod=644 admin_filestore.py .
 COPY --chmod=644 metrics.py .
 COPY --chmod=644 bg_validators.py .
 COPY --chmod=644 pdf_sanitizer.py .
+COPY --chmod=644 tenant_router.py .
 
 RUN useradd -m -s /bin/bash mcp && \
     mkdir -p /data && chown mcp:mcp /data

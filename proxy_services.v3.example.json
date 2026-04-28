@@ -1,6 +1,4 @@
 {
-  "_comment": "v3 transparent proxy targets — remote v2.x MCP instances. Tools auto-prefixed with key (e.g. 'main__odoo_search_read'). Bearer tokens loaded from env via ${VAR} expansion. See V3_TRANSPARENT_PROXY.md.",
-
   "main": {
     "transport": "http",
     "url": "https://mcp.odoo-shell.space/mcp",
