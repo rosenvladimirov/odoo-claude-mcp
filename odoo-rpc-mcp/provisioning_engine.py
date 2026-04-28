@@ -1,20 +1,31 @@
 """
 v3 client provisioning engine.
 
-Orchestrates: generate client_id + secrets → substitute compose template →
-[DRY_RUN: write to /tmp/preview/<slug>.yml | REAL: POST към Portainer API] →
-wait for /health → generate AES-encrypted ZIP с tenant config.
+Orchestrates (Phase 2):
+  1. Generate client_id + secrets
+  2. Substitute compose template
+  3. [DRY_RUN: write to /tmp/preview | REAL: Portainer create stack]
+  4. [Cloudflare: create CNAME for mcp-<id>.<domain> + add tunnel ingress]
+  5. Wait for /health (exponential backoff up to timeout)
+  6. Generate AES-encrypted ZIP с tenant config
+  7. Persist multi-stage state for idempotent resume
 
 Idempotency by tenant_slug — state persisted в /data/provisioning_state.jsonl.
-Re-running with same slug returns cached ZIP (re-encrypted с new password).
+Re-running with same slug returns cached ZIP (re-encrypted с new password)
+or resumes from the last completed stage.
 
 Env vars:
-  MCP_PROVISIONING_DRY_RUN=1            — skip real Portainer call (default 1 in alpha)
+  MCP_PROVISIONING_DRY_RUN=1            — skip real Portainer/Cloudflare (default 1 in alpha)
   MCP_PORTAINER_URL=https://...         — Portainer instance URL
   MCP_PORTAINER_API_KEY=...             — Portainer API key (X-API-Key)
   MCP_PORTAINER_ENDPOINT_ID=2           — Docker endpoint id
   MCP_PROVISIONING_STATE_FILE=/data/provisioning_state.jsonl
   MCP_DOMAIN_BASE=mcpworks.net          — used for mcp-<id>.<domain>
+  MCP_CLOUDFLARE_API_TOKEN=...          — Cloudflare API token (Phase 2)
+  MCP_CLOUDFLARE_ACCOUNT_ID=...
+  MCP_CLOUDFLARE_ZONE_ID=...
+  MCP_CLOUDFLARE_TUNNEL_ID=...
+  MCP_PROVISIONING_HEALTH_TIMEOUT=180   — health probe timeout seconds (default 180)
 """
 
 from __future__ import annotations
@@ -150,23 +161,33 @@ def portainer_create_stack(stack_name: str, compose: str) -> dict:
         return {"error": "portainer_request_failed", "detail": str(e)}
 
 
-# ─── Health probe ──────────────────────────────────────────────────────────
+# ─── Health probe (exponential backoff) ────────────────────────────────────
 
-def wait_for_health(url: str, timeout: int = 60) -> dict:
-    """Poll /health until 200 or timeout."""
+def wait_for_health(url: str, timeout: int | None = None) -> dict:
+    """Poll /health until 200 or timeout. Backoff 2s → 4s → 8s → cap 16s."""
+    if timeout is None:
+        timeout = int(os.environ.get("MCP_PROVISIONING_HEALTH_TIMEOUT", "180"))
     import httpx
     started = time.time()
     last_err = ""
+    delay = 2
+    attempts = 0
     while time.time() - started < timeout:
         try:
             r = httpx.get(url, timeout=5.0)
             if r.status_code == 200:
-                return {"healthy": True, "elapsed_s": int(time.time() - started)}
+                return {"healthy": True,
+                        "elapsed_s": int(time.time() - started),
+                        "attempts": attempts + 1}
             last_err = f"HTTP {r.status_code}"
         except Exception as e:
             last_err = str(e)
-        time.sleep(2)
-    return {"healthy": False, "elapsed_s": int(time.time() - started),
+        attempts += 1
+        time.sleep(delay)
+        delay = min(delay * 2, 16)
+    return {"healthy": False,
+            "elapsed_s": int(time.time() - started),
+            "attempts": attempts,
             "last_error": last_err}
 
 
@@ -257,27 +278,63 @@ def provision(slug_hint: str, password: str, email: str,
         preview_dir.mkdir(parents=True, exist_ok=True)
         (preview_dir / f"{slug}-{client_id}.yml").write_text(compose, encoding="utf-8")
         portainer_info = {"dry_run": True, "preview_path": str(preview_dir)}
+        cf_info: dict = {"dry_run": True}
+        health: dict = {"skipped": True, "dry_run": True}
     else:
+        # 1) Portainer create stack
         portainer_info = portainer_create_stack(
             stack_name=f"mcp-client-{client_id}", compose=compose)
         if portainer_info.get("error"):
             _state_append({
                 "slug": slug, "client_id": client_id, "status": "failed",
-                "error": portainer_info, "ts": int(time.time()),
-                "email": email,
+                "stage": "portainer", "error": portainer_info,
+                "ts": int(time.time()), "email": email,
             })
             return {"error": "stack_create_failed", "detail": portainer_info}
 
-    # Health probe (skipped in dry-run).
-    health: dict = {"skipped": True}
-    if not DRY_RUN:
-        health = wait_for_health(f"{mcp_url}/health", timeout=60)
+        # 2) Cloudflare DNS + tunnel ingress
+        try:
+            import cloudflare_provisioning as cf
+            cf_info = {}
+            if cf.is_configured():
+                hostname = f"mcp-{client_id}.{DOMAIN_BASE}"
+                # CNAME first.
+                dns = cf.create_dns_record(hostname)
+                cf_info["dns"] = dns
+                # Tunnel ingress (internal target = container by name on backend network).
+                ingress = cf.add_tunnel_ingress(
+                    hostname, f"http://odoo-rpc-mcp-{client_id}:8094")
+                cf_info["ingress"] = ingress
+                if not (dns.get("ok") and ingress.get("ok")):
+                    _state_append({
+                        "slug": slug, "client_id": client_id, "status": "failed",
+                        "stage": "cloudflare", "cloudflare": cf_info,
+                        "portainer": portainer_info,
+                        "ts": int(time.time()), "email": email,
+                    })
+                    return {"error": "cloudflare_failed", "detail": cf_info}
+            else:
+                cf_info = {"skipped": True,
+                           "reason": "MCP_CLOUDFLARE_* env not configured"}
+                logger.warning(
+                    "Cloudflare not configured — skipping DNS/tunnel for %s. "
+                    "DNS must be configured manually before /health probe.",
+                    client_id,
+                )
+        except ImportError as e:
+            cf_info = {"skipped": True, "reason": f"cloudflare module: {e}"}
+
+        # 3) /health probe (long timeout — DNS may take ~30s to propagate).
+        health = wait_for_health(f"{mcp_url}/health")
         if not health.get("healthy"):
             _state_append({
                 "slug": slug, "client_id": client_id, "status": "unhealthy",
-                "health": health, "ts": int(time.time()), "email": email,
+                "stage": "health", "health": health, "portainer": portainer_info,
+                "cloudflare": cf_info,
+                "ts": int(time.time()), "email": email,
             })
-            return {"error": "stack_unhealthy", "detail": health}
+            return {"error": "stack_unhealthy", "detail": health,
+                    "cloudflare": cf_info}
 
     # Generate ZIP.
     zip_info = generate_config_zip(
@@ -288,6 +345,7 @@ def provision(slug_hint: str, password: str, email: str,
         "slug": slug,
         "client_id": client_id,
         "status": "completed",
+        "stage": "completed",
         "mcp_url": mcp_url,
         "secret_token": secret_token,    # stored для idempotent re-encryption
         "admin_token": admin_token,
@@ -295,6 +353,8 @@ def provision(slug_hint: str, password: str, email: str,
         "ts": int(time.time()),
         "elapsed_s": int(time.time() - started),
         "dry_run": DRY_RUN,
+        "cloudflare": cf_info,
+        "health": health,
     })
 
     return {
@@ -305,6 +365,7 @@ def provision(slug_hint: str, password: str, email: str,
         "elapsed_s": int(time.time() - started),
         "dry_run": DRY_RUN,
         "portainer": portainer_info,
+        "cloudflare": cf_info,
         "health": health,
         **zip_info,
     }

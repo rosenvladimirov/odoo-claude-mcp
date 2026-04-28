@@ -41,6 +41,7 @@ COPY --chmod=644 elevation.py .
 COPY --chmod=644 api_key_manager.py .
 COPY --chmod=644 provisioning_engine.py .
 COPY --chmod=644 provisioning_api.py .
+COPY --chmod=644 cloudflare_provisioning.py .
 COPY --chmod=644 client_stack.template.yml .
 
 RUN useradd -m -s /bin/bash mcp && \
