@@ -53,6 +53,7 @@ DRY_RUN = os.environ.get("MCP_PROVISIONING_DRY_RUN", "1") == "1"
 # ─── Helpers ───────────────────────────────────────────────────────────────
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+_VAT_RE = re.compile(r"[^a-z0-9]+")
 
 
 def normalize_slug(value: str) -> str:
@@ -64,8 +65,30 @@ def normalize_slug(value: str) -> str:
     return s[:32] or "client"
 
 
-def generate_client_id() -> str:
-    """9-digit numeric id (matches existing convention 115572378 etc)."""
+def normalize_vat(vat: str) -> str:
+    """VAT number → DNS/container-safe id.
+
+    'BG 123 456 789' → 'bg123456789'
+    'BG123456789'    → 'bg123456789'
+    Country prefix preserved to disambiguate cross-border identical numbers.
+    Returns "" if input has no usable alphanumerics.
+    """
+    s = (vat or "").strip().lower()
+    s = _VAT_RE.sub("", s)
+    return s[:32]
+
+
+def generate_client_id(vat: str = "") -> str:
+    """Derive client_id from normalized VAT, or random 9-digit fallback.
+
+    VAT-derived ids are preferred — they're stable across re-provisioning
+    and immediately tell the operator which tenant a stack belongs to.
+    Random fallback only when VAT is empty / invalid.
+    """
+    if vat:
+        normalized = normalize_vat(vat)
+        if normalized and len(normalized) >= 4:
+            return normalized
     return str(secrets.randbelow(900_000_000) + 100_000_000)
 
 
@@ -237,13 +260,28 @@ def generate_config_zip(client_id: str, mcp_url: str, secret_token: str,
 # ─── Top-level orchestration ───────────────────────────────────────────────
 
 def provision(slug_hint: str, password: str, email: str,
-              anthropic_key: str = "") -> dict:
-    """Orchestrate: validate → idempotency check → render → deploy → ZIP."""
+              anthropic_key: str = "", vat: str = "") -> dict:
+    """Orchestrate: validate → idempotency check → render → deploy → ZIP.
+
+    `vat` (e.g. "BG123456789") is preferred over `slug_hint`. When provided
+    it becomes both the tenant slug AND the client_id, so:
+      stack_name   = mcp-client-bg123456789
+      container    = odoo-rpc-mcp-bg123456789
+      hostname     = mcp-bg123456789.mcpworks.net
+    """
     if not password or len(password) < 8:
         return {"error": "password must be at least 8 characters"}
-    slug = normalize_slug(slug_hint or email)
-    if not slug:
-        return {"error": "invalid slug/email"}
+
+    # VAT-first slug derivation. Falls back to slug_hint/email for legacy callers.
+    if vat:
+        slug = normalize_vat(vat)
+        if not slug or len(slug) < 4:
+            return {"error": "invalid VAT — must contain ≥4 alphanumeric chars",
+                    "vat_received": vat}
+    else:
+        slug = normalize_slug(slug_hint or email)
+        if not slug:
+            return {"error": "invalid slug/email — provide vat or slug"}
 
     started = time.time()
 
@@ -263,8 +301,8 @@ def provision(slug_hint: str, password: str, email: str,
             **zip_info,
         }
 
-    # New provisioning.
-    client_id = generate_client_id()
+    # New provisioning. client_id = VAT-derived (consistent с slug) or random.
+    client_id = generate_client_id(vat=vat)
     secret_token = generate_secret_token()
     admin_token = generate_secret_token()
     mcp_url = f"https://mcp-{client_id}.{DOMAIN_BASE}"

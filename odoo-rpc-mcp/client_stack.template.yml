@@ -1,6 +1,7 @@
 ## v3-managed client MCP stack template.
 ## Substituted by provisioning_engine.py with the following placeholders:
-##   {{CLIENT_ID}}            — numeric tenant id (e.g. "208609891")
+##   {{CLIENT_ID}}            — VAT-normalized tenant id (e.g. "bg123456789")
+##                              or random 9-digit fallback if VAT missing
 ##   {{MCP_SECRET_TOKEN}}     — generated 32-byte url-safe token
 ##   {{MCP_OAUTH_CLIENT_ID}}  — usually "odoo-rpc-mcp-{{CLIENT_ID}}"
 ##   {{MCP_ADMIN_TOKEN}}      — generated 32-byte url-safe token (admin scope)
@@ -16,6 +17,29 @@ networks:
     external: true
 
 services:
+  claude-terminal-{{CLIENT_ID}}:
+    container_name: claude-terminal-{{CLIENT_ID}}
+    image: vladimirovrosen/odoo-claude-terminal:latest
+    restart: unless-stopped
+    networks:
+      - cloudflare-net
+      - odoo-claude-mcp_backend
+      - odoo-claude-mcp_default
+    environment:
+      - CLAUDE_THEME=github
+      - MCP_URL=http://odoo-rpc-mcp-{{CLIENT_ID}}:8094
+      - ANTHROPIC_API_KEY={{ANTHROPIC_API_KEY}}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    dns:
+      - "8.8.8.8"
+      - "1.1.1.1"
+    stdin_open: true
+    tty: true
+    volumes:
+      - odoo-rpc-mcp-{{CLIENT_ID}}_claude-user-data-{{CLIENT_ID}}:/data/users
+      - odoo-rpc-mcp-{{CLIENT_ID}}_mcp-data-{{CLIENT_ID}}:/shared-data
+
   odoo-rpc-mcp-{{CLIENT_ID}}:
     container_name: odoo-rpc-mcp-{{CLIENT_ID}}
     image: vladimirovrosen/odoo-rpc-mcp:latest
@@ -73,4 +97,5 @@ services:
 volumes:
   odoo-rpc-mcp-{{CLIENT_ID}}_mcp-data-{{CLIENT_ID}}:
   odoo-rpc-mcp-{{CLIENT_ID}}_mcp-repos-{{CLIENT_ID}}:
+  odoo-rpc-mcp-{{CLIENT_ID}}_claude-user-data-{{CLIENT_ID}}:
   mcp-backup-{{CLIENT_ID}}:

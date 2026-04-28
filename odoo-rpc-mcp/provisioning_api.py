@@ -68,6 +68,7 @@ async def _provision_handler(req: Request):
     password = (body.get("password") or "").strip()
     email = (body.get("email") or "").strip().lower()
     slug = (body.get("slug") or body.get("tenant_slug") or "").strip()
+    vat = (body.get("vat") or body.get("company_vat") or "").strip()
     anthropic_key = (body.get("anthropic_api_key") or "").strip()
 
     if not api_key:
@@ -91,7 +92,7 @@ async def _provision_handler(req: Request):
         return _err("password must be at least 8 characters", 400)
 
     _audit("STARTED", ip=client_ip, key_id=key_record["key_id"],
-           email=email, slug_hint=slug)
+           email=email, slug_hint=slug, vat=vat)
 
     # Run engine (sync — provisioning может to take 30-60s).
     try:
@@ -100,6 +101,7 @@ async def _provision_handler(req: Request):
             password=password,
             email=email,
             anthropic_key=anthropic_key,
+            vat=vat,
         )
     except Exception as e:
         logger.exception("provisioning engine crashed")
