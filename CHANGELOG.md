@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.25.1] — 2026-04-28 — `mcp_terminal_get_config` real env names + DNS auto-derive
+
+### Fixed
+- `mcp_terminal_get_config` previously read non-existent env vars
+  (`MCP_CLIENT_TOKEN`, `MCP_API_KEY`, `MCP_PUBLIC_URL`) and returned blank
+  ZIP keys for all tenants. Now reads the actual deployment env names set
+  by `provisioning_engine` / compose templates:
+  - `claude_mcp_token` ← `MCP_SECRET_TOKEN`
+  - `claude_mcp_api_key` ← `MCP_ADMIN_TOKEN`
+  - `claude_mcp_client_id` ← `MCP_OAUTH_CLIENT_ID`
+- Auto-derive `claude_mcp_url` and `claude_terminal_url` from Cloudflare DNS
+  pattern (`mcp-{slug}.mcpworks.net` / `terminal-{slug}.mcpworks.net`) when
+  no env override is set. Slug taken from `MCP_OAUTH_CLIENT_ID` (stripped
+  of the `odoo-rpc-mcp-` prefix), matching the deployed hostname pattern.
+
+### Changed
+- `include_anthropic` default flipped from `True` → `False`. Anthropic API
+  key is privacy-sensitive and per-user — onboarding ZIPs should not
+  auto-embed it. Callers who need it must opt in explicitly.
+
 ## [2.24.0] — 2026-04-24 — Final 2.x polish: admin managers, HTTP auth, metrics scaffold
 
 This is the **final minor on the 2.x track** before production freeze.
