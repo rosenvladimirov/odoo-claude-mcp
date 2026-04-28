@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "2.25.1"
+__version__ = "2.25.2"
 
 import asyncio
 import json
@@ -8553,60 +8553,55 @@ def _execute_tool(name: str, args: dict) -> Any:
         if oauth_client_id.startswith("odoo-rpc-mcp-"):
             dns_slug = oauth_client_id[len("odoo-rpc-mcp-"):]
 
+        # Helper — distinguish "env var unset" (None) from "explicitly empty"
+        # ("") so an explicit `CLAUDE_TERMINAL_URL=` in the compose file is
+        # honored as "no terminal" rather than silently auto-derived.
+        def _env_chain(*names, default=""):
+            for n in names:
+                if n in _os.environ:
+                    return _os.environ[n]
+            return default
+
         # Build config payload — read from REAL deployment env names first
         # (MCP_SECRET_TOKEN, MCP_ADMIN_TOKEN, MCP_OAUTH_CLIENT_ID), with
         # legacy per-tenant overrides as escape hatches and Cloudflare DNS
         # pattern as auto-derived default.
         cfg = {
             "company": {
-                "claude_mcp_url": (
-                    _os.environ.get(f"MCP_PUBLIC_URL_{slug}")
-                    or _os.environ.get("MCP_PUBLIC_URL")
-                    or (f"https://mcp-{dns_slug}.mcpworks.net" if dns_slug else "https://mcp.odoo-shell.space")
+                "claude_mcp_url": _env_chain(
+                    f"MCP_PUBLIC_URL_{slug}",
+                    "MCP_PUBLIC_URL",
+                    default=(f"https://mcp-{dns_slug}.mcpworks.net" if dns_slug else "https://mcp.odoo-shell.space"),
                 ),
-                "claude_mcp_token": (
-                    _os.environ.get(f"MCP_CLIENT_TOKEN_{slug}")
-                    or _os.environ.get("MCP_SECRET_TOKEN")
-                    or _os.environ.get("MCP_CLIENT_TOKEN", "")
+                "claude_mcp_token": _env_chain(
+                    f"MCP_CLIENT_TOKEN_{slug}", "MCP_SECRET_TOKEN", "MCP_CLIENT_TOKEN",
                 ),
-                "claude_mcp_client_id": (
-                    oauth_client_id
-                    or tenant_code
+                "claude_mcp_client_id": (oauth_client_id or tenant_code),
+                "claude_mcp_api_key": _env_chain(
+                    f"MCP_API_KEY_{slug}", "MCP_ADMIN_TOKEN", "MCP_API_KEY",
                 ),
-                "claude_mcp_api_key": (
-                    _os.environ.get(f"MCP_API_KEY_{slug}")
-                    or _os.environ.get("MCP_ADMIN_TOKEN")
-                    or _os.environ.get("MCP_API_KEY", "")
+                "claude_qdrant_url": _env_chain(
+                    f"QDRANT_URL_{slug}", "QDRANT_URL",
                 ),
-                "claude_qdrant_url": (
-                    _os.environ.get(f"QDRANT_URL_{slug}")
-                    or _os.environ.get("QDRANT_URL", "")
-                ),
-                "claude_qdrant_api_key": (
-                    _os.environ.get(f"QDRANT_API_KEY_{slug}")
-                    or _os.environ.get("QDRANT_API_KEY", "")
+                "claude_qdrant_api_key": _env_chain(
+                    f"QDRANT_API_KEY_{slug}", "QDRANT_API_KEY",
                 ),
                 "claude_qdrant_collection_prefix": tenant_code,
-                "claude_ollama_url": (
-                    _os.environ.get(f"OLLAMA_URL_{slug}")
-                    or _os.environ.get("OLLAMA_URL", "")
+                "claude_ollama_url": _env_chain(
+                    f"OLLAMA_URL_{slug}", "OLLAMA_URL",
                 ),
-                "claude_ollama_model": (
-                    _os.environ.get(f"OLLAMA_MODEL_{slug}")
-                    or _os.environ.get("OLLAMA_MODEL", "llama3.2:latest")
+                "claude_ollama_model": _env_chain(
+                    f"OLLAMA_MODEL_{slug}", "OLLAMA_MODEL", default="llama3.2:latest",
                 ),
-                "claude_embedding_provider": (
-                    _os.environ.get(f"EMBEDDING_PROVIDER_{slug}")
-                    or _os.environ.get("EMBEDDING_PROVIDER", "ollama")
+                "claude_embedding_provider": _env_chain(
+                    f"EMBEDDING_PROVIDER_{slug}", "EMBEDDING_PROVIDER", default="ollama",
                 ),
-                "claude_embedding_api_key": (
-                    _os.environ.get(f"EMBEDDING_API_KEY_{slug}")
-                    or _os.environ.get("EMBEDDING_API_KEY", "")
+                "claude_embedding_api_key": _env_chain(
+                    f"EMBEDDING_API_KEY_{slug}", "EMBEDDING_API_KEY",
                 ),
-                "claude_terminal_url": (
-                    _os.environ.get(f"CLAUDE_TERMINAL_URL_{slug}")
-                    or _os.environ.get("CLAUDE_TERMINAL_URL")
-                    or (f"https://terminal-{dns_slug}.mcpworks.net" if dns_slug else "")
+                "claude_terminal_url": _env_chain(
+                    f"CLAUDE_TERMINAL_URL_{slug}", "CLAUDE_TERMINAL_URL",
+                    default=(f"https://terminal-{dns_slug}.mcpworks.net" if dns_slug else ""),
                 ),
             },
             "users": {},

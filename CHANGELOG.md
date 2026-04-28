@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.25.2] — 2026-04-28 — `mcp_terminal_get_config` empty env != unset
+
+### Fixed
+- `_env_chain()` helper distinguishes "env var unset" (`None`) from "explicitly
+  empty" (`""`). Previously a `CLAUDE_TERMINAL_URL=` line in compose was
+  silently ignored — falsy empty string fell through `or` chain to the
+  `mcp-{slug}.mcpworks.net` auto-derive default. Now an explicit empty
+  override is respected as "no terminal", matching operator intent.
+- All env-var resolutions (`MCP_PUBLIC_URL`, `MCP_SECRET_TOKEN`, `MCP_ADMIN_TOKEN`,
+  `QDRANT_URL`, `OLLAMA_URL`, etc.) routed through the new helper for consistent
+  semantics.
+
+### Verified live
+- All 7 stacks (6 poligroup tenants + Konex VPN-internal) on v2.25.2,
+  including Konex with custom `konex-tiva.space` MCP_PUBLIC_URL override.
+
 ## [2.25.1] — 2026-04-28 — `mcp_terminal_get_config` real env names + DNS auto-derive
 
 ### Fixed
