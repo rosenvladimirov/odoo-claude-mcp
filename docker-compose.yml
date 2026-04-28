@@ -1,14 +1,14 @@
-# Claude Code terminal + Odoo RPC MCP
+# Odoo MCP v3 — developer/integrator gateway (transparent proxy към remote v2.x)
 #
 # Usage:
-#   cp .env.example .env && nano .env
+#   cp .env.example .env && nano .env       # set MCP_TOKEN_<id> bootstrap tokens
+#   cp proxy_services.v3.example.json proxy_services.json
 #   docker compose up -d --build
-#   Open http://localhost:8080
 #
 # Networks:
-#   public   — exposed to host/Cloudflare (odoo-rpc-mcp, claude-terminal)
-#   backend  — internal only, no host access (portainer, github, teams)
-#   odoo-rpc-mcp bridges both networks (proxy gateway)
+#   public   — exposed to host/Cloudflare (odoo-rpc-mcp gateway)
+#   backend  — internal only, no host access (oca, ee, filesystem, backup, qdrant, ollama)
+#   odoo-rpc-mcp bridges both networks + cloudflare-net (proxy gateway)
 
 networks:
   public:
@@ -19,41 +19,10 @@ networks:
     external: true
 
 services:
-  # ─── Claude Code web terminal (ttyd + Claude CLI, multi-user) ──
-  claude-terminal:
-    build:
-      context: ./claude-terminal
-      dockerfile: Dockerfile
-    container_name: claude-terminal
-    restart: unless-stopped
-    networks:
-      - public
-      - backend
-    environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - CLAUDE_THEME=${CLAUDE_THEME:-github}
-      - MCP_URL=http://odoo-rpc-mcp:8084
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ports:
-      - "${TERMINAL_PORT:-8080}:8080"
-    volumes:
-      # Per-user persistent data (isolated HOME dirs)
-      - claude-user-data:/data/users
-      # Templates (read-only, copied to user dir on first login)
-      - ./claude-terminal/settings.json:/home/claude/template/settings.json:ro
-      - ./claude-terminal/.mcp.json:/home/claude/template/.mcp.json:ro
-      - ./claude-terminal/CLAUDE.md:/home/claude/template/CLAUDE.md:ro
-      # Shared data (connections, memory, sessions)
-      - ${HOME}/odoo-claude-connections:/shared-data
-    tty: true
-    stdin_open: true
-    labels:
-      - "com.blconsulting.service=claude-terminal"
-
-  # ─── Odoo RPC MCP (XML-RPC / JSON-RPC) ───────────────────
+  # ─── Odoo RPC MCP v3 — transparent proxy gateway ──────────
   # PUBLIC GATEWAY — bridges public + backend networks
-  # Proxies portainer/github/teams via proxy_call/proxy_discover
+  # Proxies remote v2.x stacks + local oca/ee/filesystem/backup
+  # See proxy_services.v3.example.json + V3_TRANSPARENT_PROXY.md
   odoo-rpc-mcp:
     build:
       context: ./odoo-rpc-mcp
@@ -126,32 +95,8 @@ services:
     labels:
       - "com.blconsulting.service=mcp-portainer"
 
-  # ─── Microsoft Teams MCP (Teams messaging) ─────────────────
-  # OPTIONAL — only starts with `--profile teams` or `--profile full`
-  # Requires TEAMS_APP_ID + TEAMS_APP_PASSWORD + tenant config in .env
-  teams-mcp:
-    profiles: ["teams", "full"]
-    build:
-      context: ./teams-mcp
-      dockerfile: Dockerfile
-    container_name: mcp-teams
-    restart: unless-stopped
-    networks:
-      - backend
-    environment:
-      - MCP_PORT=8087
-      - TEAMS_APP_ID=${TEAMS_APP_ID:-}
-      - TEAMS_APP_PASSWORD=${TEAMS_APP_PASSWORD:-}
-      - TEAMS_APP_TYPE=${TEAMS_APP_TYPE:-SingleTenant}
-      - TEAMS_APP_TENANT_ID=${TEAMS_APP_TENANT_ID:-}
-      - TEAM_ID=${TEAMS_TEAM_ID:-}
-      - TEAMS_CHANNEL_ID=${TEAMS_CHANNEL_ID:-}
-      - MCP_LOGLEVEL=${TEAMS_LOG_LEVEL:-ERROR}
-    labels:
-      - "com.blconsulting.service=mcp-teams"
-
   # ─── GitHub MCP (GitHub repo management) ───────────────────
-  # BACKEND ONLY — accessible via proxy or claude-terminal
+  # BACKEND ONLY — accessible via gateway proxy
   github-mcp:
     image: ghcr.io/github/github-mcp-server:latest
     container_name: mcp-github
@@ -279,8 +224,6 @@ services:
       - "com.blconsulting.service=mcp-backup"
 
 volumes:
-  claude-user-data:
-    driver: local
   mcp-repos:
     driver: local
   mcp-backups:

@@ -1,20 +1,15 @@
-# Production pin overlay for 2.24.0.
+# Production pin overlay for v3.x.
 #
-# This file is a REFERENCE for the image tags deployed to poligroup main + 5
-# client stacks. The real compose files live on the server under:
-#   /opt/odoo-claude-mcp/docker-compose.yml
-#   /opt/mcp-clients/<ID>/docker-compose.yml
+# v3 is the developer/integrator gateway — proxies to remote v2.x stacks +
+# co-hosted oca/ee/filesystem/backup. Claude-terminal removed (v2 only).
 #
 # Use: `docker compose -f docker-compose.yml -f docker-compose.prod-pins.yml up -d`
 # Or copy the `image:` lines into the production compose when deploying.
 #
-# Pinning rationale (2.24.0 freeze, 2026-04-24):
-#  * Every MCP sub-plugin uses a semver 1.0.0 (or higher) tag so rebuilds
-#    are reproducible.
-#  * External images (github-mcp, claude-terminal) are pinned to the digest
-#    captured at freeze-time.
-#  * `:latest` is kept only as an emergency-downgrade pointer; production
-#    should run the semver.
+# Pinning rationale (v3 floor):
+#  * odoo-rpc-mcp inherits 2.24.0 base for now; v3 release will retag.
+#  * Every MCP sub-plugin uses a semver tag so rebuilds are reproducible.
+#  * External github-mcp pinned to the digest captured 2026-04-24.
 
 services:
   odoo-rpc-mcp:
@@ -42,8 +37,5 @@ services:
     image: vladimirovrosen/odoo-ee-mcp:1.0.0
 
   # External images — pinned by digest captured 2026-04-24.
-  claude-terminal:
-    image: vladimirovrosen/odoo-claude-terminal@sha256:047e865131e1afd86eb79e75c4ff0751db4662ed13b366092317bedd71984e7a
-
   github-mcp:
     image: ghcr.io/github/github-mcp-server@sha256:26db03408086a99cf1916348dcc4f9614206658f9082a8060dc7c81ad787f4ba

@@ -1,0 +1,45 @@
+{
+  "_comment": "v3 transparent proxy targets — remote v2.x MCP instances. Tools auto-prefixed with key (e.g. 'main__odoo_search_read'). Bearer tokens loaded from env via ${VAR} expansion. See V3_TRANSPARENT_PROXY.md.",
+
+  "main": {
+    "transport": "http",
+    "url": "https://mcp.odoo-shell.space/mcp",
+    "headers": { "Authorization": "Bearer ${MCP_TOKEN_MAIN}" }
+  },
+
+  "c115353345": {
+    "transport": "http",
+    "url": "https://mcp-115353345.mcpworks.net/mcp",
+    "headers": { "Authorization": "Bearer ${MCP_TOKEN_115353345}" }
+  },
+
+  "c115572378": {
+    "transport": "http",
+    "url": "https://mcp-115572378.mcpworks.net/mcp",
+    "headers": { "Authorization": "Bearer ${MCP_TOKEN_115572378}" }
+  },
+
+  "stage_tiva": {
+    "transport": "http",
+    "url": "https://mcp-130931201.mcpworks.net/mcp",
+    "headers": { "Authorization": "Bearer ${MCP_TOKEN_130931201}" }
+  },
+
+  "c203709674": {
+    "transport": "http",
+    "url": "https://mcp-203709674.mcpworks.net/mcp",
+    "headers": { "Authorization": "Bearer ${MCP_TOKEN_203709674}" }
+  },
+
+  "c207327615": {
+    "transport": "http",
+    "url": "https://mcp-207327615.mcpworks.net/mcp",
+    "headers": { "Authorization": "Bearer ${MCP_TOKEN_207327615}" }
+  },
+
+  "teolino": {
+    "transport": "http",
+    "url": "https://mcp-208609891.mcpworks.net/mcp",
+    "headers": { "Authorization": "Bearer ${MCP_TOKEN_208609891}" }
+  }
+}

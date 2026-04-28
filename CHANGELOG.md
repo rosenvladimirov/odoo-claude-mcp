@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0-alpha] — 2026-04-28 — v3 kickoff: developer/integrator gateway
+
+v3 е изцяло dev/integration ориентиран. Целта: един MCP endpoint, който
+прозрачно проксира към всички runtime v2.x stacks, плюс по-късно собствени
+client install/lifecycle tools и skills bundle.
+
+### Added
+- `proxy_services.v3.example.json` — 7 remote v2.x targets (main + 6 client стака)
+  с `${MCP_TOKEN_*}` env expansion. Exploits existing `transport: http` +
+  `streamablehttp_client` proxy без нов код.
+- `V3_TRANSPARENT_PROXY.md` — bootstrap workflow (SSH еднократно за tokens)
+  + tenant config през `mcp_terminal_get_config` proxy chain.
+
+### Removed (v3 scope cleanup)
+- `claude-terminal/` — v3 е dev tool, не end-user web терминал.
+- `teams-mcp/` — Microsoft Teams не е integration scope.
+- Свързани services/volumes от `docker-compose.yml` + `docker-compose.prod-pins.yml`.
+
+### Notes
+- `odoo-rpc-mcp/server.py` references към `l10n_bg_claude_terminal` (Odoo
+  модул, който генерира config bundle) са запазени — ползват се от
+  `mcp_terminal_get_config`.
+- Validated на 2026-04-28: 7 remote endpoints (122 + 6×151 = 1028 prefixed
+  tools). Active tenant routing предстои за token cost reduction.
+
 ## [2.24.0] — 2026-04-24 — Final 2.x polish: admin managers, HTTP auth, metrics scaffold
 
 This is the **final minor on the 2.x track** before production freeze.
