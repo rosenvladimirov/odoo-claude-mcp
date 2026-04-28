@@ -42,6 +42,7 @@ from telegram_service import TelegramServiceManager
 import ai_usage_log
 import ai_vision_service
 import ai_invoice_engine
+import tenant_router
 
 # ─── Feature flags ───────────────────────────────────────────
 # MCP_DISABLE_FEATURES=ssh,portainer,github,google,telegram,memory,ai,public,website,web,proxy
@@ -181,6 +182,14 @@ def _discover_proxy_tools(only_services: set | None = None):
                 pass
 
     logger.info(f"Proxy: total {len(PROXY_TOOLS)} proxied tools registered")
+
+
+def _discover_one(name: str) -> list[Tool]:
+    """Targeted discovery for tenant_router. Side-effect: populates PROXY_TOOLS
+    so that call_tool() can dispatch this tenant's tools. Returns the slice of
+    PROXY_TOOL_DEFS that belong to this tenant (already prefixed)."""
+    _discover_proxy_tools(only_services={name})
+    return [t for t in PROXY_TOOL_DEFS if t.name.startswith(f"{name}__")]
 
 
 def _proxy_call_isolated(service: str, tool_name: str, arguments: dict) -> Any:
@@ -4196,9 +4205,17 @@ async def list_tools() -> list[Tool]:
     # Apply feature flags
     if DISABLED_FEATURES:
         base = [t for t in base if not _tool_disabled(t.name)]
-    # Append dynamically discovered proxy tools (already filtered at discovery time)
-    if PROXY_TOOL_DEFS:
-        base.extend(PROXY_TOOL_DEFS)
+    # v3 tenant routing: always-on tenants (e.g. main__*) are exposed
+    # unconditionally; the active tenant's tools are added via tenant_router;
+    # other tenants stay hidden until promoted via tenant_use.
+    always_on = tenant_router.always_on()
+    if PROXY_TOOL_DEFS and always_on:
+        for t in PROXY_TOOL_DEFS:
+            prefix = t.name.split("__", 1)[0] if "__" in t.name else None
+            if prefix in always_on:
+                base.append(t)
+    base.extend(tenant_router.active_tools())
+    base.extend(tenant_router.get_control_tools())
     return base
 
 
@@ -4216,6 +4233,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 pass
             return [TextContent(type="text", text=json.dumps(
                 {"error": f"Tool '{name}' is disabled on this server (MCP_DISABLE_FEATURES)."}))]
+        # ── v3 tenant routing control plane ──
+        if name in tenant_router.CONTROL_TOOL_NAMES:
+            result = await tenant_router.handle(name, arguments, mcp_server)
+            text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+            try:
+                import metrics
+                metrics.observe_tool_call(name, _m_status)
+            except Exception:
+                pass
+            return [TextContent(type="text", text=text)]
         # ── Handle proxied tools directly in async context ──
         if name in PROXY_TOOLS:
             info = PROXY_TOOLS[name]
@@ -8813,8 +8840,12 @@ def create_app():
 
     async def handle_sse(scope, receive, send):
         async with sse_transport.connect_sse(scope, receive, send) as streams:
+            from mcp.server.lowlevel import NotificationOptions
             await mcp_server.run(
-                streams[0], streams[1], mcp_server.create_initialization_options()
+                streams[0], streams[1],
+                mcp_server.create_initialization_options(
+                    NotificationOptions(tools_changed=True)
+                ),
             )
 
     async def handle_messages(scope, receive, send):
@@ -10005,25 +10036,44 @@ def create_app():
 if __name__ == "__main__":
     app = create_app()
 
-    # ── Discover proxy tools from sub-services (with retry) ──
+    # ── v3: wire tenant_router with discovery callbacks ──
+    tenant_router.wire(
+        get_proxy_services=_get_proxy_services,
+        discover_one=_discover_one,
+    )
+
+    # ── Discover proxy tools — eager only for always-on tenants (main).
+    # Other tenants are discovered lazily on first tenant_use(name).
     import threading
     def _startup_discover():
-        """Discover proxy tools with retries until all services respond."""
+        """Discover always-on proxy tools with retries."""
         import time
         services = _get_proxy_services()
-        missing = set(services.keys())
+        eager = tenant_router.always_on() & set(services.keys())
+        if not eager:
+            logger.info("Proxy startup: no always-on tenants configured (TENANT_ALWAYS_ON empty)")
+            return
+        missing = set(eager)
         for attempt in range(6):
             time.sleep(5 + attempt * 2)
             try:
                 _discover_proxy_tools(only_services=missing)
                 found = {v["service"] for v in PROXY_TOOLS.values()}
-                missing = set(services.keys()) - found
+                missing = eager - found
                 logger.info(f"Proxy attempt {attempt+1}: {len(PROXY_TOOLS)} tools, missing={missing or 'none'}")
                 if not missing:
                     break
             except Exception as e:
                 logger.warning(f"Proxy attempt {attempt+1}: {e}")
-        logger.info(f"Proxy startup done: {len(PROXY_TOOLS)} total proxied tools")
+        # Restore active tenant from disk (warm its cache too)
+        active = tenant_router.get_active_tenant()
+        if active and active not in eager:
+            try:
+                tenant_router.refresh_tenant_tools(active)
+                logger.info(f"v3: restored active tenant '{active}' from disk")
+            except Exception as e:
+                logger.warning(f"v3: failed to restore active tenant '{active}': {e}")
+        logger.info(f"Proxy startup done: {len(PROXY_TOOLS)} eager tools (always-on={sorted(eager)})")
 
     threading.Thread(target=_startup_discover, daemon=True).start()
 

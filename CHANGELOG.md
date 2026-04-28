@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — v3 active tenant routing
+- New module `odoo-rpc-mcp/tenant_router.py`:
+  - 4 control plane tools: `tenant_list`, `tenant_use`, `tenant_current`,
+    `tenant_refresh`
+  - Persistent state: `/data/active_tenant.json` (atomic replace + 0o600,
+    same pattern as `admin_ui.py` ADMIN_CONFIG)
+  - Lazy per-tenant discovery cache + health snapshot
+  - Always-on tenants via `TENANT_ALWAYS_ON` env (default: `main`)
+- `server.py` integration:
+  - `_discover_one(name)` helper for targeted discovery
+  - `list_tools()` filters proxy tools to `always_on` + `active_tenant` +
+    control plane (~278 tools instead of 1028)
+  - `call_tool()` dispatches `tenant_*` tools before generic proxy
+  - `_startup_discover()` eager only for always-on; restores active tenant
+    from disk on boot
+  - SSE init declares `NotificationOptions(tools_changed=True)` for
+    explicit capability advertisement
+- `tenant_use(name)` emits `notifications/tools/list_changed` so Claude Code
+  re-fetches the tool list without reconnect
+- 9/9 standalone unit tests pass for `tenant_router` in isolation
+
 ## [3.0.0-alpha] — 2026-04-28 — v3 kickoff: developer/integrator gateway
 
 v3 е изцяло dev/integration ориентиран. Целта: един MCP endpoint, който
