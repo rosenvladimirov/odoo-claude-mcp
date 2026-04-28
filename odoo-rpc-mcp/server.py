@@ -46,6 +46,8 @@ import tenant_router
 import sql_executor
 import tool_security
 import elevation
+import api_key_manager
+import provisioning_api
 
 # ─── Feature flags ───────────────────────────────────────────
 # MCP_DISABLE_FEATURES=ssh,portainer,github,google,telegram,memory,ai,public,website,web,proxy
@@ -4220,6 +4222,9 @@ async def list_tools() -> list[Tool]:
     base.extend(tenant_router.active_tools())
     base.extend(tenant_router.get_control_tools())
     base.append(sql_executor.get_tool_def())
+    # v3 provisioning admin tools (issue/revoke/list API keys).
+    # These are tagged via tool_security so USER role hides them.
+    base.extend(api_key_manager.get_admin_tools())
     # v3 security: filter destructive tools for USER role (admin/legacy keep all).
     base = tool_security.filter_tools_for_role(base, elevated=elevation.is_elevated())
     # Always expose elevation control tools (so USER can request elevation).
@@ -4241,6 +4246,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 pass
             return [TextContent(type="text", text=json.dumps(
                 {"error": f"Tool '{name}' is disabled on this server (MCP_DISABLE_FEATURES)."}))]
+        # ── v3 provisioning admin tools (admin/elevated only) ──
+        if name in api_key_manager.ADMIN_TOOL_NAMES:
+            result = api_key_manager.handle(name, arguments)
+            text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+            try:
+                import metrics
+                metrics.observe_tool_call(name, _m_status)
+            except Exception:
+                pass
+            return [TextContent(type="text", text=text)]
         # ── v3 elevation control plane (always available, no role gate) ──
         if name in elevation.CONTROL_TOOL_NAMES:
             result = elevation.handle(name, arguments)
@@ -8978,6 +8993,15 @@ def create_app():
         _admin_app = None
         logger.error(f"admin_ui init failed: {e}")
 
+    # ── v3 self-service provisioning HTTP endpoint ─────────────
+    try:
+        from starlette.applications import Starlette
+        _provisioning_app = Starlette(routes=provisioning_api.get_routes())
+        logger.info("v3 provisioning API mounted at /provision")
+    except Exception as e:
+        _provisioning_app = None
+        logger.warning(f"provisioning API init failed: {e}")
+
     async def app(scope, receive, send):
         if scope["type"] == "lifespan":
             async with session_manager.run():
@@ -8995,6 +9019,11 @@ def create_app():
         # ── Admin portal dispatch (hidden) ─────────────────────
         if _admin_app and scope["type"] == "http" and admin_ui.path_matches(path):
             await _admin_app(scope, receive, send)
+            return
+
+        # ── v3 self-service provisioning ───────────────────────
+        if _provisioning_app and scope["type"] == "http" and path == "/provision":
+            await _provisioning_app(scope, receive, send)
             return
 
         # ── Debug: log all headers on /mcp requests ────────────────

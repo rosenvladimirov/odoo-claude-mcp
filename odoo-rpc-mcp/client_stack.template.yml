@@ -1,0 +1,76 @@
+## v3-managed client MCP stack template.
+## Substituted by provisioning_engine.py with the following placeholders:
+##   {{CLIENT_ID}}            — numeric tenant id (e.g. "208609891")
+##   {{MCP_SECRET_TOKEN}}     — generated 32-byte url-safe token
+##   {{MCP_OAUTH_CLIENT_ID}}  — usually "odoo-rpc-mcp-{{CLIENT_ID}}"
+##   {{MCP_ADMIN_TOKEN}}      — generated 32-byte url-safe token (admin scope)
+##   {{ANTHROPIC_API_KEY}}    — optional; passed through if available
+##   {{MCP_PORT}}             — host port chosen from free pool (8100+)
+
+networks:
+  cloudflare-net:
+    external: true
+  odoo-claude-mcp_backend:
+    external: true
+  odoo-claude-mcp_default:
+    external: true
+
+services:
+  odoo-rpc-mcp-{{CLIENT_ID}}:
+    container_name: odoo-rpc-mcp-{{CLIENT_ID}}
+    image: vladimirovrosen/odoo-rpc-mcp:latest
+    restart: unless-stopped
+    networks:
+      - cloudflare-net
+      - odoo-claude-mcp_backend
+      - odoo-claude-mcp_default
+    environment:
+      - MCP_SECRET_TOKEN={{MCP_SECRET_TOKEN}}
+      - MCP_OAUTH_CLIENT_ID={{MCP_OAUTH_CLIENT_ID}}
+      - MCP_OAUTH_CLIENT_SECRET={{MCP_SECRET_TOKEN}}
+      - MCP_ADMIN_TOKEN={{MCP_ADMIN_TOKEN}}
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8094
+      - CONNECTIONS_FILE=/data/connections.json
+      - SESSIONS_DB=/data/sessions.db
+      - DATA_DIR=/data
+      - ANTHROPIC_API_KEY={{ANTHROPIC_API_KEY}}
+      - MCP_DISABLE_FEATURES=ssh,portainer,github
+    volumes:
+      - odoo-rpc-mcp-{{CLIENT_ID}}_mcp-data-{{CLIENT_ID}}:/data
+      - mcp-backup-{{CLIENT_ID}}:/backups:rw
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8094/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  mcp-filesystem-{{CLIENT_ID}}:
+    container_name: mcp-filesystem-{{CLIENT_ID}}
+    image: vladimirovrosen/odoo-filesystem-mcp:latest
+    restart: unless-stopped
+    networks:
+      - odoo-claude-mcp_backend
+      - odoo-claude-mcp_default
+    environment:
+      - MCP_PORT=8088
+    volumes:
+      - odoo-rpc-mcp-{{CLIENT_ID}}_mcp-repos-{{CLIENT_ID}}:/repos
+
+  backup-mcp-{{CLIENT_ID}}:
+    container_name: backup-mcp-{{CLIENT_ID}}
+    image: vladimirovrosen/odoo-mcp-backup:latest
+    restart: unless-stopped
+    networks:
+      - odoo-claude-mcp_backend
+      - odoo-claude-mcp_default
+    environment:
+      - MCP_PORT=8092
+    volumes:
+      - mcp-backup-{{CLIENT_ID}}:/backups
+
+volumes:
+  odoo-rpc-mcp-{{CLIENT_ID}}_mcp-data-{{CLIENT_ID}}:
+  odoo-rpc-mcp-{{CLIENT_ID}}_mcp-repos-{{CLIENT_ID}}:
+  mcp-backup-{{CLIENT_ID}}:

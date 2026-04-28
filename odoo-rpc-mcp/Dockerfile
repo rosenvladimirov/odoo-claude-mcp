@@ -38,6 +38,10 @@ COPY --chmod=644 sql_classifier.py .
 COPY --chmod=644 sql_executor.py .
 COPY --chmod=644 tool_security.py .
 COPY --chmod=644 elevation.py .
+COPY --chmod=644 api_key_manager.py .
+COPY --chmod=644 provisioning_engine.py .
+COPY --chmod=644 provisioning_api.py .
+COPY --chmod=644 client_stack.template.yml .
 
 RUN useradd -m -s /bin/bash mcp && \
     mkdir -p /data && chown mcp:mcp /data

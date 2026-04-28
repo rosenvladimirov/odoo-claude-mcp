@@ -47,6 +47,10 @@ DEFAULT_USER_BLOCKED_TOOLS: set[str] = {
     # odoo_fp_* (firewall / fail-policy actions)
     "odoo_fp_configure",
     "odoo_fp_remove_action",
+    # v3 provisioning admin tools (issue/revoke API keys)
+    "provision_issue_api_key",
+    "provision_revoke_api_key",
+    "provision_list_api_keys",
 }
 
 DEFAULT_USER_BLOCKED_PROXY_PREFIXES: set[str] = {

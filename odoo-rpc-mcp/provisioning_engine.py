@@ -1,0 +1,310 @@
+"""
+v3 client provisioning engine.
+
+Orchestrates: generate client_id + secrets → substitute compose template →
+[DRY_RUN: write to /tmp/preview/<slug>.yml | REAL: POST към Portainer API] →
+wait for /health → generate AES-encrypted ZIP с tenant config.
+
+Idempotency by tenant_slug — state persisted в /data/provisioning_state.jsonl.
+Re-running with same slug returns cached ZIP (re-encrypted с new password).
+
+Env vars:
+  MCP_PROVISIONING_DRY_RUN=1            — skip real Portainer call (default 1 in alpha)
+  MCP_PORTAINER_URL=https://...         — Portainer instance URL
+  MCP_PORTAINER_API_KEY=...             — Portainer API key (X-API-Key)
+  MCP_PORTAINER_ENDPOINT_ID=2           — Docker endpoint id
+  MCP_PROVISIONING_STATE_FILE=/data/provisioning_state.jsonl
+  MCP_DOMAIN_BASE=mcpworks.net          — used for mcp-<id>.<domain>
+"""
+
+from __future__ import annotations
+
+import base64
+import io
+import json
+import logging
+import os
+import re
+import secrets
+import time
+from datetime import datetime
+from pathlib import Path
+
+logger = logging.getLogger("provisioning_engine")
+
+TEMPLATE_FILE = Path(__file__).parent / "client_stack.template.yml"
+STATE_FILE = Path(os.environ.get(
+    "MCP_PROVISIONING_STATE_FILE", "/data/provisioning_state.jsonl"))
+DOMAIN_BASE = os.environ.get("MCP_DOMAIN_BASE", "mcpworks.net").strip()
+DRY_RUN = os.environ.get("MCP_PROVISIONING_DRY_RUN", "1") == "1"
+
+
+# ─── Helpers ───────────────────────────────────────────────────────────────
+
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def normalize_slug(value: str) -> str:
+    """email/domain → safe slug (alphanumeric + hyphen, max 32 chars)."""
+    s = (value or "").strip().lower()
+    if "@" in s:
+        s = s.split("@", 1)[0]
+    s = _SLUG_RE.sub("-", s).strip("-")
+    return s[:32] or "client"
+
+
+def generate_client_id() -> str:
+    """9-digit numeric id (matches existing convention 115572378 etc)."""
+    return str(secrets.randbelow(900_000_000) + 100_000_000)
+
+
+def generate_secret_token(nbytes: int = 32) -> str:
+    return secrets.token_urlsafe(nbytes)
+
+
+# ─── Template rendering ────────────────────────────────────────────────────
+
+def render_compose(client_id: str, secret_token: str,
+                   admin_token: str, anthropic_key: str = "",
+                   mcp_port: int = 8094) -> str:
+    if not TEMPLATE_FILE.is_file():
+        raise FileNotFoundError(f"template not found: {TEMPLATE_FILE}")
+    raw = TEMPLATE_FILE.read_text(encoding="utf-8")
+    return (
+        raw
+        .replace("{{CLIENT_ID}}", client_id)
+        .replace("{{MCP_SECRET_TOKEN}}", secret_token)
+        .replace("{{MCP_OAUTH_CLIENT_ID}}", f"odoo-rpc-mcp-{client_id}")
+        .replace("{{MCP_ADMIN_TOKEN}}", admin_token)
+        .replace("{{ANTHROPIC_API_KEY}}", anthropic_key)
+        .replace("{{MCP_PORT}}", str(mcp_port))
+    )
+
+
+# ─── State persistence (idempotent retry) ─────────────────────────────────
+
+def _state_replay() -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    if not STATE_FILE.is_file():
+        return out
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                slug = rec.get("slug")
+                if slug:
+                    out[slug] = rec
+    except OSError:
+        pass
+    return out
+
+
+def _state_append(record: dict) -> None:
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(STATE_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    try:
+        os.chmod(STATE_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def get_state(slug: str) -> dict | None:
+    return _state_replay().get(slug)
+
+
+# ─── Portainer call (real mode) ────────────────────────────────────────────
+
+def portainer_create_stack(stack_name: str, compose: str) -> dict:
+    """POST stack to Portainer. Returns stack info on success."""
+    portainer_url = os.environ.get("MCP_PORTAINER_URL", "").rstrip("/")
+    api_key = os.environ.get("MCP_PORTAINER_API_KEY", "")
+    endpoint_id = os.environ.get("MCP_PORTAINER_ENDPOINT_ID", "2")
+    if not portainer_url or not api_key:
+        return {"error": "MCP_PORTAINER_URL or MCP_PORTAINER_API_KEY not set"}
+
+    import httpx
+    payload = {
+        "name": stack_name,
+        "stackFileContent": compose,
+        "env": [],
+    }
+    url = f"{portainer_url}/api/stacks/create/standalone/string"
+    params = {"endpointId": endpoint_id}
+    headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
+    try:
+        resp = httpx.post(url, params=params, json=payload,
+                          headers=headers, timeout=60.0)
+        if resp.status_code >= 300:
+            return {"error": "portainer_create_failed",
+                    "status": resp.status_code,
+                    "body": resp.text[:500]}
+        return {"ok": True, "stack": resp.json()}
+    except Exception as e:
+        return {"error": "portainer_request_failed", "detail": str(e)}
+
+
+# ─── Health probe ──────────────────────────────────────────────────────────
+
+def wait_for_health(url: str, timeout: int = 60) -> dict:
+    """Poll /health until 200 or timeout."""
+    import httpx
+    started = time.time()
+    last_err = ""
+    while time.time() - started < timeout:
+        try:
+            r = httpx.get(url, timeout=5.0)
+            if r.status_code == 200:
+                return {"healthy": True, "elapsed_s": int(time.time() - started)}
+            last_err = f"HTTP {r.status_code}"
+        except Exception as e:
+            last_err = str(e)
+        time.sleep(2)
+    return {"healthy": False, "elapsed_s": int(time.time() - started),
+            "last_error": last_err}
+
+
+# ─── ZIP generation (mirrors mcp_terminal_get_config format) ──────────────
+
+def generate_config_zip(client_id: str, mcp_url: str, secret_token: str,
+                        anthropic_key: str, password: str) -> dict:
+    """Build a pyzipper AES-encrypted ZIP с tenant config; returns base64."""
+    import pyzipper
+
+    config = {
+        "company": {
+            "claude_mcp_url": mcp_url,
+            "claude_mcp_token": secret_token,
+            "claude_mcp_client_id": f"odoo-rpc-mcp-{client_id}",
+            "claude_mcp_api_key": "",
+            "claude_qdrant_url": "",
+            "claude_qdrant_api_key": "",
+            "claude_qdrant_collection_prefix": client_id,
+            "claude_ollama_url": "",
+            "claude_ollama_model": "llama3.2:latest",
+            "claude_embedding_provider": "ollama",
+            "claude_embedding_api_key": "",
+            "claude_terminal_url": "",
+        },
+        "users": {
+            "claude_api_key": anthropic_key or "",
+        },
+    }
+    payload = json.dumps(config, ensure_ascii=False, indent=2).encode("utf-8")
+
+    buf = io.BytesIO()
+    with pyzipper.AESZipFile(buf, "w",
+                             compression=pyzipper.ZIP_DEFLATED,
+                             encryption=pyzipper.WZ_AES) as zf:
+        zf.setpassword(password.encode("utf-8"))
+        zf.writestr("config.json", payload)
+
+    raw = buf.getvalue()
+    return {
+        "zip_base64": base64.b64encode(raw).decode("ascii"),
+        "zip_size_bytes": len(raw),
+        "zip_filename": f"claude_terminal_config_{client_id}.zip",
+    }
+
+
+# ─── Top-level orchestration ───────────────────────────────────────────────
+
+def provision(slug_hint: str, password: str, email: str,
+              anthropic_key: str = "") -> dict:
+    """Orchestrate: validate → idempotency check → render → deploy → ZIP."""
+    if not password or len(password) < 8:
+        return {"error": "password must be at least 8 characters"}
+    slug = normalize_slug(slug_hint or email)
+    if not slug:
+        return {"error": "invalid slug/email"}
+
+    started = time.time()
+
+    # Idempotency: if already provisioned, regen ZIP with new password.
+    existing = get_state(slug)
+    if existing and existing.get("status") == "completed":
+        logger.info("provisioning: idempotent hit for slug=%s", slug)
+        zip_info = generate_config_zip(
+            existing["client_id"], existing["mcp_url"],
+            existing["secret_token"], anthropic_key, password,
+        )
+        return {
+            "status": "already_provisioned",
+            "slug": slug,
+            "client_id": existing["client_id"],
+            "mcp_url": existing["mcp_url"],
+            **zip_info,
+        }
+
+    # New provisioning.
+    client_id = generate_client_id()
+    secret_token = generate_secret_token()
+    admin_token = generate_secret_token()
+    mcp_url = f"https://mcp-{client_id}.{DOMAIN_BASE}"
+
+    compose = render_compose(client_id, secret_token, admin_token,
+                             anthropic_key=anthropic_key)
+
+    if DRY_RUN:
+        # Save preview to /tmp for inspection.
+        preview_dir = Path("/tmp/v3-provisioning-preview")
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        (preview_dir / f"{slug}-{client_id}.yml").write_text(compose, encoding="utf-8")
+        portainer_info = {"dry_run": True, "preview_path": str(preview_dir)}
+    else:
+        portainer_info = portainer_create_stack(
+            stack_name=f"mcp-client-{client_id}", compose=compose)
+        if portainer_info.get("error"):
+            _state_append({
+                "slug": slug, "client_id": client_id, "status": "failed",
+                "error": portainer_info, "ts": int(time.time()),
+                "email": email,
+            })
+            return {"error": "stack_create_failed", "detail": portainer_info}
+
+    # Health probe (skipped in dry-run).
+    health: dict = {"skipped": True}
+    if not DRY_RUN:
+        health = wait_for_health(f"{mcp_url}/health", timeout=60)
+        if not health.get("healthy"):
+            _state_append({
+                "slug": slug, "client_id": client_id, "status": "unhealthy",
+                "health": health, "ts": int(time.time()), "email": email,
+            })
+            return {"error": "stack_unhealthy", "detail": health}
+
+    # Generate ZIP.
+    zip_info = generate_config_zip(
+        client_id, mcp_url, secret_token, anthropic_key, password)
+
+    # Persist state.
+    _state_append({
+        "slug": slug,
+        "client_id": client_id,
+        "status": "completed",
+        "mcp_url": mcp_url,
+        "secret_token": secret_token,    # stored для idempotent re-encryption
+        "admin_token": admin_token,
+        "email": email,
+        "ts": int(time.time()),
+        "elapsed_s": int(time.time() - started),
+        "dry_run": DRY_RUN,
+    })
+
+    return {
+        "status": "completed",
+        "slug": slug,
+        "client_id": client_id,
+        "mcp_url": mcp_url,
+        "elapsed_s": int(time.time() - started),
+        "dry_run": DRY_RUN,
+        "portainer": portainer_info,
+        "health": health,
+        **zip_info,
+    }
