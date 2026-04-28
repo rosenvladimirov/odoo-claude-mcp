@@ -43,6 +43,7 @@ import ai_usage_log
 import ai_vision_service
 import ai_invoice_engine
 import tenant_router
+import sql_executor
 
 # ─── Feature flags ───────────────────────────────────────────
 # MCP_DISABLE_FEATURES=ssh,portainer,github,google,telegram,memory,ai,public,website,web,proxy
@@ -4216,6 +4217,7 @@ async def list_tools() -> list[Tool]:
                 base.append(t)
     base.extend(tenant_router.active_tools())
     base.extend(tenant_router.get_control_tools())
+    base.append(sql_executor.get_tool_def())
     return base
 
 
@@ -4240,6 +4242,25 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             try:
                 import metrics
                 metrics.observe_tool_call(name, _m_status)
+            except Exception:
+                pass
+            return [TextContent(type="text", text=text)]
+        # ── v3 SQL executor (classifier-gated) ──
+        if name == "odoo_sql_query":
+            role = os.environ.get("MCP_ROLE", "admin").strip().lower() or "admin"
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                sql_executor.execute,
+                arguments.get("query", ""),
+                arguments.get("params", []) or [],
+                arguments.get("fetch", True),
+                arguments.get("timeout", 30),
+                role,
+            )
+            text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+            try:
+                import metrics
+                metrics.observe_tool_call(name, "denied" if result.get("error") == "denied" else _m_status)
             except Exception:
                 pass
             return [TextContent(type="text", text=text)]

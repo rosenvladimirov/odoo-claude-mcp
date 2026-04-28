@@ -28,3 +28,12 @@ APScheduler>=3.10.0
 # tool to package config keys with a temp password for the Odoo Setup Wizard.
 # stdlib zipfile can only READ encrypted zips, not WRITE. pyzipper extends it.
 pyzipper>=0.3.6
+# 3.0.0: sqlglot — pure-Python SQL AST parser (PostgreSQL dialect). Used by
+# sql_classifier to classify odoo_sql_query operations and detect writes
+# touching protected tables (res_users, res_company, ir_module_module, etc).
+sqlglot>=25.0.0
+# 3.0.0: psycopg[binary] — direct PostgreSQL driver for odoo_sql_query.
+# Reads connection from MCP_PG_HOST/PORT/DB/USER/PASSWORD env vars.
+# v2 USER deployments SHOULD configure a read-only PG user as defense-in-depth
+# (the classifier blocks writes on protected tables, but a RO user is structural).
+psycopg[binary]>=3.1.0
