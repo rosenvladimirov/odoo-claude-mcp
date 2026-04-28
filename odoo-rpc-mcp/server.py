@@ -44,6 +44,8 @@ import ai_vision_service
 import ai_invoice_engine
 import tenant_router
 import sql_executor
+import tool_security
+import elevation
 
 # ─── Feature flags ───────────────────────────────────────────
 # MCP_DISABLE_FEATURES=ssh,portainer,github,google,telegram,memory,ai,public,website,web,proxy
@@ -4218,6 +4220,10 @@ async def list_tools() -> list[Tool]:
     base.extend(tenant_router.active_tools())
     base.extend(tenant_router.get_control_tools())
     base.append(sql_executor.get_tool_def())
+    # v3 security: filter destructive tools for USER role (admin/legacy keep all).
+    base = tool_security.filter_tools_for_role(base, elevated=elevation.is_elevated())
+    # Always expose elevation control tools (so USER can request elevation).
+    base.extend(elevation.get_control_tools())
     return base
 
 
@@ -4235,6 +4241,28 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 pass
             return [TextContent(type="text", text=json.dumps(
                 {"error": f"Tool '{name}' is disabled on this server (MCP_DISABLE_FEATURES)."}))]
+        # ── v3 elevation control plane (always available, no role gate) ──
+        if name in elevation.CONTROL_TOOL_NAMES:
+            result = elevation.handle(name, arguments)
+            text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+            try:
+                import metrics
+                metrics.observe_tool_call(name, _m_status)
+            except Exception:
+                pass
+            return [TextContent(type="text", text=text)]
+        # ── v3 security gate (USER role: refuse destructive + protected unlink) ──
+        allowed, sec_info = tool_security.check_call(
+            name, arguments, elevated=elevation.is_elevated()
+        )
+        if not allowed:
+            try:
+                import metrics
+                metrics.observe_tool_call(name, "denied")
+            except Exception:
+                pass
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "denied", **sec_info}, ensure_ascii=False, indent=2))]
         # ── v3 tenant routing control plane ──
         if name in tenant_router.CONTROL_TOOL_NAMES:
             result = await tenant_router.handle(name, arguments, mcp_server)

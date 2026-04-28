@@ -36,6 +36,8 @@ COPY --chmod=644 pdf_sanitizer.py .
 COPY --chmod=644 tenant_router.py .
 COPY --chmod=644 sql_classifier.py .
 COPY --chmod=644 sql_executor.py .
+COPY --chmod=644 tool_security.py .
+COPY --chmod=644 elevation.py .
 
 RUN useradd -m -s /bin/bash mcp && \
     mkdir -p /data && chown mcp:mcp /data

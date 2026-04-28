@@ -1,0 +1,204 @@
+"""
+v3 role-based tool security (USER / ADMIN / LEGACY).
+
+Deny-by-list approach: explicit destructive tools are blocked for USER role.
+Everything else passes (safer default than try-to-list-everything; the
+classifier on odoo_sql_query already covers the SQL surface).
+
+For odoo_unlink / odoo_execute(method=unlink) the gate inspects the model
+argument and refuses if it's in PROTECTED_FROM_UNLINK.
+
+Roles:
+  admin  — no checks (v3 default)
+  user   — destructive set blocked, protected_unlink blocked, elevation respected
+  legacy — no checks (v2.x backwards compat for soft rollout window)
+
+Override sets via env (CSV):
+  MCP_USER_BLOCKED_TOOLS=...
+  MCP_USER_BLOCKED_PROXY_PREFIXES=portainer__,filesystem__write
+  MCP_PROTECTED_MODELS=res.company,res.users,...
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+
+logger = logging.getLogger("tool_security")
+
+DEFAULT_USER_BLOCKED_TOOLS: set[str] = {
+    # system-exec
+    "ssh_execute",
+    "web_request",
+    "odoo_web_call", "odoo_web_request", "odoo_web_export",
+    "odoo_web_login", "odoo_web_logout", "odoo_web_read", "odoo_web_report",
+    "git_remote",
+    # bulk-destructive (custom Odoo helpers that wrap raw SQL)
+    "odoo_stock_initial_delete",
+    "odoo_stock_initial_import",
+    "odoo_stock_initial_opening_journal",
+    "odoo_stock_close_unaccounted_value",
+    "odoo_stock_mo_delete_draft",
+    "odoo_stock_product_flip_to_storable",
+    # proxy meta-control
+    "proxy_call",
+    "proxy_discover",
+    "proxy_refresh",
+    # odoo_fp_* (firewall / fail-policy actions)
+    "odoo_fp_configure",
+    "odoo_fp_remove_action",
+}
+
+DEFAULT_USER_BLOCKED_PROXY_PREFIXES: set[str] = {
+    "portainer__",
+    "filesystem__write_file",
+    "filesystem__create_directory",
+    "filesystem__delete",
+    "filesystem__move",
+    "oca__push",
+    "ee__push",
+    "backup__delete",
+    "backup__archive_delete",
+    "contabo__delete",
+    "cloudflare__edit",
+    "cloudflare__create",
+    "cloudflare__delete",
+}
+
+DEFAULT_PROTECTED_FROM_UNLINK: set[str] = {
+    # Tier 1 — system meta
+    "res.company", "res.users", "res.groups",
+    "ir.module.module", "ir.model", "ir.model.fields",
+    "ir.model.access", "ir.cron", "ir.config_parameter",
+    "ir.sequence", "ir.actions.server",
+    # Tier 2 — accounting core
+    "account.account", "account.journal",
+    "account.tax", "account.tax.group", "account.fiscal.position",
+    # Tier 3 — BG localization
+    "l10n_bg.tax.office",
+}
+
+UNLINK_TOOLS: set[str] = {"odoo_unlink"}
+
+
+def _csv(env_name: str, default: set[str]) -> set[str]:
+    raw = os.environ.get(env_name, "").strip()
+    if not raw:
+        return set(default)
+    return {t.strip() for t in raw.split(",") if t.strip()}
+
+
+USER_BLOCKED_TOOLS = _csv("MCP_USER_BLOCKED_TOOLS", DEFAULT_USER_BLOCKED_TOOLS)
+USER_BLOCKED_PROXY_PREFIXES = _csv(
+    "MCP_USER_BLOCKED_PROXY_PREFIXES", DEFAULT_USER_BLOCKED_PROXY_PREFIXES
+)
+PROTECTED_FROM_UNLINK = _csv("MCP_PROTECTED_MODELS", DEFAULT_PROTECTED_FROM_UNLINK)
+
+
+def get_role() -> str:
+    """Returns 'admin' | 'user' | 'legacy'. Default depends on VERSION marker."""
+    return os.environ.get("MCP_ROLE", "admin").strip().lower() or "admin"
+
+
+def is_destructive(tool_name: str) -> bool:
+    """True if the tool requires admin/elevated rights for USER role."""
+    if tool_name in USER_BLOCKED_TOOLS:
+        return True
+    for prefix in USER_BLOCKED_PROXY_PREFIXES:
+        if tool_name.startswith(prefix):
+            return True
+    return False
+
+
+def is_protected_unlink(tool_name: str, arguments: dict | None) -> tuple[bool, str]:
+    """For unlink tools, check if the target model is protected.
+
+    Returns (is_blocked, model_name_or_empty)."""
+    if tool_name not in UNLINK_TOOLS:
+        # odoo_execute with method='unlink' is a separate concern handled
+        # by the caller via is_protected_execute().
+        return False, ""
+    args = arguments or {}
+    model = (args.get("model") or "").strip().lower()
+    if model and model in PROTECTED_FROM_UNLINK:
+        return True, model
+    return False, model
+
+
+def is_protected_execute(tool_name: str, arguments: dict | None) -> tuple[bool, str, str]:
+    """For odoo_execute, refuse 'unlink' on protected models.
+
+    Returns (is_blocked, model_name, method_name)."""
+    if tool_name != "odoo_execute":
+        return False, "", ""
+    args = arguments or {}
+    method = (args.get("method") or "").strip().lower()
+    model = (args.get("model") or "").strip().lower()
+    if method == "unlink" and model in PROTECTED_FROM_UNLINK:
+        return True, model, method
+    return False, model, method
+
+
+def check_call(tool_name: str, arguments: dict | None,
+               role: str | None = None,
+               elevated: bool = False) -> tuple[bool, dict]:
+    """Central gate. Returns (allowed, info_dict).
+
+    info_dict on denial includes: reason, model (if applicable), hint.
+    """
+    if role is None:
+        role = get_role()
+
+    # admin and legacy bypass everything.
+    if role in ("admin", "legacy"):
+        return True, {"role": role, "bypass": True}
+
+    # user role with active elevation: bypass.
+    if elevated:
+        return True, {"role": role, "elevated": True}
+
+    # Refuse destructive tools.
+    if is_destructive(tool_name):
+        return False, {
+            "reason": "destructive_tool",
+            "tool": tool_name,
+            "role": role,
+            "hint": (
+                "Tool requires admin rights. Use mcp_elevate(reason='...', "
+                "ttl=300) to gain temporary elevation."
+            ),
+        }
+
+    # Refuse protected unlink.
+    blocked, model = is_protected_unlink(tool_name, arguments)
+    if blocked:
+        return False, {
+            "reason": "protected_unlink",
+            "tool": tool_name,
+            "model": model,
+            "role": role,
+            "hint": f"Cannot unlink protected model '{model}'. Use mcp_elevate first.",
+        }
+
+    blocked, model, method = is_protected_execute(tool_name, arguments)
+    if blocked:
+        return False, {
+            "reason": "protected_execute_unlink",
+            "tool": tool_name,
+            "model": model,
+            "method": method,
+            "role": role,
+            "hint": f"Cannot execute unlink on protected model '{model}'. Use mcp_elevate first.",
+        }
+
+    return True, {"role": role}
+
+
+def filter_tools_for_role(tools: list, role: str | None = None,
+                          elevated: bool = False) -> list:
+    """Strip destructive tools from a Tool list for USER role."""
+    if role is None:
+        role = get_role()
+    if role in ("admin", "legacy") or elevated:
+        return tools
+    return [t for t in tools if not is_destructive(t.name)]
