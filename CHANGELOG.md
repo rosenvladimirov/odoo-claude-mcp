@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — v3 self-service tear-down (`POST /destroy`)
+- New HTTP endpoint `POST /destroy` (companion to `/provision`) — invoked
+  by lifecycle automation (try-shop expiry cron, manual ops) to remove
+  a previously provisioned stack. Same per-tenant API key auth as
+  `/provision` (`api_key_manager.verify`).
+- New `provisioning_engine.destroy(slug_hint=..., vat=..., client_id=...)`
+  orchestrator:
+  - Resolves the target via VAT (preferred) → client_id → slug_hint.
+  - Best-effort Cloudflare cleanup: `remove_tunnel_ingress(hostname)`
+    first (so a stranded host can't 502), then `delete_dns_record`
+    using the `record_id` saved in state.
+  - Portainer DELETE by `stack_id` (saved in state since this release)
+    or by name lookup as fallback for legacy state records.
+  - Idempotent — second call returns `{"status": "already_destroyed"}`.
+  - `not_found` for unknown slug returns HTTP 404; engine crashes 500.
+  - DRY_RUN preserved for safe testing — same env-var contract as
+    `provision()`.
+- `provision()` now persists `portainer_stack_id` in the state record
+  so future `/destroy` calls don't need a stack-list lookup.
+- Audit log records emitted as `DESTROY_STARTED / DESTROY_COMPLETED /
+  DESTROY_NOOP / DESTROY_FAILED / DESTROY_REJECTED` in
+  `/data/provisioning_audit.log`.
+- ASGI dispatch widened from `path == "/provision"` to
+  `path in ("/provision", "/destroy")`.
+- Smoke-tested DRY_RUN: provision → destroy → second-destroy
+  (idempotent) → ghost-destroy (404). All four scenarios pass.
+
 ### Fixed — `mcp_terminal_get_config` (port от v2.25.1+v2.25.2)
 - Tool четеше несъществуващи env vars (`MCP_CLIENT_TOKEN`, `MCP_API_KEY`,
   `MCP_PUBLIC_URL`) → ZIP-овете излизаха с празни ключове за всеки tenant.

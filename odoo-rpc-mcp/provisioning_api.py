@@ -137,6 +137,88 @@ async def _provision_handler(req: Request):
     return JSONResponse(safe_result, status_code=200)
 
 
+async def _destroy_handler(req: Request):
+    """POST /destroy — tear down a previously provisioned stack.
+
+    Body: {api_key, slug | vat | client_id}. Same auth surface as
+    /provision (per-tenant API key issued via `provision_issue_api_key`).
+    Idempotent: destroying an already-destroyed stack is a no-op.
+    """
+    started = time.time()
+    client_ip = req.client.host if req.client else "?"
+
+    try:
+        body = await req.json()
+    except Exception:
+        _audit("DESTROY_REJECTED", reason="bad_json", ip=client_ip)
+        return _err("invalid_json", 400)
+
+    api_key = (body.get("api_key") or "").strip()
+    slug = (body.get("slug") or body.get("tenant_slug") or "").strip()
+    vat = (body.get("vat") or body.get("company_vat") or "").strip()
+    client_id = (body.get("client_id") or "").strip()
+
+    if not api_key:
+        _audit("DESTROY_REJECTED", reason="missing_api_key", ip=client_ip)
+        return _err("api_key required", 401)
+
+    key_record = api_key_manager.verify(api_key)
+    if not key_record:
+        _audit("DESTROY_REJECTED", reason="invalid_api_key", ip=client_ip,
+               key_prefix=api_key[:12] + "…")
+        return _err("invalid_api_key", 401)
+
+    if not (slug or vat or client_id):
+        _audit("DESTROY_REJECTED", reason="no_identifier", ip=client_ip,
+               key_id=key_record["key_id"])
+        return _err("provide slug, vat, or client_id", 400)
+
+    _audit("DESTROY_STARTED", ip=client_ip, key_id=key_record["key_id"],
+           slug=slug, vat=vat, client_id=client_id)
+
+    try:
+        result = provisioning_engine.destroy(
+            slug_hint=slug, vat=vat, client_id=client_id,
+        )
+    except Exception as e:
+        logger.exception("destroy engine crashed")
+        _audit("DESTROY_FAILED", ip=client_ip, key_id=key_record["key_id"],
+               slug=slug, error=str(e))
+        return _err("engine_crashed", 500, detail=str(e))
+
+    elapsed_ms = int((time.time() - started) * 1000)
+
+    if "error" in result:
+        _audit("DESTROY_FAILED", ip=client_ip, key_id=key_record["key_id"],
+               slug=result.get("slug", slug), error=result["error"],
+               elapsed_ms=elapsed_ms)
+        # not_found should be 404, others 500.
+        status = 404 if result["error"] == "not_found" else 500
+        return _err(result["error"], status,
+                    **{k: v for k, v in result.items() if k != "error"})
+
+    _audit(
+        "DESTROY_COMPLETED" if result.get("status") == "destroyed" else "DESTROY_NOOP",
+        ip=client_ip, key_id=key_record["key_id"],
+        slug=result["slug"], client_id=result.get("client_id"),
+        elapsed_ms=elapsed_ms,
+        dry_run=result.get("dry_run", False),
+    )
+
+    safe_result = {
+        "status": result["status"],
+        "slug": result["slug"],
+        "client_id": result.get("client_id"),
+        "hostname": result.get("hostname"),
+        "elapsed_s": result.get("elapsed_s"),
+        "dry_run": result.get("dry_run", False),
+    }
+    return JSONResponse(safe_result, status_code=200)
+
+
 def get_routes() -> list:
     """Returns Starlette routes to mount at server top-level (not under /admin)."""
-    return [Route("/provision", _provision_handler, methods=["POST"])]
+    return [
+        Route("/provision", _provision_handler, methods=["POST"]),
+        Route("/destroy", _destroy_handler, methods=["POST"]),
+    ]

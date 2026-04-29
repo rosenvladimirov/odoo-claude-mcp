@@ -184,6 +184,55 @@ def portainer_create_stack(stack_name: str, compose: str) -> dict:
         return {"error": "portainer_request_failed", "detail": str(e)}
 
 
+# ─── Portainer stack delete ────────────────────────────────────────────────
+
+def portainer_delete_stack(stack_name: str, stack_id: int | None = None) -> dict:
+    """DELETE a stack by id (preferred) or by name lookup.
+
+    Portainer's stack DELETE endpoint requires a numeric stack id. If
+    `stack_id` is missing (legacy state records), we list /api/stacks and
+    locate the matching name. Returns `{"ok": True}` on success or when
+    the stack is already absent (idempotent).
+    """
+    portainer_url = os.environ.get("MCP_PORTAINER_URL", "").rstrip("/")
+    api_key = os.environ.get("MCP_PORTAINER_API_KEY", "")
+    endpoint_id = os.environ.get("MCP_PORTAINER_ENDPOINT_ID", "2")
+    if not portainer_url or not api_key:
+        return {"error": "MCP_PORTAINER_URL or MCP_PORTAINER_API_KEY not set"}
+
+    import httpx
+    headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
+
+    if stack_id is None:
+        try:
+            r = httpx.get(f"{portainer_url}/api/stacks",
+                          headers=headers, timeout=30.0)
+            if r.status_code >= 300:
+                return {"error": "portainer_list_failed",
+                        "status": r.status_code, "body": r.text[:500]}
+            for s in r.json() or []:
+                if s.get("Name") == stack_name:
+                    stack_id = s.get("Id")
+                    break
+        except Exception as e:
+            return {"error": "portainer_list_request_failed", "detail": str(e)}
+        if stack_id is None:
+            return {"ok": True, "already_absent": True, "stack_name": stack_name}
+
+    url = f"{portainer_url}/api/stacks/{stack_id}"
+    params = {"endpointId": endpoint_id}
+    try:
+        r = httpx.delete(url, params=params, headers=headers, timeout=60.0)
+        if r.status_code == 404:
+            return {"ok": True, "already_absent": True, "stack_id": stack_id}
+        if r.status_code >= 300:
+            return {"error": "portainer_delete_failed",
+                    "status": r.status_code, "body": r.text[:500]}
+        return {"ok": True, "stack_id": stack_id}
+    except Exception as e:
+        return {"error": "portainer_delete_request_failed", "detail": str(e)}
+
+
 # ─── Health probe (exponential backoff) ────────────────────────────────────
 
 def wait_for_health(url: str, timeout: int | None = None) -> dict:
@@ -379,6 +428,11 @@ def provision(slug_hint: str, password: str, email: str,
         client_id, mcp_url, secret_token, anthropic_key, password)
 
     # Persist state.
+    portainer_stack_id = None
+    if isinstance(portainer_info, dict):
+        stack_obj = portainer_info.get("stack") or {}
+        if isinstance(stack_obj, dict):
+            portainer_stack_id = stack_obj.get("Id")
     _state_append({
         "slug": slug,
         "client_id": client_id,
@@ -391,6 +445,7 @@ def provision(slug_hint: str, password: str, email: str,
         "ts": int(time.time()),
         "elapsed_s": int(time.time() - started),
         "dry_run": DRY_RUN,
+        "portainer_stack_id": portainer_stack_id,
         "cloudflare": cf_info,
         "health": health,
     })
@@ -406,4 +461,136 @@ def provision(slug_hint: str, password: str, email: str,
         "cloudflare": cf_info,
         "health": health,
         **zip_info,
+    }
+
+
+# ─── Destroy (tear down stack + DNS + tunnel ingress) ─────────────────────
+
+def destroy(slug_hint: str = "", vat: str = "",
+            client_id: str = "") -> dict:
+    """Tear down a previously provisioned stack — Portainer + Cloudflare.
+
+    Identification (precedence): explicit `client_id` → VAT-derived slug →
+    free-form `slug_hint`. The state record is the source of truth для
+    `stack_id` + `dns record_id` + `hostname`. Best-effort: Cloudflare
+    cleanup failures are logged but do NOT abort the Portainer DELETE,
+    because a half-removed Cloudflare record is preferable to a stuck
+    container.
+
+    Idempotent — re-running on an already destroyed slug is a no-op
+    (returns `{"status": "already_destroyed"}`).
+    """
+    # Resolve slug (mirror provision()'s logic).
+    if vat:
+        slug = normalize_vat(vat)
+        if not slug or len(slug) < 4:
+            return {"error": "invalid VAT — must contain ≥4 alphanumeric chars",
+                    "vat_received": vat}
+    elif client_id:
+        slug = normalize_vat(client_id) or normalize_slug(client_id)
+    else:
+        slug = normalize_slug(slug_hint)
+        if not slug:
+            return {"error": "provide slug_hint, vat, or client_id"}
+
+    started = time.time()
+    state = get_state(slug)
+    if not state:
+        return {"error": "not_found", "slug": slug}
+
+    if state.get("status") == "destroyed":
+        return {"status": "already_destroyed", "slug": slug,
+                "destroyed_at": state.get("ts")}
+
+    target_client_id = state.get("client_id") or client_id
+    hostname = f"mcp-{target_client_id}.{DOMAIN_BASE}" if target_client_id else None
+    stack_name = f"mcp-client-{target_client_id}" if target_client_id else None
+
+    if DRY_RUN:
+        cf_info: dict = {"dry_run": True}
+        portainer_info: dict = {"dry_run": True, "stack_name": stack_name}
+        _state_append({
+            "slug": slug,
+            "client_id": target_client_id,
+            "status": "destroyed",
+            "stage": "destroyed",
+            "ts": int(time.time()),
+            "elapsed_s": int(time.time() - started),
+            "dry_run": True,
+            "cloudflare": cf_info,
+            "portainer": portainer_info,
+        })
+        return {
+            "status": "destroyed",
+            "slug": slug,
+            "client_id": target_client_id,
+            "hostname": hostname,
+            "dry_run": True,
+            "portainer": portainer_info,
+            "cloudflare": cf_info,
+        }
+
+    # 1) Cloudflare — best-effort. Order: tunnel ingress first, then DNS,
+    # so a half-removed state can't leave a hostname pointing at a tunnel
+    # rule that no longer exists (which would 502 indefinitely).
+    cf_info = {}
+    try:
+        import cloudflare_provisioning as cf
+        if cf.is_configured() and hostname:
+            cf_info["ingress"] = cf.remove_tunnel_ingress(hostname)
+            prior_dns = (state.get("cloudflare") or {}).get("dns") or {}
+            record_id = prior_dns.get("record_id")
+            if record_id:
+                cf_info["dns"] = cf.delete_dns_record(record_id)
+            else:
+                cf_info["dns"] = {"skipped": True,
+                                  "reason": "no record_id in state"}
+        else:
+            cf_info = {"skipped": True,
+                       "reason": "cloudflare_not_configured" if hostname else "no hostname"}
+    except ImportError as e:
+        cf_info = {"skipped": True, "reason": f"cloudflare module: {e}"}
+    except Exception as e:
+        logger.exception("cloudflare cleanup raised — continuing")
+        cf_info = {"error": "cloudflare_cleanup_raised", "detail": str(e)}
+
+    # 2) Portainer DELETE — by stack_id from state if present, else by name.
+    portainer_info: dict = {}
+    if stack_name:
+        portainer_info = portainer_delete_stack(
+            stack_name=stack_name,
+            stack_id=state.get("portainer_stack_id"),
+        )
+    else:
+        portainer_info = {"skipped": True, "reason": "no client_id in state"}
+
+    # 3) Persist state — destroyed (или partial if Portainer failed).
+    overall_ok = portainer_info.get("ok", False)
+    _state_append({
+        "slug": slug,
+        "client_id": target_client_id,
+        "status": "destroyed" if overall_ok else "destroy_failed",
+        "stage": "destroyed" if overall_ok else "portainer",
+        "ts": int(time.time()),
+        "elapsed_s": int(time.time() - started),
+        "dry_run": False,
+        "cloudflare": cf_info,
+        "portainer": portainer_info,
+    })
+
+    if not overall_ok:
+        return {"error": "portainer_delete_failed",
+                "slug": slug,
+                "client_id": target_client_id,
+                "portainer": portainer_info,
+                "cloudflare": cf_info}
+
+    return {
+        "status": "destroyed",
+        "slug": slug,
+        "client_id": target_client_id,
+        "hostname": hostname,
+        "elapsed_s": int(time.time() - started),
+        "portainer": portainer_info,
+        "cloudflare": cf_info,
     }

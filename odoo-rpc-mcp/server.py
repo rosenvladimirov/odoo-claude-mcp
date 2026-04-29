@@ -9009,7 +9009,7 @@ def create_app():
     try:
         from starlette.applications import Starlette
         _provisioning_app = Starlette(routes=provisioning_api.get_routes())
-        logger.info("v3 provisioning API mounted at /provision")
+        logger.info("v3 provisioning API mounted at /provision + /destroy")
     except Exception as e:
         _provisioning_app = None
         logger.warning(f"provisioning API init failed: {e}")
@@ -9034,7 +9034,7 @@ def create_app():
             return
 
         # ── v3 self-service provisioning ───────────────────────
-        if _provisioning_app and scope["type"] == "http" and path == "/provision":
+        if _provisioning_app and scope["type"] == "http" and path in ("/provision", "/destroy"):
             await _provisioning_app(scope, receive, send)
             return
 
