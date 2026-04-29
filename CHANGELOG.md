@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0-alpha.1] — 2026-04-29 — `/destroy` endpoint LIVE
+
+Released and deployed to `mcp.odoo-shell.space`. Image:
+`vladimirovrosen/odoo-rpc-mcp:3.0.0-alpha.1` + `:next` (also `:latest` if
+adopted by main).
+
 ### Added — v3 self-service tear-down (`POST /destroy`)
 - New HTTP endpoint `POST /destroy` (companion to `/provision`) — invoked
   by lifecycle automation (try-shop expiry cron, manual ops) to remove
