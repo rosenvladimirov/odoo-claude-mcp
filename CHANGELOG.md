@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `mcp_terminal_get_config` (port от v2.25.1+v2.25.2)
+- Tool четеше несъществуващи env vars (`MCP_CLIENT_TOKEN`, `MCP_API_KEY`,
+  `MCP_PUBLIC_URL`) → ZIP-овете излизаха с празни ключове за всеки tenant.
+- Сега чете реалните deployment env names (`MCP_SECRET_TOKEN`,
+  `MCP_ADMIN_TOKEN`, `MCP_OAUTH_CLIENT_ID`), с legacy per-tenant overrides
+  като escape hatch и Cloudflare DNS (`mcp-{slug}.mcpworks.net` /
+  `terminal-{slug}.mcpworks.net`) като auto-derived default.
+- Нов `_env_chain()` helper различава "env unset" (`None`) от "explicitly
+  empty" (`""`) — позволява `CLAUDE_TERMINAL_URL=` в compose да потуши
+  auto-derive (за VPN-only deploy-и без публичен terminal host).
+- `include_anthropic` default `True → False` (privacy: Anthropic API key
+  е per-user/sensitive, не се embedva автоматично в onboarding ZIP).
+- Vendored е същият fix както в v2.25.2 (commits `612b6aa` + `501ffbc`
+  на 2.0 branch). v3 endpoint все още не е в production usage.
+
 ### Added — v3 active tenant routing
 - New module `odoo-rpc-mcp/tenant_router.py`:
   - 4 control plane tools: `tenant_list`, `tenant_use`, `tenant_current`,

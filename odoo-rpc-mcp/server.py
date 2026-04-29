@@ -4177,12 +4177,13 @@ TOOLS = [
         name="mcp_terminal_get_config",
         description=(
             "Generate a password-protected ZIP archive with the Claude "
-            "Terminal configuration keys (MCP, Anthropic, Qdrant, Embeddings) "
-            "for the requesting tenant. Returns base64-encoded ZIP + a "
-            "temporary password (shown ONCE — copy it now). Use the password "
-            "in the Odoo Setup Wizard (Settings → Technical → Настройка с "
-            "ZIP конфигурация) to apply the config across res.company + "
-            "res.users records in 5 guided steps."
+            "Terminal configuration keys (MCP, Qdrant, Embeddings) for the "
+            "requesting tenant. Anthropic API key is NOT included by default "
+            "(set include_anthropic=true to embed it). Returns base64-encoded "
+            "ZIP + a temporary password (shown ONCE — copy it now). Use the "
+            "password in the Odoo Setup Wizard (Settings → Technical → "
+            "Настройка с ZIP конфигурация) to apply the config across "
+            "res.company + res.users records in 5 guided steps."
         ),
         inputSchema={
             "type": "object",
@@ -4196,7 +4197,7 @@ TOOLS = [
                 "include_anthropic": {
                     "type": "boolean",
                     "description": "Whether to embed the Anthropic API key in the bundle.",
-                    "default": True,
+                    "default": False,
                 },
             },
         },
@@ -8632,55 +8633,66 @@ def _execute_tool(name: str, args: dict) -> Any:
             )}
 
         tenant_code = _ai_tenant_code(conn, args.get("tenant_code"))
-        include_anthropic = bool(args.get("include_anthropic", True))
+        include_anthropic = bool(args.get("include_anthropic", False))
         slug = tenant_code.upper().replace("-", "_").replace(".", "_")
 
-        # Build config payload — values pulled from per-tenant or global env vars
+        # Resolve tenant_slug for Cloudflare DNS pattern (mcp-<slug>.mcpworks.net).
+        # The container's own MCP_OAUTH_CLIENT_ID typically encodes the EIK suffix
+        # (e.g. "odoo-rpc-mcp-207327615"); we strip the prefix to get a clean slug.
+        oauth_client_id = _os.environ.get("MCP_OAUTH_CLIENT_ID", "")
+        dns_slug = tenant_code
+        if oauth_client_id.startswith("odoo-rpc-mcp-"):
+            dns_slug = oauth_client_id[len("odoo-rpc-mcp-"):]
+
+        # Helper — distinguish "env var unset" (None) from "explicitly empty"
+        # ("") so an explicit `CLAUDE_TERMINAL_URL=` in the compose file is
+        # honored as "no terminal" rather than silently auto-derived.
+        def _env_chain(*names, default=""):
+            for n in names:
+                if n in _os.environ:
+                    return _os.environ[n]
+            return default
+
+        # Build config payload — read from REAL deployment env names first
+        # (MCP_SECRET_TOKEN, MCP_ADMIN_TOKEN, MCP_OAUTH_CLIENT_ID), with
+        # legacy per-tenant overrides as escape hatches and Cloudflare DNS
+        # pattern as auto-derived default.
         cfg = {
             "company": {
-                "claude_mcp_url": (
-                    _os.environ.get(f"MCP_PUBLIC_URL_{slug}")
-                    or _os.environ.get("MCP_PUBLIC_URL", "https://mcp.odoo-shell.space")
+                "claude_mcp_url": _env_chain(
+                    f"MCP_PUBLIC_URL_{slug}",
+                    "MCP_PUBLIC_URL",
+                    default=(f"https://mcp-{dns_slug}.mcpworks.net" if dns_slug else "https://mcp.odoo-shell.space"),
                 ),
-                "claude_mcp_token": (
-                    _os.environ.get(f"MCP_CLIENT_TOKEN_{slug}")
-                    or _os.environ.get("MCP_CLIENT_TOKEN", "")
+                "claude_mcp_token": _env_chain(
+                    f"MCP_CLIENT_TOKEN_{slug}", "MCP_SECRET_TOKEN", "MCP_CLIENT_TOKEN",
                 ),
-                "claude_mcp_client_id": tenant_code,
-                "claude_mcp_api_key": (
-                    _os.environ.get(f"MCP_API_KEY_{slug}")
-                    or _os.environ.get("MCP_API_KEY", "")
+                "claude_mcp_client_id": (oauth_client_id or tenant_code),
+                "claude_mcp_api_key": _env_chain(
+                    f"MCP_API_KEY_{slug}", "MCP_ADMIN_TOKEN", "MCP_API_KEY",
                 ),
-                "claude_qdrant_url": (
-                    _os.environ.get(f"QDRANT_URL_{slug}")
-                    or _os.environ.get("QDRANT_URL", "")
+                "claude_qdrant_url": _env_chain(
+                    f"QDRANT_URL_{slug}", "QDRANT_URL",
                 ),
-                "claude_qdrant_api_key": (
-                    _os.environ.get(f"QDRANT_API_KEY_{slug}")
-                    or _os.environ.get("QDRANT_API_KEY", "")
+                "claude_qdrant_api_key": _env_chain(
+                    f"QDRANT_API_KEY_{slug}", "QDRANT_API_KEY",
                 ),
                 "claude_qdrant_collection_prefix": tenant_code,
-                "claude_ollama_url": (
-                    _os.environ.get(f"OLLAMA_URL_{slug}")
-                    or _os.environ.get("OLLAMA_URL", "")
+                "claude_ollama_url": _env_chain(
+                    f"OLLAMA_URL_{slug}", "OLLAMA_URL",
                 ),
-                "claude_ollama_model": (
-                    _os.environ.get(f"OLLAMA_MODEL_{slug}")
-                    or _os.environ.get("OLLAMA_MODEL", "llama3.2:latest")
+                "claude_ollama_model": _env_chain(
+                    f"OLLAMA_MODEL_{slug}", "OLLAMA_MODEL", default="llama3.2:latest",
                 ),
-                "claude_embedding_provider": (
-                    _os.environ.get(f"EMBEDDING_PROVIDER_{slug}")
-                    or _os.environ.get("EMBEDDING_PROVIDER", "ollama")
+                "claude_embedding_provider": _env_chain(
+                    f"EMBEDDING_PROVIDER_{slug}", "EMBEDDING_PROVIDER", default="ollama",
                 ),
-                "claude_embedding_api_key": (
-                    _os.environ.get(f"EMBEDDING_API_KEY_{slug}")
-                    or _os.environ.get("EMBEDDING_API_KEY", "")
+                "claude_embedding_api_key": _env_chain(
+                    f"EMBEDDING_API_KEY_{slug}", "EMBEDDING_API_KEY",
                 ),
-                # Per-user terminal-control-mcp web UI URL (saved by wizard
-                # to res.users.claude_terminal_url for each selected user).
-                "claude_terminal_url": (
-                    _os.environ.get(f"CLAUDE_TERMINAL_URL_{slug}")
-                    or _os.environ.get("CLAUDE_TERMINAL_URL", "")
+                "claude_terminal_url": _env_chain(
+                    f"CLAUDE_TERMINAL_URL_{slug}", "CLAUDE_TERMINAL_URL",
+                    default=(f"https://terminal-{dns_slug}.mcpworks.net" if dns_slug else ""),
                 ),
             },
             "users": {},
