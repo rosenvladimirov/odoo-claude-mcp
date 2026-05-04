@@ -16,6 +16,7 @@ Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 __version__ = "2.25.0"
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -431,6 +432,155 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
 logger = logging.getLogger("odoo-rpc-mcp")
+
+
+# ── One-shot OAuth authorization codes ──
+# RFC 6749: codes MUST be single-use, short-lived, bound to a specific
+# redirect_uri to mitigate code interception attacks. Plain `secret_token`
+# as code (legacy behavior) leaked the long-lived bearer in browser
+# history/referer/server logs.
+
+import secrets as _secrets_mod
+import threading as _threading_mod
+import time as _time_mod
+
+_OAUTH_CODE_TTL = int(os.environ.get("MCP_OAUTH_CODE_TTL", "60"))
+_oauth_codes: dict[str, dict] = {}
+_oauth_codes_lock = _threading_mod.Lock()
+
+
+def _oauth_issue_code(redirect_uri: str) -> str:
+    """Mint a one-shot OAuth authorization code bound to redirect_uri."""
+    code = _secrets_mod.token_urlsafe(32)
+    expires_at = _time_mod.time() + _OAUTH_CODE_TTL
+    with _oauth_codes_lock:
+        # Opportunistic cleanup of expired entries
+        now = _time_mod.time()
+        for k in list(_oauth_codes.keys()):
+            if _oauth_codes[k]["expires_at"] < now:
+                del _oauth_codes[k]
+        _oauth_codes[code] = {
+            "expires_at": expires_at,
+            "redirect_uri": redirect_uri or "",
+        }
+    return code
+
+
+def _oauth_consume_code(code: str, redirect_uri: str | None) -> bool:
+    """Consume a one-shot OAuth code. Returns True iff valid & not expired.
+
+    Enforces:
+      - code exists in store
+      - not expired
+      - redirect_uri matches the one bound at issuance (when present)
+    Always removes the code on lookup (atomic single-use).
+    """
+    with _oauth_codes_lock:
+        entry = _oauth_codes.pop(code, None)
+    if not entry:
+        return False
+    if entry["expires_at"] < _time_mod.time():
+        return False
+    bound = entry.get("redirect_uri", "")
+    if bound and redirect_uri and not hmac.compare_digest(bound, redirect_uri):
+        return False
+    return True
+
+
+def _safe_save_path(user_path: str) -> str:
+    """Resolve and validate `user_path` for tool save operations.
+
+    - rejects empty, `..` traversal, symlinks pointing outside the allowed root
+    - confines writes to MCP_DOWNLOAD_ROOT (default /data/downloads)
+    - if user_path is relative, joins under the root
+    - if absolute, must start with the root after resolution
+
+    Raises ValueError on rejection.
+    """
+    if not user_path or not user_path.strip():
+        raise ValueError("save_path must be non-empty")
+    root = Path(os.environ.get("MCP_DOWNLOAD_ROOT", "/data/downloads")).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    candidate = Path(user_path)
+    if candidate.is_absolute():
+        resolved = candidate.resolve()
+    else:
+        resolved = (root / candidate).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        raise ValueError(
+            f"save_path escapes allowed root {root} (resolved to {resolved}). "
+            f"Use a relative path or override MCP_DOWNLOAD_ROOT."
+        )
+    return str(resolved)
+
+
+def _check_internal_services_auth():
+    """Warn if Qdrant/Ollama are reachable but lack auth credentials.
+
+    These services are on the backend Docker network by default, but if
+    docker-compose publishes their ports (which our default does for
+    cross-host Odoo support) they become exploitable without auth.
+
+    Set MCP_INTERNAL_SERVICES_STRICT=1 to fail-fast in production.
+    """
+    strict = os.environ.get("MCP_INTERNAL_SERVICES_STRICT", "").lower() in ("1", "true")
+    qdrant_url = os.environ.get("QDRANT_URL", "http://qdrant:6333").rstrip("/")
+    qdrant_key = os.environ.get("QDRANT_API_KEY", "").strip()
+    if "qdrant:" in qdrant_url or "127.0.0.1" in qdrant_url or "localhost" in qdrant_url:
+        # Internal-only — auth optional
+        pass
+    elif not qdrant_key:
+        msg = (
+            f"Qdrant URL {qdrant_url} appears external but QDRANT_API_KEY "
+            f"is empty. Set the key or move Qdrant to backend-only network."
+        )
+        if strict:
+            raise RuntimeError(f"MCP_INTERNAL_SERVICES_STRICT=1: {msg}")
+        logger.warning(f"[SEC] {msg}")
+    # Ollama: same logic, but Ollama upstream still has no built-in auth
+    ollama_url = os.environ.get("OLLAMA_URL", "http://ollama:11434").rstrip("/")
+    if not ("ollama:" in ollama_url or "127.0.0.1" in ollama_url or "localhost" in ollama_url):
+        msg = (
+            f"Ollama URL {ollama_url} appears external. Ollama has no native "
+            f"auth — confine to backend network or front with reverse proxy + auth."
+        )
+        if strict:
+            raise RuntimeError(f"MCP_INTERNAL_SERVICES_STRICT=1: {msg}")
+        logger.warning(f"[SEC] {msg}")
+
+
+def _check_secrets_perms():
+    """Warn (or fail in strict mode) if secret files have permissions wider than 0600.
+
+    MCP_CHMOD_BOOT_CHECK=strict → raise on group/world-readable secrets.
+    Otherwise log warnings and continue.
+    """
+    secret_paths = [
+        CONNECTIONS_FILE,
+        SESSIONS_DB,
+        Path("/data/proxy_services.json"),
+        Path("/data/api_keys.jsonl"),
+        Path("/data/admin_audit.log"),
+    ]
+    strict = os.environ.get("MCP_CHMOD_BOOT_CHECK", "").lower() == "strict"
+    for path in secret_paths:
+        try:
+            if not path.exists():
+                continue
+            mode = path.stat().st_mode & 0o777
+            if mode & 0o077:  # any group/world bits set
+                msg = (
+                    f"insecure perms on {path}: {oct(mode)} "
+                    f"(group/world readable). Recommended: 0600. "
+                    f"Run: chmod 600 {path}"
+                )
+                if strict:
+                    raise RuntimeError(f"MCP_CHMOD_BOOT_CHECK=strict: {msg}")
+                logger.warning(f"[SEC] {msg}")
+        except OSError as e:
+            logger.warning(f"[SEC] could not stat {path}: {e}")
 
 
 # ─── Fiscal Position Reference Data (l10n_bg_tax_admin) ───
@@ -1665,13 +1815,38 @@ class _UASafeTransport(xmlrpc.client.SafeTransport):
     user_agent = _XMLRPC_UA
 
 
+def _should_verify_tls(url: str) -> bool:
+    """Decide whether to enforce TLS verification for an Odoo HTTPS endpoint.
+
+    Strict (verify=True) when ANY of:
+      - MCP_TLS_VERIFY_ALWAYS=1 (override)
+      - URL is listed in ALLOWED_ODOO_URLS (production whitelist)
+
+    Lax (verify=False) otherwise — dev/self-signed instances ще паднат
+    при strict mode и не можем да ги предполагаме production-grade.
+    """
+    if os.environ.get("MCP_TLS_VERIFY_ALWAYS", "").strip() == "1":
+        return True
+    allowed_env = os.environ.get("ALLOWED_ODOO_URLS", "").strip()
+    if not allowed_env:
+        return False
+    allowed = {u.strip().rstrip("/") for u in allowed_env.split(",") if u.strip()}
+    return url.rstrip("/") in allowed
+
+
 def _xmlrpc_validate(url: str, db: str, login: str, api_key: str) -> int | None:
     """Validate (login, api_key) against Odoo XMLRPC. Returns uid or None."""
     try:
         if url.lower().startswith("https://"):
             ctx = _auth_ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = _auth_ssl.CERT_NONE
+            if not _should_verify_tls(url):
+                # Dev/self-signed mode: disable verification.
+                # Production deployments must list URLs in ALLOWED_ODOO_URLS
+                # or set MCP_TLS_VERIFY_ALWAYS=1.
+                ctx.check_hostname = False
+                ctx.verify_mode = _auth_ssl.CERT_NONE
+                logger.debug(f"[AUTH] TLS verify DISABLED for {url} "
+                             f"(not in ALLOWED_ODOO_URLS, no MCP_TLS_VERIFY_ALWAYS)")
             transport = _UASafeTransport(context=ctx)
         else:
             transport = _UATransport()
@@ -4202,6 +4377,72 @@ TOOLS = [
             },
         },
     ),
+    Tool(
+        name="odoo_timesheet_from_memory",
+        description=(
+            "Scan progress memory files for a week, propose missing account.analytic.line "
+            "entries grouped by project, and optionally create them. Memory files (project_*, "
+            "session_*) are matched to projects via frontmatter (project_id / project_name), "
+            "filename keyword, or body keyword. Hours are estimated from explicit time markers "
+            "or content density. Idempotent: existing logged hours are subtracted before proposing."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "week_start": {
+                    "type": "string",
+                    "description": "ISO date (YYYY-MM-DD) of the Monday of the target week. Defaults to current week.",
+                    "default": "",
+                },
+                "employee_id": {
+                    "type": "integer",
+                    "description": "hr.employee ID. Defaults to the employee linked to the current user.",
+                },
+                "memory_dir": {
+                    "type": "string",
+                    "description": "Override the memory root directory. Defaults to MEMORY_DIR env or /data/memory.",
+                    "default": "",
+                },
+                "keyword_map": {
+                    "type": "object",
+                    "description": "Optional override for keyword→project-name fragment map.",
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "When true (default) only return proposals; when false also create them.",
+                    "default": True,
+                },
+            },
+        },
+    ),
+    Tool(
+        name="odoo_timesheet_weekly_report",
+        description=(
+            "Read-only weekly timesheet summary for an employee. Returns per-day and per-project "
+            "totals plus a list of unresolved memory progress files (no Odoo entry yet)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "week_start": {
+                    "type": "string",
+                    "description": "ISO date of the Monday of the target week. Defaults to current week.",
+                    "default": "",
+                },
+                "employee_id": {
+                    "type": "integer",
+                    "description": "hr.employee ID. Defaults to the employee linked to the current user.",
+                },
+                "memory_dir": {
+                    "type": "string",
+                    "description": "Override the memory root directory.",
+                    "default": "",
+                },
+            },
+        },
+    ),
 ]
 
 
@@ -5322,6 +5563,79 @@ def _execute_tool(name: str, args: dict) -> Any:
             args.get("kwargs", {}),
         )
 
+    elif name == "odoo_timesheet_from_memory":
+        from dataclasses import asdict as _asdict
+        import timesheet_engine as _ts
+        week_start, week_end = _ts.week_bounds(args.get("week_start") or None)
+        emp_id = args.get("employee_id") or _ts.employee_for_user(conn)
+        if not emp_id:
+            return {"error": "no employee linked to current user; pass employee_id explicitly"}
+        memory_dir = args.get("memory_dir") or _ts.DEFAULT_MEMORY_DIR
+        proposals, unresolved = _ts.build_proposals(
+            conn, emp_id, week_start, week_end,
+            memory_dir=memory_dir,
+            keyword_map=args.get("keyword_map"),
+        )
+        result: dict = {
+            "week_start": week_start.isoformat(),
+            "week_end": week_end.isoformat(),
+            "employee_id": emp_id,
+            "memory_dir": memory_dir,
+            "proposals": [_asdict(p) for p in proposals],
+            "unresolved": unresolved,
+            "totals": {
+                "proposed_hours": round(sum(p.hours for p in proposals), 2),
+                "proposal_count": len(proposals),
+                "unresolved_count": len(unresolved),
+            },
+            "dry_run": bool(args.get("dry_run", True)),
+        }
+        if not args.get("dry_run", True) and proposals:
+            result["created"] = _ts.create_entries(conn, emp_id, proposals)
+        return result
+
+    elif name == "odoo_timesheet_weekly_report":
+        import timesheet_engine as _ts
+        week_start, week_end = _ts.week_bounds(args.get("week_start") or None)
+        emp_id = args.get("employee_id") or _ts.employee_for_user(conn)
+        if not emp_id:
+            return {"error": "no employee linked to current user; pass employee_id explicitly"}
+        memory_dir = args.get("memory_dir") or _ts.DEFAULT_MEMORY_DIR
+        # Existing logged hours
+        lines = conn.execute_kw(
+            "account.analytic.line", "search_read",
+            [[
+                ["employee_id", "=", emp_id],
+                ["date", ">=", week_start.isoformat()],
+                ["date", "<=", week_end.isoformat()],
+            ]],
+            {"fields": ["date", "project_id", "task_id", "unit_amount", "name"], "order": "date asc"},
+        )
+        per_day: dict[str, float] = {}
+        per_project: dict[str, float] = {}
+        for ln in lines:
+            per_day[ln["date"]] = per_day.get(ln["date"], 0.0) + (ln.get("unit_amount") or 0.0)
+            pname = ln["project_id"][1] if ln.get("project_id") else "(no project)"
+            per_project[pname] = per_project.get(pname, 0.0) + (ln.get("unit_amount") or 0.0)
+        # Memory progress without entries
+        proposals, unresolved = _ts.build_proposals(
+            conn, emp_id, week_start, week_end, memory_dir=memory_dir,
+        )
+        return {
+            "week_start": week_start.isoformat(),
+            "week_end": week_end.isoformat(),
+            "employee_id": emp_id,
+            "logged_hours": round(sum(per_day.values()), 2),
+            "per_day": {k: round(v, 2) for k, v in sorted(per_day.items())},
+            "per_project": {k: round(v, 2) for k, v in sorted(per_project.items(), key=lambda x: -x[1])},
+            "missing_proposals": [
+                {"date": p.date, "project": p.project_name, "hours": p.hours, "desc": p.description}
+                for p in proposals
+            ],
+            "unresolved_files": unresolved,
+            "lines": lines,
+        }
+
     elif name == "odoo_list_translatable_fields":
         model = args["model"]
         fields = conn.execute_kw(
@@ -6225,6 +6539,10 @@ def _execute_tool(name: str, args: dict) -> Any:
         }
         if save_path:
             import base64
+            try:
+                save_path = _safe_save_path(save_path)
+            except ValueError as e:
+                return {"error": str(e)}
             data = base64.b64decode(content_b64)
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             with open(save_path, "wb") as f:
@@ -6395,6 +6713,10 @@ def _execute_tool(name: str, args: dict) -> Any:
         pdf_bytes = ws.get_report_pdf(args["report_name"], args["ids"])
         save_path = args.get("save_path", "")
         if save_path:
+            try:
+                save_path = _safe_save_path(save_path)
+            except ValueError as e:
+                return {"error": str(e)}
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             with open(save_path, "wb") as f:
                 f.write(pdf_bytes)
@@ -6458,6 +6780,10 @@ def _execute_tool(name: str, args: dict) -> Any:
         content = resp.content
         save_path = args.get("save_path", "")
         if save_path:
+            try:
+                save_path = _safe_save_path(save_path)
+            except ValueError as _e:
+                return {"error": str(_e)}
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             with open(save_path, "wb") as f:
                 f.write(content)
@@ -6476,6 +6802,10 @@ def _execute_tool(name: str, args: dict) -> Any:
             return {"error": f"HTTP {resp.status_code}", "body": resp.text[:500]}
         save_path = args.get("save_path", "")
         if save_path:
+            try:
+                save_path = _safe_save_path(save_path)
+            except ValueError as _e:
+                return {"error": str(_e)}
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             with open(save_path, "wb") as f:
                 f.write(resp.content)
@@ -6507,6 +6837,10 @@ def _execute_tool(name: str, args: dict) -> Any:
             filename = cd.split("filename=")[-1].strip('"').strip("'")
         save_path = args.get("save_path", "")
         if save_path:
+            try:
+                save_path = _safe_save_path(save_path)
+            except ValueError as _e:
+                return {"error": str(_e)}
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             with open(save_path, "wb") as f:
                 f.write(resp.content)
@@ -6526,6 +6860,10 @@ def _execute_tool(name: str, args: dict) -> Any:
         ct = resp.headers.get("Content-Type", "")
         save_path = args.get("save_path", "")
         if save_path:
+            try:
+                save_path = _safe_save_path(save_path)
+            except ValueError as _e:
+                return {"error": str(_e)}
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             with open(save_path, "wb") as f:
                 f.write(resp.content)
@@ -6548,6 +6886,10 @@ def _execute_tool(name: str, args: dict) -> Any:
             return {"error": f"HTTP {resp.status_code}"}
         save_path = args.get("save_path", "")
         if save_path:
+            try:
+                save_path = _safe_save_path(save_path)
+            except ValueError as _e:
+                return {"error": str(_e)}
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             with open(save_path, "wb") as f:
                 f.write(resp.content)
@@ -6591,6 +6933,10 @@ def _execute_tool(name: str, args: dict) -> Any:
             return {"error": f"HTTP {resp.status_code}", "body": resp.text[:500]}
         save_path = args.get("save_path", "")
         if save_path:
+            try:
+                save_path = _safe_save_path(save_path)
+            except ValueError as _e:
+                return {"error": str(_e)}
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             with open(save_path, "wb") as f:
                 f.write(resp.content)
@@ -7347,6 +7693,15 @@ def _execute_tool(name: str, args: dict) -> Any:
         model = args["model"]
         ids = [int(x) for x in args["ids"]]
         include_related = args.get("include_related") or []
+
+        max_ids = int(os.environ.get("MCP_RECORD_BACKUP_MAX_IDS", "1000"))
+        if len(ids) > max_ids:
+            return {
+                "error": (
+                    f"odoo_record_backup: {len(ids)} ids exceeds cap {max_ids}. "
+                    f"Split into batches or raise MCP_RECORD_BACKUP_MAX_IDS."
+                )
+            }
 
         all_fields = conn.execute_kw(model, "fields_get", [], {"attributes": ["type"]})
         readable_field_names = [n for n, d in all_fields.items() if d.get("type") != "binary"]
@@ -8961,12 +9316,12 @@ def create_app():
         if not secret_token:
             return True
         api_token = headers.get(b"x-api-token", b"").decode()
-        if api_token and api_token == secret_token:
+        if api_token and hmac.compare_digest(api_token, secret_token):
             return True
         auth = headers.get(b"authorization", b"").decode()
         if auth.startswith("Bearer "):
             bearer = auth[7:]
-            if bearer == secret_token:
+            if hmac.compare_digest(bearer, secret_token):
                 return True
         return False
 
@@ -9038,9 +9393,23 @@ def create_app():
             await _provisioning_app(scope, receive, send)
             return
 
-        # ── Debug: log all headers on /mcp requests ────────────────
+        # ── Debug: log headers on /mcp requests (sensitive values redacted) ──
         if scope["type"] == "http" and path in ("/mcp", "/oauth/token", "/oauth/authorize", "/oauth/register"):
-            hdrs = {k.decode(): v.decode() for k, v in scope.get("headers", [])}
+            _SENSITIVE_HEADERS = {
+                "authorization", "x-api-token", "x-odoo-api-key",
+                "cookie", "x-admin-rechallenge", "x-bridge-token",
+            }
+            hdrs = {}
+            for _k, _v in scope.get("headers", []):
+                _kn = _k.decode().lower()
+                _vs = _v.decode()
+                if _kn in _SENSITIVE_HEADERS:
+                    if len(_vs) >= 12:
+                        hdrs[_kn] = f"<redacted len={len(_vs)} {_vs[:4]}…{_vs[-4:]}>"
+                    else:
+                        hdrs[_kn] = "<redacted>"
+                else:
+                    hdrs[_kn] = _vs
             logger.info(f"[AUTH-DEBUG] {scope.get('method', '?')} {path} headers: {json.dumps(hdrs, indent=2)}")
 
         # ── OAuth 2.0 metadata ─────────────────────────────────────
@@ -9103,7 +9472,9 @@ def create_app():
                             cid, csecret = decoded.split(":", 1)
 
                 if grant_type == "client_credentials":
-                    if cid == oauth_client_id and csecret == oauth_client_secret:
+                    cid_ok = cid and hmac.compare_digest(str(cid), oauth_client_id)
+                    sec_ok = csecret and hmac.compare_digest(str(csecret), oauth_client_secret)
+                    if cid_ok and sec_ok:
                         response = JSONResponse({
                             "access_token": secret_token,
                             "token_type": "Bearer",
@@ -9114,7 +9485,8 @@ def create_app():
                             {"error": "invalid_client"}, status_code=401)
                 elif grant_type == "authorization_code":
                     code = params.get("code", [None])[0]
-                    if code == secret_token:
+                    redirect_uri = params.get("redirect_uri", [None])[0]
+                    if code and _oauth_consume_code(code, redirect_uri):
                         response = JSONResponse({
                             "access_token": secret_token,
                             "token_type": "Bearer",
@@ -9133,7 +9505,7 @@ def create_app():
             await response(scope, receive, send)
             return
 
-        # ── OAuth authorize (redirect with code) ───────────────────
+        # ── OAuth authorize (redirect with one-shot code) ──────────
         if path == "/oauth/authorize" and scope["type"] == "http":
             from starlette.requests import Request
             from starlette.responses import RedirectResponse, JSONResponse
@@ -9141,8 +9513,9 @@ def create_app():
             redirect_uri = request.query_params.get("redirect_uri", "")
             state = request.query_params.get("state", "")
             if redirect_uri:
+                code = _oauth_issue_code(redirect_uri)
                 sep = "&" if "?" in redirect_uri else "?"
-                target = f"{redirect_uri}{sep}code={secret_token}"
+                target = f"{redirect_uri}{sep}code={code}"
                 if state:
                     target += f"&state={state}"
                 response = RedirectResponse(target)
@@ -9524,7 +9897,7 @@ def create_app():
             provided = (request.headers.get("authorization") or "").replace(
                 "Bearer ", "", 1,
             ).strip()
-            if not expected or provided != expected:
+            if not expected or not hmac.compare_digest(provided, expected):
                 response = JSONResponse(
                     {"error": "admin auth required"}, status_code=401,
                 )
@@ -9890,7 +10263,7 @@ def create_app():
             if not _is_internal:
                 _expected = os.environ.get("MCP_ADMIN_TOKEN", "")
                 _provided = (_request.headers.get("authorization") or "").replace("Bearer ", "", 1).strip()
-                if not _expected or _provided != _expected:
+                if not _expected or not hmac.compare_digest(_provided, _expected):
                     _r = _JSONResp({"error": "auth required"}, status_code=401)
                     await _r(scope, receive, send)
                     return
@@ -9989,7 +10362,7 @@ def create_app():
             if not _is_internal:
                 _expected = os.environ.get("MCP_ADMIN_TOKEN", "")
                 _provided = (_creq.headers.get("authorization") or "").replace("Bearer ", "", 1).strip()
-                if not _expected or _provided != _expected:
+                if not _expected or not hmac.compare_digest(_provided, _expected):
                     _r = _CResp({"error": "auth required"}, status_code=401)
                     await _r(scope, receive, send)
                     return
@@ -10124,6 +10497,10 @@ def create_app():
 
 
 if __name__ == "__main__":
+    # ── Startup security checks ──
+    _check_secrets_perms()
+    _check_internal_services_auth()
+
     app = create_app()
 
     # ── v3: wire tenant_router with discovery callbacks ──

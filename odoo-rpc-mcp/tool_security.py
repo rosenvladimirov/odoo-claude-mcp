@@ -82,7 +82,37 @@ DEFAULT_PROTECTED_FROM_UNLINK: set[str] = {
     "l10n_bg.tax.office",
 }
 
+DEFAULT_PROTECTED_FROM_WRITE: set[str] = {
+    # Tier 1 — system meta (write/create requires admin)
+    "res.company", "res.users", "res.groups",
+    "ir.module.module", "ir.model", "ir.model.fields",
+    "ir.model.access", "ir.rule", "ir.cron",
+    "ir.config_parameter", "ir.sequence", "ir.actions.server",
+    # Tier 2 — auth/credential surface
+    "ir.mail_server", "fetchmail.server",
+    "auth.totp.user", "res.users.apikeys",
+    # Tier 3 — accounting core (changes here require elevation)
+    "account.account", "account.journal",
+    "account.tax", "account.tax.group", "account.fiscal.position",
+}
+
+# Methods that are dangerous regardless of which model they run on.
+# These match substring within the method name (case-insensitive).
+DANGEROUS_METHOD_SUBSTRINGS: tuple[str, ...] = (
+    "upgrade", "install", "uninstall",
+)
+
+# Methods that require admin even if the model itself is unprotected.
+DANGEROUS_METHOD_EXACT: set[str] = {
+    "module_upgrade", "module_install", "module_uninstall",
+    "module_download", "module_uninstall_module",
+    "execute", "execute_kw",  # nested method invocation
+    "_unregister_hook",
+}
+
 UNLINK_TOOLS: set[str] = {"odoo_unlink"}
+WRITE_TOOLS: set[str] = {"odoo_write"}
+CREATE_TOOLS: set[str] = {"odoo_create"}
 
 
 def _csv(env_name: str, default: set[str]) -> set[str]:
@@ -97,6 +127,9 @@ USER_BLOCKED_PROXY_PREFIXES = _csv(
     "MCP_USER_BLOCKED_PROXY_PREFIXES", DEFAULT_USER_BLOCKED_PROXY_PREFIXES
 )
 PROTECTED_FROM_UNLINK = _csv("MCP_PROTECTED_MODELS", DEFAULT_PROTECTED_FROM_UNLINK)
+PROTECTED_FROM_WRITE = _csv(
+    "MCP_PROTECTED_WRITE_MODELS", DEFAULT_PROTECTED_FROM_WRITE
+)
 
 
 def get_role() -> str:
@@ -129,18 +162,57 @@ def is_protected_unlink(tool_name: str, arguments: dict | None) -> tuple[bool, s
     return False, model
 
 
-def is_protected_execute(tool_name: str, arguments: dict | None) -> tuple[bool, str, str]:
-    """For odoo_execute, refuse 'unlink' on protected models.
+def is_protected_execute(tool_name: str, arguments: dict | None) -> tuple[bool, str, str, str]:
+    """For odoo_execute, refuse dangerous method+model combinations.
 
-    Returns (is_blocked, model_name, method_name)."""
+    Block conditions (any of):
+      1. method=unlink on PROTECTED_FROM_UNLINK model
+      2. method in {write, create} on PROTECTED_FROM_WRITE model
+      3. method contains DANGEROUS_METHOD_SUBSTRINGS (upgrade/install/uninstall)
+      4. method in DANGEROUS_METHOD_EXACT (execute, execute_kw, module_*)
+      5. model=res.config.settings + method.startswith('execute')
+
+    Returns (is_blocked, model, method, reason)."""
     if tool_name != "odoo_execute":
-        return False, "", ""
+        return False, "", "", ""
     args = arguments or {}
     method = (args.get("method") or "").strip().lower()
     model = (args.get("model") or "").strip().lower()
+
     if method == "unlink" and model in PROTECTED_FROM_UNLINK:
-        return True, model, method
-    return False, model, method
+        return True, model, method, "protected_unlink"
+
+    if method in {"write", "create"} and model in PROTECTED_FROM_WRITE:
+        return True, model, method, "protected_write"
+
+    for pat in DANGEROUS_METHOD_SUBSTRINGS:
+        if pat in method:
+            return True, model, method, "dangerous_method_pattern"
+
+    if method in DANGEROUS_METHOD_EXACT:
+        return True, model, method, "dangerous_method_exact"
+
+    if model == "res.config.settings" and method.startswith("execute"):
+        return True, model, method, "config_settings_execute"
+
+    return False, model, method, ""
+
+
+def is_protected_write_create(tool_name: str, arguments: dict | None) -> tuple[bool, str, str]:
+    """For odoo_write / odoo_create, refuse on protected models.
+
+    Returns (is_blocked, model, op)."""
+    if tool_name in WRITE_TOOLS:
+        op = "write"
+    elif tool_name in CREATE_TOOLS:
+        op = "create"
+    else:
+        return False, "", ""
+    args = arguments or {}
+    model = (args.get("model") or "").strip().lower()
+    if model in PROTECTED_FROM_WRITE:
+        return True, model, op
+    return False, model, op
 
 
 def check_call(tool_name: str, arguments: dict | None,
@@ -184,15 +256,33 @@ def check_call(tool_name: str, arguments: dict | None,
             "hint": f"Cannot unlink protected model '{model}'. Use mcp_elevate first.",
         }
 
-    blocked, model, method = is_protected_execute(tool_name, arguments)
+    blocked, model, method, reason = is_protected_execute(tool_name, arguments)
     if blocked:
         return False, {
-            "reason": "protected_execute_unlink",
+            "reason": f"protected_execute_{reason}",
             "tool": tool_name,
             "model": model,
             "method": method,
             "role": role,
-            "hint": f"Cannot execute unlink on protected model '{model}'. Use mcp_elevate first.",
+            "hint": (
+                f"Cannot execute method='{method}' on model='{model}' "
+                f"(reason={reason}). Use mcp_elevate(reason='...', ttl=300) "
+                f"to gain temporary admin rights."
+            ),
+        }
+
+    blocked, model, op = is_protected_write_create(tool_name, arguments)
+    if blocked:
+        return False, {
+            "reason": "protected_write_create",
+            "tool": tool_name,
+            "model": model,
+            "op": op,
+            "role": role,
+            "hint": (
+                f"Cannot {op} on protected model '{model}'. Use mcp_elevate "
+                f"first or scope changes to non-protected models."
+            ),
         }
 
     return True, {"role": role}

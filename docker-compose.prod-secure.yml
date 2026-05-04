@@ -1,0 +1,36 @@
+# Production security override for v3 MCP stack.
+#
+# Apply with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod-secure.yml up -d
+#
+# Effects:
+#   - Qdrant and Ollama are NOT published on host ports (backend-only).
+#     They remain reachable from other containers on the `backend` network.
+#     If your Odoo instance lives on a different host, route through the
+#     gateway instead (e.g. proxy via odoo-rpc-mcp tools), do NOT expose
+#     the raw vector DB / LLM port to the public.
+#
+#   - Strict startup checks enabled on the gateway:
+#       * MCP_TLS_VERIFY_ALWAYS=1   — TLS verification required for all
+#                                     Odoo URLs reached over HTTPS
+#                                     (ALLOWED_ODOO_URLS still applies)
+#       * MCP_CHMOD_BOOT_CHECK=strict — refuse to start if secret files
+#                                       (connections.json, sessions.db,
+#                                        api_keys.jsonl, audit logs)
+#                                       are group/world readable
+#       * MCP_INTERNAL_SERVICES_STRICT=1 — refuse to start if Qdrant/Ollama
+#                                          appear external without auth
+
+services:
+
+  qdrant:
+    ports: []          # backend-only
+
+  ollama:
+    ports: []          # backend-only
+
+  odoo-rpc-mcp:
+    environment:
+      - MCP_TLS_VERIFY_ALWAYS=1
+      - MCP_CHMOD_BOOT_CHECK=strict
+      - MCP_INTERNAL_SERVICES_STRICT=1
