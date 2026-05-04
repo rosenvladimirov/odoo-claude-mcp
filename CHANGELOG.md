@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0-alpha.5] — 2026-05-04 — QA review fixes (T2 batch)
+
+Internal QA review of alpha.3 + alpha.4 commits surfaced six T2
+issues. No T1 deploy-blockers; primitives (hmac.compare_digest,
+atomic OAuth code consumption, body cap, regex validation, rate
+limiter math) confirmed correct. This batch closes the T2 set.
+
+### Fixed
+- **T2-1: async event loop blocking** — `provisioning_engine.provision`
+  and `.destroy` are sync httpx calls (Portainer + Cloudflare API)
+  that previously blocked the uvicorn event loop for 5–60 s while
+  `/health`, `/mcp`, OAuth requests stalled. Wrapped in
+  `asyncio.to_thread(...)` (mirrors the `sql_executor` pattern at
+  `server.py:4536`).
+- **T2-2: `tool_security` substring false positives** — dropped the
+  `DANGEROUS_METHOD_SUBSTRINGS = ("upgrade","install","uninstall")`
+  scanner that blocked legitimate methods like `pre_install_hook`,
+  `action_install_check`, `_uninstall` callbacks. Expanded
+  `DANGEROUS_METHOD_EXACT` with explicit allowlist of the actual
+  module-lifecycle methods on `ir.module.module` (button_install,
+  button_immediate_*, module_install/upgrade/uninstall/download,
+  search_modules) plus method-invocation chain (`execute`,
+  `execute_kw`).
+  - 15/15 verification cases pass (false positives cleared, true
+    positives preserved, admin bypass intact).
+- **T2-4: internal-host substring confusion** — replaced
+  `"qdrant:" in url` / `"localhost" in url` substring checks in
+  `_check_internal_services_auth` with `urlparse(url).hostname`
+  exact match against `{qdrant, ollama, localhost, 127.0.0.1, ::1}`.
+  Closes the false-positive `http://qdrant:6333.evil.com` and
+  `http://localhost.attacker.com` cases.
+- **T2-5: audit-log rotation race** — concurrent `_audit()` callers
+  could race on `_rotate_audit_log` rename, leaving `.log.{i}`
+  shifted twice. Added module-level `_audit_lock` (and parallel
+  `_ledger_lock`) serializing rotate+write atomically. Multi-worker
+  deployments would still need `fcntl.flock`; single-worker uvicorn
+  default is now safe.
+- **T2-6: trusted-internal bypass + reverse proxy** — when CF
+  tunnel / nginx forwards `X-Forwarded-For`, attacker on public
+  internet appears as `127.0.0.1` (proxy loopback) and bypasses
+  rate limit + lockout. New `_client_ip_for()` helper honours
+  XFF **only** when the immediate hop (`req.client.host`) is
+  itself in `_TRUSTED_NETS`. Takes the leftmost XFF entry as the
+  original client. Fixes the production-behind-proxy threat model.
+
+### Notes
+- T2-3 (cookie redaction in debug log not affecting Starlette session
+  resolution) confirmed safe by QA — no code change. Cookie header
+  reads happen via `Request.headers.get(...)` from raw scope, not
+  the redacted log dict.
+
+### Deferred (T3 batch — next iteration)
+- T3-1: OAuth `redirect_uri` allowlist (open-redirect → code leak)
+- T3-2: `_safe_save_path` symlink TOCTOU (`O_NOFOLLOW`)
+- T3-3: `record_backup.include_related` cardinality cap
+- T3-4: OAuth code dict cleanup contention (non-issue at scale)
+- T3-5: HIBP k-anonymity password check
+- T3-6: startup warning when `oauth_client_secret == secret_token`
+
 ## [3.0.0-alpha.4] — 2026-05-04 — Provisioning hardening
 
 ### Security (provisioning surface)

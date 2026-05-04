@@ -22,6 +22,7 @@ top-level Starlette routes (intentionally OUTSIDE the /admin prefix).
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import logging
@@ -70,6 +71,15 @@ _rate_buckets: dict[str, dict] = {}
 _fail_lockouts: dict[str, dict] = {}
 _rate_lock = threading.Lock()
 
+# Serializes audit log rotate+write across worker threads. Without
+# this, two concurrent _audit() callers can both observe size >= MAX
+# and race on rename → log entries shift twice or once depending on
+# interleaving. Multi-process workers need fcntl.flock instead — but
+# the v3 default is single-worker uvicorn, so a threading.Lock is
+# sufficient for the in-process thread pool used by asyncio.to_thread.
+_audit_lock = threading.Lock()
+_ledger_lock = threading.Lock()
+
 
 def _trusted_internal_nets() -> list[ipaddress._BaseNetwork]:
     """Docker-standard private CIDRs that bypass rate limiting.
@@ -117,6 +127,30 @@ def _is_trusted_internal(ip: str) -> bool:
     except ValueError:
         return False
     return any(addr in net for net in _TRUSTED_NETS)
+
+
+def _client_ip_for(req: Request) -> str:
+    """Return the originating client IP, honouring X-Forwarded-For only
+    when the immediate hop is itself a trusted reverse proxy.
+
+    Threat: if Cloudflare tunnel / nginx forwards XFF and the gateway
+    blindly trusts the header, an attacker on the public internet
+    appears as 127.0.0.1 (proxy loopback) and bypasses rate limits.
+
+    Rule: trust XFF *only* when `req.client.host` is itself an internal
+    address. Take the LEFTMOST entry in XFF (the original client) —
+    each hop appends to the right. If XFF is absent, fall back to
+    the direct connection's IP.
+    """
+    direct = req.client.host if req.client else "?"
+    if not _is_trusted_internal(direct):
+        return direct
+    xff = req.headers.get("x-forwarded-for", "")
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+    return direct
 
 
 def _check_rate(ip: str, route: str) -> tuple[bool, str]:
@@ -212,9 +246,10 @@ def _audit(action: str, **extra) -> None:
     }
     try:
         PROVISIONING_AUDIT.parent.mkdir(parents=True, exist_ok=True)
-        _rotate_audit_log()
-        with open(PROVISIONING_AUDIT, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        with _audit_lock:
+            _rotate_audit_log()
+            with open(PROVISIONING_AUDIT, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
     except Exception as e:
         logger.warning("provisioning audit write failed: %s", e)
 
@@ -236,8 +271,9 @@ def _ledger_record(request_id: str, event: str, **fields) -> None:
     }
     try:
         PROVISIONING_LEDGER.parent.mkdir(parents=True, exist_ok=True)
-        with open(PROVISIONING_LEDGER, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        with _ledger_lock:
+            with open(PROVISIONING_LEDGER, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
     except Exception as e:
         logger.warning("provisioning ledger write failed: %s", e)
 
@@ -338,7 +374,7 @@ def _validate_destroy_inputs(body: dict) -> tuple[dict, str]:
 async def _provision_handler(req: Request):
     started = time.time()
     request_id = secrets.token_hex(16)
-    client_ip = req.client.host if req.client else "?"
+    client_ip = _client_ip_for(req)
 
     # 1. Rate limit (per-IP token bucket + lockout)
     allowed, reason = _check_rate(client_ip, "provision")
@@ -409,7 +445,11 @@ async def _provision_handler(req: Request):
                    slug_hint=slug, vat=vat)
 
     try:
-        result = provisioning_engine.provision(
+        # provisioning_engine.provision is sync (httpx + Portainer +
+        # Cloudflare). Run in thread to avoid blocking the event loop
+        # for 5-60 s while other requests stall.
+        result = await asyncio.to_thread(
+            provisioning_engine.provision,
             slug_hint=slug or email,
             password=password,
             email=email,
@@ -549,7 +589,7 @@ async def _destroy_handler(req: Request):
     Successful destroy with a tenant key auto-revokes the key (one-shot).
     """
     started = time.time()
-    client_ip = req.client.host if req.client else "?"
+    client_ip = _client_ip_for(req)
 
     # 1. Rate limit
     allowed, reason = _check_rate(client_ip, "destroy")
@@ -620,7 +660,9 @@ async def _destroy_handler(req: Request):
            role=role, slug=slug, vat=vat, client_id=client_id)
 
     try:
-        result = provisioning_engine.destroy(
+        # Same async-blocking concern as /provision.
+        result = await asyncio.to_thread(
+            provisioning_engine.destroy,
             slug_hint=slug, vat=vat, client_id=client_id,
         )
     except Exception as e:

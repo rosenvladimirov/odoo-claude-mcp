@@ -525,26 +525,41 @@ def _check_internal_services_auth():
 
     Set MCP_INTERNAL_SERVICES_STRICT=1 to fail-fast in production.
     """
+    from urllib.parse import urlparse as _urlparse
+
+    def _hostname(url: str) -> str:
+        """Extract hostname (case-insensitive). Returns '' on parse error."""
+        try:
+            return (_urlparse(url).hostname or "").lower()
+        except Exception:
+            return ""
+
+    INTERNAL_HOSTS = {"qdrant", "ollama", "localhost", "127.0.0.1", "::1"}
+
     strict = os.environ.get("MCP_INTERNAL_SERVICES_STRICT", "").lower() in ("1", "true")
     qdrant_url = os.environ.get("QDRANT_URL", "http://qdrant:6333").rstrip("/")
     qdrant_key = os.environ.get("QDRANT_API_KEY", "").strip()
-    if "qdrant:" in qdrant_url or "127.0.0.1" in qdrant_url or "localhost" in qdrant_url:
+    qdrant_host = _hostname(qdrant_url)
+    if qdrant_host in INTERNAL_HOSTS:
         # Internal-only — auth optional
         pass
     elif not qdrant_key:
         msg = (
-            f"Qdrant URL {qdrant_url} appears external but QDRANT_API_KEY "
-            f"is empty. Set the key or move Qdrant to backend-only network."
+            f"Qdrant URL {qdrant_url} (host={qdrant_host!r}) appears external "
+            f"but QDRANT_API_KEY is empty. Set the key or move Qdrant to "
+            f"backend-only network."
         )
         if strict:
             raise RuntimeError(f"MCP_INTERNAL_SERVICES_STRICT=1: {msg}")
         logger.warning(f"[SEC] {msg}")
     # Ollama: same logic, but Ollama upstream still has no built-in auth
     ollama_url = os.environ.get("OLLAMA_URL", "http://ollama:11434").rstrip("/")
-    if not ("ollama:" in ollama_url or "127.0.0.1" in ollama_url or "localhost" in ollama_url):
+    ollama_host = _hostname(ollama_url)
+    if ollama_host not in INTERNAL_HOSTS:
         msg = (
-            f"Ollama URL {ollama_url} appears external. Ollama has no native "
-            f"auth — confine to backend network or front with reverse proxy + auth."
+            f"Ollama URL {ollama_url} (host={ollama_host!r}) appears external. "
+            f"Ollama has no native auth — confine to backend network or "
+            f"front with reverse proxy + auth."
         )
         if strict:
             raise RuntimeError(f"MCP_INTERNAL_SERVICES_STRICT=1: {msg}")

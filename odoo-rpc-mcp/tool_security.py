@@ -96,17 +96,31 @@ DEFAULT_PROTECTED_FROM_WRITE: set[str] = {
     "account.tax", "account.tax.group", "account.fiscal.position",
 }
 
-# Methods that are dangerous regardless of which model they run on.
-# These match substring within the method name (case-insensitive).
-DANGEROUS_METHOD_SUBSTRINGS: tuple[str, ...] = (
-    "upgrade", "install", "uninstall",
-)
-
 # Methods that require admin even if the model itself is unprotected.
+# Explicit allowlist (preferred over substring scan — the latter
+# false-positives on legitimate names like `pre_install_hook`,
+# `_uninstall` callbacks, `action_install_check`).
+#
+# All known module-lifecycle methods on `ir.module.module` plus the
+# `button_*` web-action variants. Models like `ir.module.module` are
+# already in PROTECTED_FROM_WRITE — these blocks add a second gate
+# for method-level invocation that does NOT touch fields directly.
 DANGEROUS_METHOD_EXACT: set[str] = {
+    # ir.module.module lifecycle
     "module_upgrade", "module_install", "module_uninstall",
     "module_download", "module_uninstall_module",
-    "execute", "execute_kw",  # nested method invocation
+    "search_modules",
+    # ir.module.module web-button variants (immediate = no wizard)
+    "button_install", "button_upgrade", "button_uninstall",
+    "button_immediate_install",
+    "button_immediate_upgrade",
+    "button_immediate_uninstall",
+    # Method invocation chain — calling these via odoo_execute would
+    # let a USER-role caller dispatch arbitrary methods bypassing the
+    # model+method gate.
+    "execute", "execute_kw",
+    # Internal Odoo lifecycle hook — exposed as a method for some
+    # registry-tampering tricks.
     "_unregister_hook",
 }
 
@@ -184,10 +198,6 @@ def is_protected_execute(tool_name: str, arguments: dict | None) -> tuple[bool, 
 
     if method in {"write", "create"} and model in PROTECTED_FROM_WRITE:
         return True, model, method, "protected_write"
-
-    for pat in DANGEROUS_METHOD_SUBSTRINGS:
-        if pat in method:
-            return True, model, method, "dangerous_method_pattern"
 
     if method in DANGEROUS_METHOD_EXACT:
         return True, model, method, "dangerous_method_exact"
