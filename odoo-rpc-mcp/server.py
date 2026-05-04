@@ -449,6 +449,42 @@ _oauth_codes: dict[str, dict] = {}
 _oauth_codes_lock = _threading_mod.Lock()
 
 
+def _oauth_redirect_uri_allowed(redirect_uri: str) -> bool:
+    """Validate `redirect_uri` against MCP_OAUTH_REDIRECT_URIS allowlist.
+
+    Allowlist format (CSV):
+      - Entries ending with `/` are treated as prefix matches:
+        `https://app.example.com/` matches `https://app.example.com/cb`
+      - Other entries are exact matches.
+
+    Behaviour matrix:
+      - allowlist empty + MCP_OAUTH_REDIRECT_URIS_STRICT=1 → reject all
+      - allowlist empty + non-strict → accept (legacy/dev), warn once
+      - allowlist set → accept iff entry matches; reject otherwise
+    """
+    raw = os.environ.get("MCP_OAUTH_REDIRECT_URIS", "").strip()
+    strict = os.environ.get("MCP_OAUTH_REDIRECT_URIS_STRICT", "").lower() in ("1", "true")
+    if not raw:
+        if strict:
+            logger.warning("[OAuth] strict mode but MCP_OAUTH_REDIRECT_URIS empty — rejecting %s", redirect_uri)
+            return False
+        if not getattr(_oauth_redirect_uri_allowed, "_warned", False):
+            logger.warning(
+                "[OAuth] MCP_OAUTH_REDIRECT_URIS not set — accepting any redirect_uri "
+                "(this is OK for dev only; set the env var for production)"
+            )
+            _oauth_redirect_uri_allowed._warned = True  # type: ignore
+        return True
+    entries = [e.strip() for e in raw.split(",") if e.strip()]
+    for entry in entries:
+        if entry.endswith("/"):
+            if redirect_uri.startswith(entry):
+                return True
+        elif redirect_uri == entry:
+            return True
+    return False
+
+
 def _oauth_issue_code(redirect_uri: str) -> str:
     """Mint a one-shot OAuth authorization code bound to redirect_uri."""
     code = _secrets_mod.token_urlsafe(32)
@@ -485,6 +521,23 @@ def _oauth_consume_code(code: str, redirect_uri: str | None) -> bool:
     if bound and redirect_uri and not hmac.compare_digest(bound, redirect_uri):
         return False
     return True
+
+
+def _open_for_write_nofollow(path: str):
+    """Open `path` for write, refusing to follow a symlink at the
+    final component. Closes a TOCTOU window where an attacker swaps
+    a regular file for a symlink between `_safe_save_path` validation
+    and the actual `open(...)` call.
+
+    Returns a binary file object; caller is responsible for closing.
+    Raises OSError(ELOOP) if the final component is a symlink.
+    """
+    fd = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+        0o644,
+    )
+    return os.fdopen(fd, "wb")
 
 
 def _safe_save_path(user_path: str) -> str:
@@ -6560,7 +6613,7 @@ def _execute_tool(name: str, args: dict) -> Any:
                 return {"error": str(e)}
             data = base64.b64decode(content_b64)
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-            with open(save_path, "wb") as f:
+            with _open_for_write_nofollow(save_path) as f:
                 f.write(data)
             result["saved_to"] = save_path
             result["bytes_written"] = len(data)
@@ -6733,7 +6786,7 @@ def _execute_tool(name: str, args: dict) -> Any:
             except ValueError as e:
                 return {"error": str(e)}
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-            with open(save_path, "wb") as f:
+            with _open_for_write_nofollow(save_path) as f:
                 f.write(pdf_bytes)
             return {"status": "saved", "path": save_path, "size": len(pdf_bytes)}
         return {"content_base64": b64.b64encode(pdf_bytes).decode(), "size": len(pdf_bytes)}
@@ -6800,7 +6853,8 @@ def _execute_tool(name: str, args: dict) -> Any:
             except ValueError as _e:
                 return {"error": str(_e)}
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-            with open(save_path, "wb") as f:
+            # Use _open_for_write_nofollow at the actual open site below.
+            with _open_for_write_nofollow(save_path) as f:
                 f.write(content)
             return {"status": "saved", "path": save_path, "size": len(content), "format": fmt, "records": len(ids)}
         return {"content_base64": b64.b64encode(content).decode(), "size": len(content), "format": fmt, "records": len(ids)}
@@ -6822,7 +6876,8 @@ def _execute_tool(name: str, args: dict) -> Any:
             except ValueError as _e:
                 return {"error": str(_e)}
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-            with open(save_path, "wb") as f:
+            # Use _open_for_write_nofollow at the actual open site below.
+            with _open_for_write_nofollow(save_path) as f:
                 f.write(resp.content)
             return {"status": "saved", "path": save_path, "size": len(resp.content)}
         return {"content_base64": b64.b64encode(resp.content).decode(), "size": len(resp.content)}
@@ -6857,7 +6912,8 @@ def _execute_tool(name: str, args: dict) -> Any:
             except ValueError as _e:
                 return {"error": str(_e)}
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-            with open(save_path, "wb") as f:
+            # Use _open_for_write_nofollow at the actual open site below.
+            with _open_for_write_nofollow(save_path) as f:
                 f.write(resp.content)
             return {"status": "saved", "path": save_path, "size": len(resp.content), "content_type": ct, "filename": filename}
         return {"content_base64": b64.b64encode(resp.content).decode(), "size": len(resp.content), "content_type": ct, "filename": filename}
@@ -6880,7 +6936,8 @@ def _execute_tool(name: str, args: dict) -> Any:
             except ValueError as _e:
                 return {"error": str(_e)}
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-            with open(save_path, "wb") as f:
+            # Use _open_for_write_nofollow at the actual open site below.
+            with _open_for_write_nofollow(save_path) as f:
                 f.write(resp.content)
             return {"status": "saved", "path": save_path, "size": len(resp.content), "content_type": ct}
         return {"content_base64": b64.b64encode(resp.content).decode(), "size": len(resp.content), "content_type": ct}
@@ -6906,7 +6963,8 @@ def _execute_tool(name: str, args: dict) -> Any:
             except ValueError as _e:
                 return {"error": str(_e)}
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-            with open(save_path, "wb") as f:
+            # Use _open_for_write_nofollow at the actual open site below.
+            with _open_for_write_nofollow(save_path) as f:
                 f.write(resp.content)
             return {"status": "saved", "path": save_path, "size": len(resp.content)}
         return {"content_base64": b64.b64encode(resp.content).decode(), "size": len(resp.content), "type": btype}
@@ -6953,7 +7011,8 @@ def _execute_tool(name: str, args: dict) -> Any:
             except ValueError as _e:
                 return {"error": str(_e)}
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-            with open(save_path, "wb") as f:
+            # Use _open_for_write_nofollow at the actual open site below.
+            with _open_for_write_nofollow(save_path) as f:
                 f.write(resp.content)
             return {"status": "saved", "path": save_path, "size": len(resp.content)}
         return {"content_base64": b64.b64encode(resp.content).decode(), "size": len(resp.content)}
@@ -7722,15 +7781,33 @@ def _execute_tool(name: str, args: dict) -> Any:
         readable_field_names = [n for n, d in all_fields.items() if d.get("type") != "binary"]
         records = conn.execute_kw(model, "read", [ids], {"fields": readable_field_names})
 
+        # Per-related cardinality cap. Without it, an attacker (or a
+        # well-meaning caller) can pull tens of thousands of records via
+        # a permissive domain — memory blowup + audit-log bloat.
+        max_related = int(os.environ.get("MCP_RECORD_BACKUP_MAX_RELATED", "5000"))
         related_dumps = {}
         for rel in include_related:
             rm = rel["model"]
             rd = rel.get("domain", [])
             rf = rel.get("fields") or None
+            # Pre-flight count check on the target model
+            count = conn.execute_kw(rm, "search_count", [rd])
+            if count > max_related:
+                return {
+                    "error": (
+                        f"odoo_record_backup: include_related {rm!r} domain "
+                        f"matches {count} records, exceeds cap {max_related}. "
+                        f"Tighten the domain or raise MCP_RECORD_BACKUP_MAX_RELATED."
+                    ),
+                    "primary_model": model,
+                }
             if rf:
-                related_records = conn.execute_kw(rm, "search_read", [rd], {"fields": rf})
+                related_records = conn.execute_kw(
+                    rm, "search_read", [rd],
+                    {"fields": rf, "limit": max_related},
+                )
             else:
-                ids_only = conn.execute_kw(rm, "search", [rd])
+                ids_only = conn.execute_kw(rm, "search", [rd], {"limit": max_related})
                 if ids_only:
                     rm_fields = conn.execute_kw(rm, "fields_get", [], {"attributes": ["type"]})
                     rm_readable = [n for n, d in rm_fields.items() if d.get("type") != "binary"]
@@ -9310,6 +9387,17 @@ def create_app():
             "MCP_REQUIRE_AUTH=1 but MCP_SECRET_TOKEN is empty — every /mcp request "
             "will be rejected. Set MCP_SECRET_TOKEN or MCP_REQUIRE_AUTH=0 (NOT for prod)."
         )
+    # T3-6: alert when MCP_OAUTH_CLIENT_SECRET silently inherits the
+    # bearer secret. The OAuth `client_credentials` grant then issues
+    # the same token back as the access_token — auth is a no-op for
+    # any client knowing MCP_SECRET_TOKEN. Operators should set a
+    # distinct secret for actual OAuth client isolation.
+    if secret_token and oauth_client_secret == secret_token:
+        logger.warning(
+            "[OAuth] MCP_OAUTH_CLIENT_SECRET defaults to MCP_SECRET_TOKEN — "
+            "client_credentials grant provides no isolation. Set a distinct "
+            "secret via MCP_OAUTH_CLIENT_SECRET for production."
+        )
     ollama_upstream = os.environ.get("OLLAMA_UPSTREAM", "http://ollama:11434").rstrip("/")
     ollama_api_key = os.environ.get("OLLAMA_API_KEY", "").strip()
     protected_paths = {"/mcp", "/sse", "/messages", "/api/session/register",
@@ -9527,15 +9615,25 @@ def create_app():
             request = Request(scope, receive)
             redirect_uri = request.query_params.get("redirect_uri", "")
             state = request.query_params.get("state", "")
-            if redirect_uri:
+            if not redirect_uri:
+                response = JSONResponse({"error": "missing redirect_uri"}, status_code=400)
+            elif not _oauth_redirect_uri_allowed(redirect_uri):
+                # Open-redirect / code-leak defence (T3-1). Do NOT
+                # echo the redirect_uri back in the body — log only,
+                # to avoid amplifying the attack via error reflection.
+                logger.warning("[OAuth] rejected redirect_uri: %s", redirect_uri[:200])
+                response = JSONResponse(
+                    {"error": "invalid_request",
+                     "error_description": "redirect_uri not in allowlist"},
+                    status_code=400,
+                )
+            else:
                 code = _oauth_issue_code(redirect_uri)
                 sep = "&" if "?" in redirect_uri else "?"
                 target = f"{redirect_uri}{sep}code={code}"
                 if state:
                     target += f"&state={state}"
                 response = RedirectResponse(target)
-            else:
-                response = JSONResponse({"error": "missing redirect_uri"}, status_code=400)
             await response(scope, receive, send)
             return
 

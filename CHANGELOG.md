@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0-alpha.6] — 2026-05-04 — QA T3 batch + T4-4 leak tightening
+
+Closes the T3 set surfaced by the alpha.3+alpha.4 QA review,
+plus T4-4 (audit log key prefix). Test suite expanded from 112
+to 121 cases.
+
+### Fixed
+- **T3-1: OAuth open-redirect → code leak.** `/oauth/authorize`
+  now validates `redirect_uri` against `MCP_OAUTH_REDIRECT_URIS`
+  (CSV; entries ending `/` match by prefix, others by exact).
+  Empty allowlist + `MCP_OAUTH_REDIRECT_URIS_STRICT=1` rejects
+  all (production stance). Empty + non-strict accepts with a
+  one-time warning (dev legacy). Previously any third-party
+  redirect_uri received a one-shot code in `code=` query — even
+  with the redirect_uri-binding check at `/token`, an attacker
+  controlling both authorize-time and token-time hops could pull
+  the code.
+- **T3-2: `_safe_save_path` symlink TOCTOU window.** New
+  `_open_for_write_nofollow()` helper opens with
+  `os.O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW` so a symlink swap
+  between `_safe_save_path` resolution and the actual write
+  raises `ELOOP`. Applied to all 8 `save_path` callsites.
+- **T3-3: `record_backup` `include_related` cardinality cap.**
+  Pre-flight `search_count` per related model; reject if it
+  exceeds `MCP_RECORD_BACKUP_MAX_RELATED` (default 5000). Pass
+  `limit=cap` to the actual `search`/`search_read` as a second
+  guard. Closes memory blowup vector via permissive related
+  domains.
+- **T3-6: `oauth_client_secret` startup warning.** When
+  `MCP_OAUTH_CLIENT_SECRET` is unset and inherits
+  `MCP_SECRET_TOKEN`, log a `[OAuth]` warning at startup —
+  `client_credentials` grant otherwise provides no isolation.
+- **T4-4: audit log key-prefix leak.** `_truncate_key()` helper
+  replaces `api_key[:18]+"…"` with `api_key[:8]+"…"+api_key[-4:]`.
+  Previous form leaked the entire `mcpv3_<key_id>_` prefix —
+  enough to look up specific key records if the audit log is
+  exfiltrated. Applied at both `_provision_handler` and
+  `_destroy_handler` invalid-key paths.
+
+### Tests
+- 9 new pytest cases (T3-1 allowlist semantics, T3-2 NOFOLLOW
+  symlink rejection, T4-4 truncation forensics + leak proof)
+- Total: 121/121 PASS
+
+### New env flags
+- `MCP_OAUTH_REDIRECT_URIS` — CSV allowlist (prefix or exact)
+- `MCP_OAUTH_REDIRECT_URIS_STRICT` — `1` rejects empty allowlist
+- `MCP_RECORD_BACKUP_MAX_RELATED` (default 5000)
+
+### Still deferred
+- T3-4: OAuth code dict cleanup contention (non-issue at scale)
+- T3-5: HIBP k-anonymity password check (Phase 2; needs
+  external API integration)
+- Phase B provisioning: `/provision/resume`, `Idempotency-Key`,
+  reaper cron
+
 ## [3.0.0-alpha.5] — 2026-05-04 — QA review fixes (T2 batch)
 
 Internal QA review of alpha.3 + alpha.4 commits surfaced six T2

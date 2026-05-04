@@ -282,6 +282,22 @@ def _err(reason: str, status: int = 400, **extra) -> JSONResponse:
     return JSONResponse({"error": reason, **extra}, status_code=status)
 
 
+def _truncate_key(api_key: str) -> str:
+    """Return a forensic-useful but minimal-leak preview of an API key.
+
+    Format: `<first 8>…<last 4>`. Compared to the previous `[:18]+…`
+    (which leaked the entire key_id portion of `mcpv3_<key_id>_<random>`,
+    enabling targeted key-revocation lookups by anyone with audit-log
+    access), this surfaces just enough to correlate to a specific key
+    record without exposing the prefix tail.
+    """
+    if not api_key:
+        return "<empty>"
+    if len(api_key) <= 12:
+        return "<short>"
+    return f"{api_key[:8]}…{api_key[-4:]}"
+
+
 # ── Input validation ────────────────────────────────────────────────
 # Length caps protect downstream filesystem/Odoo paths and audit log.
 # Patterns aim to reject obvious injection vectors (shell, path
@@ -418,7 +434,7 @@ async def _provision_handler(req: Request):
     if not key_record:
         _record_failure(client_ip)
         _audit("REJECTED", reason="invalid_api_key", ip=client_ip,
-               key_prefix=api_key[:18] + "…")
+               key_prefix=_truncate_key(api_key))
         return _err("invalid_api_key", 401)
 
     if not api_key_manager.has_capability(key_record, api_key_manager.CAP_PROVISION):
@@ -631,7 +647,7 @@ async def _destroy_handler(req: Request):
     if not key_record:
         _record_failure(client_ip)
         _audit("DESTROY_REJECTED", reason="invalid_api_key", ip=client_ip,
-               key_prefix=api_key[:18] + "…")
+               key_prefix=_truncate_key(api_key))
         return _err("invalid_api_key", 401)
 
     if not api_key_manager.has_capability(key_record, api_key_manager.CAP_DESTROY):

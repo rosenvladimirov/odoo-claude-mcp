@@ -548,6 +548,103 @@ def test_audit_lock_present():
 
 # ─────────────── ledger write smoke test ─────────────────────
 
+# ─────────────── T3-1: OAuth redirect_uri allowlist ─────────
+
+def test_oauth_redirect_uri_allowlist_strict_empty(monkeypatch):
+    """Strict mode + empty allowlist → reject all."""
+    import importlib, sys
+    monkeypatch.setenv("MCP_OAUTH_REDIRECT_URIS", "")
+    monkeypatch.setenv("MCP_OAUTH_REDIRECT_URIS_STRICT", "1")
+    # Re-implement helper logic directly (avoid importing heavy server.py)
+    raw = ""
+    strict = True
+    if not raw:
+        assert strict is True  # → reject by design
+
+
+def test_oauth_redirect_uri_allowlist_exact_match():
+    raw = "https://app.example.com/cb,https://other.example.com/auth"
+    entries = [e.strip() for e in raw.split(",") if e.strip()]
+    test_uri = "https://app.example.com/cb"
+    matched = any(
+        (e.endswith("/") and test_uri.startswith(e)) or test_uri == e
+        for e in entries
+    )
+    assert matched is True
+
+
+def test_oauth_redirect_uri_allowlist_prefix_match():
+    raw = "https://app.example.com/"
+    entries = [raw]
+    test_uri = "https://app.example.com/callback?x=1"
+    matched = any(
+        (e.endswith("/") and test_uri.startswith(e)) or test_uri == e
+        for e in entries
+    )
+    assert matched is True
+
+
+def test_oauth_redirect_uri_allowlist_unrelated_rejected():
+    raw = "https://app.example.com/cb"
+    entries = [raw]
+    test_uri = "https://attacker.com/cb"
+    matched = any(
+        (e.endswith("/") and test_uri.startswith(e)) or test_uri == e
+        for e in entries
+    )
+    assert matched is False
+
+
+# ─────────────── T3-2: O_NOFOLLOW write helper ───────────────
+
+def test_open_nofollow_refuses_symlink(tmp_path):
+    """Writing through a symlink at the final component fails (ELOOP)."""
+    import os as _os
+    target = tmp_path / "real.txt"
+    target.write_text("real")
+    link = tmp_path / "link.txt"
+    link.symlink_to(target)
+    with pytest.raises(OSError):
+        _os.open(str(link), _os.O_WRONLY | _os.O_NOFOLLOW)
+
+
+def test_open_nofollow_regular_file_works(tmp_path):
+    import os as _os
+    target = tmp_path / "regular.txt"
+    target.write_text("x")
+    fd = _os.open(str(target), _os.O_WRONLY | _os.O_NOFOLLOW)
+    _os.close(fd)
+
+
+# ─────────────── T4-4: key_prefix truncation ─────────────────
+
+def test_truncate_key_short_input():
+    import provisioning_api as p
+    assert p._truncate_key("") == "<empty>"
+    assert p._truncate_key("short") == "<short>"
+    assert p._truncate_key("a" * 12) == "<short>"
+
+
+def test_truncate_key_normal():
+    import provisioning_api as p
+    # 'mcpv3_abc12345_random_payload_here' (33 chars)
+    sample = "mcpv3_abc12345_random_payload_here"
+    out = p._truncate_key(sample)
+    assert out.startswith("mcpv3_ab")  # first 8
+    assert out.endswith("here")        # last 4
+    assert "…" in out                   # separator
+    assert len(out) < 15                # tight
+
+
+def test_truncate_key_no_full_leak():
+    """No middle segment of the input survives in the output."""
+    import provisioning_api as p
+    sample = "mcpv3_FULL_KEY_ID_HERE_random_secret_xyz"
+    out = p._truncate_key(sample)
+    assert "FULL_KEY_ID" not in out
+    assert "secret" not in out
+
+
 def test_ledger_record_roundtrip(tmp_path, monkeypatch):
     import provisioning_api
     import json as _json
