@@ -7,6 +7,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0-alpha.4] — 2026-05-04 — Provisioning hardening
+
+### Security (provisioning surface)
+- **Rate limiting** per-IP token bucket on `/provision` (5/min) and
+  `/destroy` (10/min). Failed-auth lockout: 20 fails in 1h trips a
+  1h IP block. Internal Docker networks (RFC 1918 minus 192.168/16)
+  bypass via `ipaddress` module + `MCP_TRUSTED_INTERNAL_NETS` env
+  override. 192.168.0.0/16 is **deliberately excluded** — that range
+  is residential LAN, common source of unintended public traffic.
+- **Body size cap** of 4 KB on both endpoints (env:
+  `MCP_PROVISION_BODY_MAX`). Rejects declared `Content-Length`
+  exceeding cap before reading; streams with hard cap as defence
+  against chunked-encoding bypass. Mitigates memory DoS via huge
+  JSON payloads.
+- **Strict input validation**: regex + length caps for
+  `email` (RFC 5322 lite, ≤254), `slug` (alphanumeric + dash/
+  underscore, ≤50), `vat` (2-letter country prefix + alphanumeric,
+  ≤14), `anthropic_api_key` (`sk-ant-` prefix, 27-207 chars),
+  `client_id`. Rejects shell injection in slug, path traversal in
+  email, malformed VATs.
+- **NIST 800-63B password policy**: length-only (≥14, ≤256), reject
+  zero-entropy degenerates (`<4 distinct chars`). Composition rules
+  (force upper+lower+digit+symbol) **removed** — industry-deprecated
+  pattern that increases user burden without measurable strength gain.
+  Future: HIBP k-anonymity check.
+- **Atomic state — Stripe-pattern roll-forward**: when Stage 2
+  (tenant key issuance) fails after Stage 1 (stack provisioned), now
+  returns **HTTP 409** with structured `{status: "partial",
+  request_id, client_id, mcp_url, retry_endpoint:
+  "/provision/resume"}` instead of 500. Auto-rollback was rejected
+  per AWS Step Functions saga + brandur.org idempotency guidance —
+  unsafe when Stage 1 is idempotent on `client_id` and may be a
+  re-use of a legitimate prior provision. Caller should retry only
+  Stage 2 via `/provision/resume` (Phase B endpoint).
+- **Append-only provisioning ledger** at
+  `/data/provisioning_ledger.jsonl`. One JSONL row per stage
+  transition (`started`, `stage1_done`, `stage2_done`, `complete`,
+  `partial`, `failed`). This is the recovery-state store that
+  `/provision/resume` and the reaper cron will read. Tail-friendly,
+  operator-readable.
+- **Audit log size-based rotation**: at 50 MB, rotates to `.log.1`
+  through `.log.5` (env: `MCP_AUDIT_LOG_MAX_BYTES`,
+  `MCP_AUDIT_LOG_KEEP`). Closes audit log unbounded growth gap.
+- **`request_id` propagation**: every audit + ledger row tagged with
+  16-byte hex token. End-to-end correlation for operator debugging.
+
+### Deferred to Phase B
+- `/provision/resume?request_id=` endpoint (read ledger, retry only
+  failed stage)
+- `Idempotency-Key` request header (RFC draft / Stripe-style 24h
+  response cache, race-free for concurrent VAT calls)
+- Reaper cron for `status=partial AND age >24h` (alert / destroy)
+
+### New env flags
+- `MCP_TRUSTED_INTERNAL_NETS` — CSV of CIDRs to bypass rate limit
+- `MCP_PROVISION_BODY_MAX` (default 4096)
+- `MCP_PROVISION_FAIL_THRESHOLD` (default 20)
+- `MCP_PROVISION_FAIL_WINDOW_SEC` (default 3600)
+- `MCP_PROVISION_LOCKOUT_SEC` (default 3600)
+- `MCP_PROVISION_MIN_PASSWORD_LEN` (default 14)
+- `MCP_PROVISION_MAX_PASSWORD_LEN` (default 256)
+- `MCP_AUDIT_LOG_MAX_BYTES` (default 50 MB)
+- `MCP_AUDIT_LOG_KEEP` (default 5)
+- `PROVISIONING_LEDGER_FILE` (default /data/provisioning_ledger.jsonl)
+
+## [3.0.0-alpha.3] — 2026-05-04 — Phase 1 RPC hardening (audit T1+T2+T3)
+
+(VERSION file backfill — commit `027ded2` shipped this bump in the
+message but did not update the VERSION file. Recorded here for
+release-history completeness.)
+
+### Security
+- **Sensitive header redaction** on `/mcp` and `/oauth/*` debug log
+  (Authorization, X-Api-Token, X-Odoo-Api-Key, cookie,
+  x-admin-rechallenge, X-Bridge-Token): first/last 4 chars only.
+- **`hmac.compare_digest`** replaces `==` in Bearer / admin token
+  comparison at 4 sites (`/mcp` Bearer fallback, `/admin/memory`,
+  filestore, customs).
+- **`_safe_save_path()`** helper confines all `save_path` tool
+  operations under `MCP_DOWNLOAD_ROOT` (default `/data/downloads`);
+  rejects `..` traversal and absolute paths outside root. Applied to
+  8 callsites (attachment_download, web_report, public_access_*).
+- **`record_backup` ids cap** (default 1000, env
+  `MCP_RECORD_BACKUP_MAX_IDS`).
+- **`_xmlrpc_validate`** enforces TLS verify when URL is in
+  `ALLOWED_ODOO_URLS` or `MCP_TLS_VERIFY_ALWAYS=1`. Self-signed dev
+  servers stay lax by default.
+- **One-shot OAuth authorization codes** (60s TTL, redirect_uri-
+  bound, single-use) replace `code=secret_token` leak.
+  `client_credentials` grant uses `hmac.compare_digest` on both
+  client_id and client_secret.
+- **Startup security checks**: `_check_secrets_perms` refuses
+  group/world readable secret files (strict mode);
+  `_check_internal_services_auth` warns/fails when Qdrant/Ollama
+  appear external without auth.
+
+### Tool security
+- **`DEFAULT_PROTECTED_FROM_WRITE`**: 21 system models
+  (res.users/groups, ir.module.module, ir.config_parameter,
+  ir.actions.server, ir.cron, ir.mail_server, account.* core).
+- **`DANGEROUS_METHOD_SUBSTRINGS`**: upgrade/install/uninstall.
+- **`DANGEROUS_METHOD_EXACT`**: execute/execute_kw/module_*.
+- **`is_protected_execute`** extended with 5 deny reasons.
+- **`is_protected_write_create`** gates `odoo_write`/`odoo_create`
+  on PROTECTED_FROM_WRITE for non-admin role.
+
+### Production override
+- New `docker-compose.prod-secure.yml`: `ports: []` for Qdrant and
+  Ollama (backend-only); strict env flags
+  (`MCP_TLS_VERIFY_ALWAYS=1`, `MCP_CHMOD_BOOT_CHECK=strict`,
+  `MCP_INTERNAL_SERVICES_STRICT=1`).
+
 ## [3.0.0-alpha.2] — 2026-05-04 — RBAC API keys
 
 ### Security (BREAKING for legacy keys)
