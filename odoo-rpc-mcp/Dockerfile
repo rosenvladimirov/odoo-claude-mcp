@@ -43,6 +43,7 @@ COPY --chmod=644 provisioning_engine.py .
 COPY --chmod=644 provisioning_api.py .
 COPY --chmod=644 cloudflare_provisioning.py .
 COPY --chmod=644 client_stack.template.yml .
+COPY --chmod=755 migrate_legacy_keys.py .
 
 RUN useradd -m -s /bin/bash mcp && \
     mkdir -p /data && chown mcp:mcp /data

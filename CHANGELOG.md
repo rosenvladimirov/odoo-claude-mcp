@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0-alpha.2] — 2026-05-04 — RBAC API keys
+
+### Security (BREAKING for legacy keys)
+- `api_key_manager.py` — RBAC schema: every key now carries `role`
+  (admin/tenant), `scope` (`["*"]` for admin, list of `client_id` for
+  tenant), and `capabilities` (`provision/destroy/read/issue_keys`).
+- Plaintext key format changed to `mcpv3_<key_id_hex>_<random>` — the
+  prefix permits **O(1) lookup** on verify (no scan over all records,
+  no DoS surface from argon2-on-every-call).
+- Replaced argon2id with **HMAC-SHA256 + server-side pepper** (env var
+  `MCP_KEY_PEPPER`, ≥32 chars). Without the pepper, all verifies fail
+  closed. Argon2 is intended for low-entropy passwords; for 256-bit
+  random tokens HMAC is the correct primitive and orders of magnitude
+  faster.
+- Legacy argon2 records are **rejected on verify** (no silent
+  back-compat). Operators must run `migrate_legacy_keys.py` (force
+  revoke) and re-issue replacements via `provision_issue_api_key`.
+  Auto-promotion was deliberately not implemented — it would convert
+  a leaked old key into max privilege.
+
+### Provisioning API
+- `/provision` requires the caller's key to have the `provision`
+  capability. On success, the response now also includes a freshly
+  issued `tenant_api_key` scoped to the new `client_id` with
+  `destroy`-only capability. The client stack stores this for future
+  teardown without needing the operator's admin key.
+- `/destroy` requires the `destroy` capability. **Tenant-role keys
+  must include `client_id` in the body** and that id must match the
+  key's bound scope; admin-role keys may pass any of `slug`/`vat`/
+  `client_id`. Successful destroy from a tenant key auto-revokes the
+  key (one-shot teardown).
+
+### Tooling
+- `provision_issue_api_key` admin tool gains optional `role`,
+  `scope_csv`, `capabilities_csv` parameters. Default still issues an
+  admin key (back-compatible at the call site).
+- New file: `migrate_legacy_keys.py` — one-shot operator script.
+
+### Added — Memory-driven weekly timesheet tools (2026-05-02)
+- New `timesheet_engine.py` module — scans memory progress files
+  (`project_*`, `session_*`, `qa_plan_*`, `roadmap_*`) within a week,
+  resolves each to an Odoo `project.project` via frontmatter
+  (`project_id` / `project_name`), filename keyword, or body keyword
+  scan against a built-in keyword map (Алпинтер, Теолино, Tri-Wall,
+  Полигруп, СОЛИД 55, MRP Design Matrix, …), estimates hours from
+  explicit time markers (`Xh`, `Xч`) or content density (1h base + 0.5/1h
+  bonus for long entries, capped at 4h/file/day), and proposes missing
+  `account.analytic.line` entries. Idempotent — already-logged hours
+  are subtracted before proposing.
+- New tool `odoo_timesheet_from_memory` — proposes (and optionally
+  creates with `dry_run=False`) timesheet entries for the configured
+  week. Returns per-day per-project breakdown and the list of
+  unresolved memory files (no project match).
+- New tool `odoo_timesheet_weekly_report` — read-only weekly summary
+  combining logged hours (per-day, per-project, raw lines) with the
+  unresolved-file list and missing proposals from the engine.
+
 ## [3.0.0-alpha.1] — 2026-04-29 — `/destroy` endpoint LIVE
 
 Released and deployed to `mcp.odoo-shell.space`. Image:
