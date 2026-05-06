@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="bg">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tool Catalog · Odoo Claude MCP</title>
+<meta name="description" content="Complete catalog of 197+ MCP tools for Odoo, organized by category with descriptions and use cases.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --brand: #714BA0;
+    --brand-light: #9D7CC7;
+    --brand-dark: #4E2F75;
+    --accent: #21B6B7;
+    --accent-light: #4FCACB;
+    --text: #1A1A2E;
+    --text-muted: #5C5C70;
+    --bg: #F6F4FA;
+    --surface: #FFFFFF;
+    --border: rgba(113, 75, 160, 0.12);
+    --code-bg: #1A1A2E;
+    --code-text: #e1e1e8;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    color: var(--text); background: var(--bg); line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  code, pre, .mono { font-family: 'JetBrains Mono', monospace; }
+  a { color: var(--brand); text-decoration: none; }
+  a:hover { color: var(--brand-dark); }
+
+  /* Navbar */
+  .navbar {
+    background: rgba(255,255,255,0.95);
+    backdrop-filter: saturate(180%) blur(16px);
+    border-bottom: 1px solid var(--border);
+    padding: 0 32px; height: 64px;
+    display: flex; align-items: center; gap: 24px;
+    position: sticky; top: 0; z-index: 100;
+  }
+  .navbar .brand {
+    font-weight: 800; color: var(--brand); font-size: 1.05em;
+    letter-spacing: -0.02em; display: flex; align-items: center; gap: 10px;
+  }
+  .navbar .brand::before {
+    content: ''; width: 28px; height: 28px;
+    background: linear-gradient(135deg, var(--brand) 0%, var(--accent) 100%);
+    border-radius: 8px; display: inline-block;
+  }
+  .navbar nav { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
+  .navbar nav a {
+    color: var(--text-muted); font-size: 0.9em; font-weight: 500;
+    padding: 8px 14px; border-radius: 6px; transition: all 0.2s;
+  }
+  .navbar nav a:hover { color: var(--brand); background: rgba(113,75,160,0.06); }
+  .navbar nav a.primary { background: var(--brand); color: #fff; }
+
+  /* Page header */
+  .page-head {
+    padding: 56px 32px 40px;
+    background: linear-gradient(135deg, var(--brand-dark) 0%, var(--brand) 100%);
+    color: #fff; text-align: center;
+  }
+  .page-head h1 {
+    font-size: 2.2em; font-weight: 800; letter-spacing: -0.02em;
+    margin-bottom: 12px;
+  }
+  .page-head p { color: rgba(255,255,255,0.9); max-width: 720px; margin: 0 auto; }
+
+  /* Main layout: sticky side nav + content */
+  .layout {
+    max-width: 1400px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    gap: 40px;
+    padding: 40px 32px;
+  }
+  .sidenav {
+    position: sticky; top: 84px; align-self: start;
+    max-height: calc(100vh - 100px); overflow-y: auto;
+    padding-right: 8px;
+  }
+  .sidenav h5 {
+    font-size: 0.75em; font-weight: 700; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.08em;
+    margin: 16px 0 8px; padding-left: 12px;
+  }
+  .sidenav h5:first-child { margin-top: 0; }
+  .sidenav ul { list-style: none; }
+  .sidenav ul li a {
+    display: block; padding: 8px 12px; border-radius: 6px;
+    color: var(--text); font-size: 0.9em; font-weight: 500;
+    transition: all 0.15s;
+  }
+  .sidenav ul li a:hover { background: rgba(113,75,160,0.08); color: var(--brand); }
+  .sidenav ul li a .count {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78em; color: var(--text-muted); float: right;
+  }
+  .sidenav ul li a.new::after {
+    content: '★';
+    color: var(--accent); margin-left: 4px;
+  }
+
+  /* Category */
+  .cat { scroll-margin-top: 84px; margin-bottom: 56px; }
+  .cat-head {
+    display: flex; align-items: center; gap: 14px;
+    margin-bottom: 8px; padding-bottom: 16px;
+    border-bottom: 2px solid var(--border);
+  }
+  .cat-head .cat-icon {
+    width: 48px; height: 48px; border-radius: 12px;
+    background: linear-gradient(135deg, var(--brand) 0%, var(--accent) 100%);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px; color: #fff; flex-shrink: 0;
+  }
+  .cat-head h2 {
+    font-size: 1.5em; font-weight: 700; letter-spacing: -0.01em;
+    margin-bottom: 4px;
+  }
+  .cat-head p { color: var(--text-muted); font-size: 0.92em; }
+  .cat-head .count-pill {
+    margin-left: auto;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.82em;
+    padding: 4px 12px; background: rgba(113,75,160,0.1);
+    color: var(--brand); border-radius: 999px; font-weight: 600;
+    white-space: nowrap;
+  }
+  .new-pill {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    background: var(--accent); color: #fff; font-size: 0.7em;
+    font-weight: 700; letter-spacing: 0.05em; margin-left: 8px;
+    vertical-align: middle;
+  }
+
+  /* Tool card */
+  .tools { display: grid; gap: 16px; margin-top: 20px; }
+  .tool {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px 24px;
+    transition: all 0.2s;
+  }
+  .tool:hover { border-color: var(--brand-light); box-shadow: 0 4px 16px rgba(78,47,117,0.08); }
+  .tool-head {
+    display: flex; align-items: baseline; gap: 12px;
+    flex-wrap: wrap; margin-bottom: 10px;
+  }
+  .tool-head h3 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1em; font-weight: 700; color: var(--brand);
+  }
+  .tool-head .meta {
+    font-size: 0.78em; color: var(--text-muted);
+    padding: 2px 8px; background: rgba(0,0,0,0.04); border-radius: 4px;
+  }
+  .tool > p {
+    font-size: 0.92em; color: var(--text-muted); margin-bottom: 14px;
+  }
+  .tool details summary {
+    cursor: pointer; font-size: 0.85em; font-weight: 600;
+    color: var(--brand); user-select: none;
+    padding: 6px 0; outline: none;
+  }
+  .tool details summary::marker { content: '▸ '; }
+  .tool details[open] summary::marker { content: '▾ '; }
+  .tool details .uses {
+    margin-top: 12px; padding-top: 12px;
+    border-top: 1px dashed var(--border);
+  }
+  .tool details h5 {
+    font-size: 0.8em; font-weight: 700; color: var(--text);
+    text-transform: uppercase; letter-spacing: 0.05em;
+    margin: 8px 0 6px;
+  }
+  .tool details ul {
+    list-style: none; font-size: 0.88em; margin-bottom: 10px;
+  }
+  .tool details ul li {
+    padding: 3px 0 3px 18px; position: relative;
+  }
+  .tool details ul li::before {
+    content: '›'; position: absolute; left: 4px;
+    color: var(--accent); font-weight: 700;
+  }
+  .tool pre {
+    background: var(--code-bg); color: var(--code-text);
+    padding: 14px 16px; border-radius: 8px; overflow-x: auto;
+    font-size: 0.82em; line-height: 1.6; margin: 8px 0;
+  }
+  .tool pre code { color: inherit; background: transparent; padding: 0; }
+  code {
+    background: rgba(113,75,160,0.08); padding: 2px 6px; border-radius: 4px;
+    font-size: 0.88em; color: var(--brand);
+  }
+
+  .footer {
+    background: var(--text); color: rgba(255,255,255,0.7);
+    padding: 32px; text-align: center; font-size: 0.9em;
+  }
+  .footer a { color: var(--accent-light); }
+
+  @media (max-width: 960px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidenav { position: static; max-height: none; }
+  }
+</style>
+</head>
+<body>
+
+<nav class="navbar">
+  <a href="index.html" class="brand">Odoo Claude MCP</a>
+  <nav>
+    <a href="index.html">Home</a>
+    <a href="index.html#tracks">Tracks</a>
+    <a href="index.html#modules">Odoo Modules</a>
+    <a href="index.html#signin">Sign in</a>
+    <a href="https://github.com/rosenvladimirov/odoo-claude-mcp" target="_blank">GitHub</a>
+    <a href="https://github.com/rosenvladimirov/odoo-claude-mcp/blob/2.0/CHANGELOG.md" class="primary" target="_blank">Changelog</a>
+  </nav>
+</nav>
+
+<header class="page-head">
+  <h1>Tool Catalog</h1>
+  <p>197+ MCP tools organized by category. Click a category in the sidebar to jump, or expand any tool card to see parameters, use cases, and an example call.</p>
+</header>
+
+<div class="layout">
+
+  <!-- ─── Side nav ────────────────────────────────────── -->
+  <aside class="sidenav">
+    <h5>Odoo Core</h5>
+    <ul>
+      <li><a href="#crud">CRUD &amp; Search <span class="count">14</span></a></li>
+      <li><a href="#introspection">Introspection <span class="count">4</span></a></li>
+      <li><a href="#connections">Connections &amp; Auth <span class="count">12</span></a></li>
+      <li><a href="#web-session">Web Session <span class="count">7</span></a></li>
+      <li><a href="#attachments">Attachments <span class="count">4</span></a></li>
+      <li><a href="#reports">Reporting <span class="count">6</span></a></li>
+    </ul>
+
+    <h5>Content &amp; Website</h5>
+    <ul>
+      <li><a href="#translate" class="new">Translations <span class="count">4</span></a></li>
+      <li><a href="#snippets" class="new">Website Snippets <span class="count">5</span></a></li>
+      <li><a href="#portal">Portal &amp; Public <span class="count">8</span></a></li>
+    </ul>
+
+    <h5>Bulgaria &amp; AI</h5>
+    <ul>
+      <li><a href="#bg-localization">BG Localization <span class="count">5</span></a></li>
+      <li><a href="#ai">AI Tokenizer <span class="count">5</span></a></li>
+      <li><a href="#memory">Memory System <span class="count">6</span></a></li>
+    </ul>
+
+    <h5>Integrations</h5>
+    <ul>
+      <li><a href="#google">Google Workspace <span class="count">11</span></a></li>
+      <li><a href="#telegram">Telegram <span class="count">7</span></a></li>
+      <li><a href="#ssh-git">SSH &amp; Git <span class="count">3</span></a></li>
+    </ul>
+
+    <h5>Infrastructure</h5>
+    <ul>
+      <li><a href="#oca-ee">OCA &amp; Enterprise <span class="count">25</span></a></li>
+      <li><a href="#portainer">Portainer &amp; Docker <span class="count">30</span></a></li>
+      <li><a href="#github">GitHub <span class="count">36</span></a></li>
+      <li><a href="#filesystem">Filesystem <span class="count">15</span></a></li>
+    </ul>
+  </aside>
+
+  <!-- ─── Content ───────────────────────────────────────── -->
+  <main>
+
+    <!-- CRUD -->
+    <section class="cat" id="crud">
+      <div class="cat-head">
+        <span class="cat-icon">⇅</span>
+        <div>
+          <h2>CRUD &amp; Search</h2>
+          <p>Full XML-RPC / JSON-RPC coverage with live refresh bus.</p>
+        </div>
+        <span class="count-pill">14 tools</span>
+      </div>
+      <div class="tools">
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_search</h3><span class="meta">returns: list[int]</span></div>
+          <p>Search for record IDs matching a domain filter.</p>
+          <details>
+            <summary>Parameters &amp; use cases</summary>
+            <div class="uses">
+              <h5>Parameters</h5>
+              <ul><li><code>model</code> — model name (e.g. 'res.partner')</li><li><code>domain</code> — Odoo domain list</li><li><code>limit</code>, <code>offset</code>, <code>order</code></li></ul>
+              <h5>Use cases</h5>
+              <ul><li>"Find all draft invoices for partner X"</li><li>"Last 10 sale orders posted this month"</li><li>"All active users with stock group"</li></ul>
+              <h5>Example</h5>
+              <pre><code>odoo_search(model='res.partner',
+  domain=[['is_company','=',true],['country_id.code','=','BG']],
+  limit=50, order='name')</code></pre>
+            </div>
+          </details>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_read</h3><span class="meta">returns: list[dict]</span></div>
+          <p>Read specific records by IDs with selected fields.</p>
+          <details><summary>Parameters &amp; use cases</summary><div class="uses">
+            <h5>Use cases</h5><ul><li>"Read full partner record by ID"</li><li>"Compare 2 records field-by-field"</li></ul>
+            <pre><code>odoo_read(model='sale.order', ids=[1,2,3],
+  fields=['name','partner_id','amount_total','state'])</code></pre>
+          </div></details>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_search_read</h3><span class="meta">combined</span></div>
+          <p>Search + Read in one call. Most efficient for "find and display" flows.</p>
+          <details><summary>Parameters &amp; use cases</summary><div class="uses">
+            <h5>Use cases</h5><ul><li>"List all invoices this quarter with amounts"</li><li>"Dashboard queries"</li></ul>
+            <pre><code>odoo_search_read(model='account.move',
+  domain=[['state','=','posted']], fields=['name','amount_total'], limit=20)</code></pre>
+          </div></details>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_search_count</h3><span class="meta">returns: int</span></div>
+          <p>Efficient count without loading records.</p>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_create</h3><span class="meta">write · fires bus</span></div>
+          <p>Create one or many records. Triggers <code>claude_terminal/refresh_list</code> bus notification so open views update live.</p>
+          <details><summary>Use cases</summary><div class="uses">
+            <ul><li>"Create a new vendor bill from scanned PDF"</li><li>"Bulk create contacts from CSV"</li></ul>
+          </div></details>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_write</h3><span class="meta">write · fires bus</span></div>
+          <p>Update existing records. Triggers <code>claude_terminal/refresh_field</code> so open form views flash the changed fields.</p>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_unlink</h3><span class="meta">write</span></div>
+          <p>Delete records. Respects Odoo's access rules and <code>_unlink_except_*</code> constraints.</p>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_execute</h3><span class="meta">method call</span></div>
+          <p>Call any model method (<code>execute_kw</code>). Entry point for workflow actions: <code>action_post</code>, <code>action_confirm</code>, <code>button_validate</code>, etc.</p>
+          <details><summary>Use cases</summary><div class="uses">
+            <ul><li>"Post all draft invoices created today"</li><li>"Confirm sale order + pick + validate picking in sequence"</li></ul>
+            <pre><code>odoo_execute(model='account.move', method='action_post', args=[[id1, id2]])</code></pre>
+          </div></details>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_message_post</h3><span class="meta">chatter</span></div>
+          <p>Post a message to any record's chatter (supports Markdown → HTML, attachments, mention users).</p>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_refresh</h3><span class="meta">client action</span></div>
+          <p>Force refresh of a user's open Odoo tab after Claude writes data. Uses bus.bus channel.</p>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_report</h3><span class="meta">PDF / HTML</span></div>
+          <p>Run any <code>ir.actions.report</code>. Returns base64 PDF or HTML.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Introspection -->
+    <section class="cat" id="introspection">
+      <div class="cat-head">
+        <span class="cat-icon">🔍</span>
+        <div><h2>Introspection</h2><p>Inspect the schema without filesystem access.</p></div>
+        <span class="count-pill">4 tools</span>
+      </div>
+      <div class="tools">
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_fields_get</h3></div>
+          <p>Get field definitions for a model — names, types, relations, labels, translate attribute.</p>
+          <details><summary>Use cases</summary><div class="uses">
+            <ul><li>"Which fields on account.move are computed?"</li><li>"Find all many2one fields pointing to res.partner"</li></ul>
+          </div></details>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_list_models</h3></div>
+          <p>List all <code>ir.model</code> records with filter pattern. Shows transient, abstract, regular models.</p>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_module_info</h3></div>
+          <p>Detailed module info: RPC state + filesystem location (OCA, EE, custom repos) + manifest + dependencies + install status.</p>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_version</h3></div>
+          <p>Server version + protocol version. Used for feature detection (e.g. JSONB translations require Odoo 16+).</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Translations -->
+    <section class="cat" id="translate">
+      <div class="cat-head">
+        <span class="cat-icon">🌐</span>
+        <div><h2>Translations <span class="new-pill">NEW 2.10</span></h2><p>Multi-language field management — version-aware, auto-ZWSP for identical values.</p></div>
+        <span class="count-pill">4 tools</span>
+      </div>
+      <div class="tools">
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_list_translatable_fields</h3><span class="meta">inspector</span></div>
+          <p>Discovers which fields on a model are translatable and classifies each.</p>
+          <details><summary>Parameters &amp; use cases</summary><div class="uses">
+            <h5>Classifications</h5><ul>
+              <li><code>simple</code> — <code>translate=True</code> (Char/Text/Selection)</li>
+              <li><code>html</code> — <code>translate=html_translate</code> (blog.post.content, product.website_description)</li>
+              <li><code>xml</code> — <code>translate=xml_translate</code> (ir.ui.view.arch_db)</li>
+              <li><code>callable</code> — other truthy (custom translate function)</li>
+            </ul>
+            <h5>Use cases</h5><ul>
+              <li>"Which fields on blog.post can I translate?"</li>
+              <li>"Find all html_translate fields on product.template"</li>
+            </ul>
+            <pre><code>odoo_list_translatable_fields(model='blog.post')
+→ 9 fields: name, subtitle, teaser, teaser_manual (simple);
+  content (html); website_meta_title, seo_name... (simple)</code></pre>
+          </div></details>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_get_field_translations</h3><span class="meta">reader</span></div>
+          <p>Read current per-lang translations for a field. Auto-detects kind and uses the right API (16+ native JSONB, &lt;16 ir.translation fallback).</p>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_translate_field</h3><span class="meta">simple · write</span></div>
+          <p>Writes translations for simple <code>translate=True</code> fields (name, subtitle, teaser). Validates lang activation. Version-oriented.</p>
+          <details><summary>Use cases</summary><div class="uses">
+            <ul>
+              <li>"Set Bulgarian translation for blog post title"</li>
+              <li>"Translate product name to 3 languages at once"</li>
+              <li>"Clear a stale translation (pass null)"</li>
+            </ul>
+            <pre><code>odoo_translate_field(model='blog.post', res_id=180,
+  field_name='subtitle',
+  translations={'bg_BG': 'Как премахването влияе върху счетоводството'})</code></pre>
+          </div></details>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_translate_html</h3><span class="meta">html/xml · 3 modes</span></div>
+          <p>Writes translations for <code>html_translate</code> / <code>xml_translate</code> fields. Three modes:</p>
+          <details open><summary>Modes &amp; use cases</summary><div class="uses">
+            <h5>Modes</h5><ul>
+              <li><code>extract</code> — read-only; returns canonical terms as Odoo's engine sees them (HTML blocks with inline tags preserved)</li>
+              <li><code>terms</code> — direct <code>{lang: {src_term: tr_term}}</code> map; precise</li>
+              <li><code>replace</code> — <code>{lang: full_html}</code>; delegated to Odoo ORM via <code>write()</code> with lang context</li>
+            </ul>
+            <h5>Auto-ZWSP fix</h5>
+            <p>When a target-lang value equals the source, Odoo silently drops it (treated as "untranslated"). This tool automatically prefixes U+200B (zero-width-space) to keep it stored as "translated, kept intentionally" — avoiding the website editor's "translate" indicator.</p>
+            <h5>Use cases</h5><ul>
+              <li>"Translate a full blog article keeping existing HTML structure"</li>
+              <li>"Swap one specific term across 3 languages"</li>
+              <li>"Extract what terms need translation before sending to a translator"</li>
+            </ul>
+            <pre><code>odoo_translate_html(model='blog.post', res_id=180,
+  field_name='content', mode='replace',
+  translations={'bg_BG': '&lt;section&gt;...full BG html...&lt;/section&gt;'})</code></pre>
+          </div></details>
+        </div>
+      </div>
+    </section>
+
+    <!-- Snippets -->
+    <section class="cat" id="snippets">
+      <div class="cat-head">
+        <span class="cat-icon">🧱</span>
+        <div><h2>Website Snippets <span class="new-pill">NEW 2.10</span></h2><p>lxml-based HTML mutation with xpath substitutions for blog posts, pages, product descriptions, menus.</p></div>
+        <span class="count-pill">5 tools</span>
+      </div>
+      <div class="tools">
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_website_list_snippets</h3></div>
+          <p>List available Odoo snippet templates (ir.ui.view with <code>key</code> like <code>website.s_*</code>).</p>
+          <details><summary>Use cases &amp; categories</summary><div class="uses">
+            <h5>Categories inferred</h5><ul>
+              <li><code>structure</code> — s_banner, s_kickoff, s_cover, s_intro</li>
+              <li><code>content</code> — s_text_block, s_cards_grid, s_three_columns, s_cta_card</li>
+              <li><code>dynamic</code> — s_dynamic_snippet_*, s_blog_posts, s_products</li>
+              <li><code>effect</code> — s_progress_bar, s_countdown, s_parallax</li>
+            </ul>
+            <h5>Filters</h5><ul>
+              <li><code>category</code> — filter by inferred category</li>
+              <li><code>module</code> — website, website_blog, website_sale, website_forum</li>
+              <li><code>search</code> — substring in key or name</li>
+            </ul>
+          </div></details>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_website_list_page_snippets</h3></div>
+          <p>List snippets currently on a target HTML field. Parses with lxml. Detects by both <code>data-snippet</code> attribute AND first <code>s_*</code> class (Odoo strips data-snippet on some saves).</p>
+          <details><summary>Returns</summary><div class="uses">
+            <ul>
+              <li><code>index</code>, <code>xpath</code>, <code>data_snippet</code>, <code>data_name</code></li>
+              <li><code>text_preview</code> — first 150 chars of visible text</li>
+              <li><code>has_background</code>, <code>background_url</code> — detected from style attribute</li>
+            </ul>
+          </div></details>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_website_add_snippet</h3><span class="meta">write</span></div>
+          <p>Fetches snippet arch from <code>ir.ui.view</code>, extracts root element, applies pre-insertion substitutions, inserts at position.</p>
+          <details><summary>Positions &amp; examples</summary><div class="uses">
+            <h5>Positions</h5><ul>
+              <li><code>end</code> — after last element (default)</li>
+              <li><code>begin</code> — before first element</li>
+              <li><code>after</code> / <code>before</code> / <code>replace</code> — relative to <code>anchor_xpath</code></li>
+            </ul>
+            <h5>Example — add CTA at end with custom heading</h5>
+            <pre><code>odoo_website_add_snippet(
+  model='blog.post', res_id=180, field_name='content',
+  snippet_key='website.s_cta_card', position='end',
+  substitutions={
+    './/h2': 'Need help with your Odoo migration?',
+    ".//a[contains(@class,'btn')]/@href": 'https://yoursite.com/contact',
+  })</code></pre>
+          </div></details>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_website_update_snippet</h3><span class="meta">write</span></div>
+          <p>Update existing snippet content on target. Locates via <code>snippet_xpath</code>, applies substitutions relative to it.</p>
+          <details open><summary>Substitution syntax</summary><div class="uses">
+            <ul>
+              <li><code>{'.//h2': 'New Title'}</code> — text replace</li>
+              <li><code>{'.//img/@src': 'https://...'}</code> — attribute set</li>
+              <li><code>{'./div/@style:background-image': 'url(...)'}</code> — single CSS property (preserves other style props)</li>
+            </ul>
+            <h5>Example — swap banner background</h5>
+            <pre><code>odoo_website_update_snippet(
+  model='blog.post', res_id=180, field_name='content',
+  snippet_xpath='/div/section[1]',
+  substitutions={
+    './div/@style:background-image': 'url(/web/image/67341)',
+    './div/@style:background-size': 'cover',
+    './div/@style:min-height': '420px',
+  })</code></pre>
+          </div></details>
+        </div>
+        <div class="tool">
+          <div class="tool-head"><h3>odoo_website_remove_snippet</h3><span class="meta">write</span></div>
+          <p>Remove snippet at xpath. Returns preview of removed HTML for audit.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Web Session -->
+    <section class="cat" id="web-session">
+      <div class="cat-head"><span class="cat-icon">🔐</span>
+        <div><h2>Web Session</h2><p>Cookie-based HTTP access. Works through Cloudflare — no XML-RPC needed.</p></div>
+        <span class="count-pill">7 tools</span></div>
+      <div class="tools">
+        <div class="tool"><div class="tool-head"><h3>odoo_web_login</h3></div><p>Login via <code>/web/session/authenticate</code>, persist cookie session.</p></div>
+        <div class="tool"><div class="tool-head"><h3>odoo_web_logout</h3></div><p>Close session and invalidate cookies.</p></div>
+        <div class="tool"><div class="tool-head"><h3>odoo_web_call</h3></div><p>Call any web endpoint (<code>/web/dataset/call_kw</code>, <code>/web/search</code>, etc.)</p></div>
+        <div class="tool"><div class="tool-head"><h3>odoo_web_read</h3></div><p>Read via web endpoint — handles studio fields, computed specs.</p></div>
+        <div class="tool"><div class="tool-head"><h3>odoo_web_export</h3></div><p>Download CSV/XLSX export of any recordset (uses <code>/web/export</code>).</p></div>
+        <div class="tool"><div class="tool-head"><h3>odoo_web_report</h3></div><p>Render report via web controller — supports JS-rendered reports (Account reports, Payroll).</p></div>
+        <div class="tool"><div class="tool-head"><h3>odoo_web_request</h3></div><p>Raw HTTP request with cookie auth. Escape hatch for any endpoint.</p></div>
+      </div>
+    </section>
+
+    <!-- Connections -->
+    <section class="cat" id="connections">
+      <div class="cat-head"><span class="cat-icon">🔌</span>
+        <div><h2>Connections &amp; Auth</h2><p>Multi-tenant aliases, TOFU cert pinning, user profiles.</p></div>
+        <span class="count-pill">12 tools</span></div>
+      <div class="tools">
+        <div class="tool"><div class="tool-head"><h3>odoo_connect</h3></div><p>Register a named Odoo connection (alias, URL, DB, API key, protocol, verify_ssl).</p></div>
+        <div class="tool"><div class="tool-head"><h3>odoo_connections</h3></div><p>List all registered connections for the current user.</p></div>
+        <div class="tool"><div class="tool-head"><h3>odoo_disconnect</h3></div><p>Remove a connection alias.</p></div>
+        <div class="tool"><div class="tool-head"><h3>odoo_cert_info</h3></div><p>Show pinned self-signed cert metadata (issuer, subject, fingerprint, expiry).</p></div>
+        <div class="tool"><div class="tool-head"><h3>odoo_cert_refresh</h3></div><p>Re-pin self-signed cert (TOFU — trust-on-first-use). Use when rotating certs.</p></div>
+        <div class="tool"><div class="tool-head"><h3>user_connection_add</h3></div><p>Add connection to a specific user's profile (admin-scoped).</p></div>
+        <div class="tool"><div class="tool-head"><h3>user_connection_list</h3></div><p>List connections of any user.</p></div>
+        <div class="tool"><div class="tool-head"><h3>user_connection_activate</h3></div><p>Set a connection as "default" for session tool calls.</p></div>
+        <div class="tool"><div class="tool-head"><h3>user_connection_delete</h3></div><p>Remove connection from user profile.</p></div>
+        <div class="tool"><div class="tool-head"><h3>who_am_i</h3></div><p>Current user context — name, active profile, unified-auth headers.</p></div>
+        <div class="tool"><div class="tool-head"><h3>identify</h3></div><p>Low-level session-slot registration (stdio-compat and unified-auth).</p></div>
+        <div class="tool"><div class="tool-head"><h3>open_connection_manager</h3></div><p>Launch local Qt GUI for managing connections (from within the MCP session).</p></div>
+      </div>
+    </section>
+
+    <!-- Attachments -->
+    <section class="cat" id="attachments">
+      <div class="cat-head"><span class="cat-icon">📎</span>
+        <div><h2>Attachments &amp; Files</h2><p>Binary data pipeline including vision-based invoice OCR.</p></div>
+        <span class="count-pill">4 tools</span></div>
+      <div class="tools">
+        <div class="tool"><div class="tool-head"><h3>odoo_attachment_upload</h3></div><p>Upload file as <code>ir.attachment</code> with optional <code>res_model</code> + <code>res_id</code> linking. Supports base64 or URL source.</p></div>
+        <div class="tool"><div class="tool-head"><h3>odoo_attachment_download</h3></div><p>Download attachment content. Returns base64 or streams.</p></div>
+        <div class="tool"><div class="tool-head"><h3>public_access_download</h3></div><p>Download via public URL (<code>/web/content/</code>) — works for public attachments without auth.</p></div>
+        <div class="tool"><div class="tool-head"><h3>public_access_image</h3></div><p>Fetch image via <code>/web/image/</code> with size/resize parameters.</p></div>
+      </div>
+    </section>
+
+    <!-- Reports -->
+    <section class="cat" id="reports">
+      <div class="cat-head"><span class="cat-icon">📊</span>
+        <div><h2>Reporting</h2><p>PDF, XLSX, HTML reports on any model.</p></div>
+        <span class="count-pill">6 tools</span></div>
+      <div class="tools">
+        <div class="tool"><div class="tool-head"><h3>odoo_report</h3></div><p>Run any <code>ir.actions.report</code>. Returns base64 PDF or HTML.</p></div>
+        <div class="tool"><div class="tool-head"><h3>public_access_report_pdf</h3></div><p>Render PDF via public URL (<code>/report/pdf/</code>).</p></div>
+        <div class="tool"><div class="tool-head"><h3>public_access_report_xlsx</h3></div><p>Render XLSX export.</p></div>
+        <div class="tool"><div class="tool-head"><h3>public_access_report_html</h3></div><p>Render HTML — useful for embedding in emails.</p></div>
+        <div class="tool"><div class="tool-head"><h3>public_access_export_csv</h3></div><p>CSV export via public URL.</p></div>
+        <div class="tool"><div class="tool-head"><h3>public_access_export_xlsx</h3></div><p>XLSX export via public URL.</p></div>
+      </div>
+    </section>
+
+    <!-- Portal -->
+    <section class="cat" id="portal">
+      <div class="cat-head"><span class="cat-icon">🌍</span>
+        <div><h2>Portal &amp; Public Access</h2><p>Headless customer portal access.</p></div>
+        <span class="count-pill">8 tools</span></div>
+      <div class="tools">
+        <div class="tool"><div class="tool-head"><h3>public_access_portal_home</h3></div><p>Customer portal home — dashboard overview.</p></div>
+        <div class="tool"><div class="tool-head"><h3>public_access_portal_orders</h3></div><p>Sale orders visible to the portal user.</p></div>
+        <div class="tool"><div class="tool-head"><h3>public_access_portal_invoices</h3></div><p>Invoices + payment status.</p></div>
+        <div class="tool"><div class="tool-head"><h3>public_access_portal_purchases</h3></div><p>Purchase orders + RFQs.</p></div>
+        <div class="tool"><div class="tool-head"><h3>public_access_portal_tickets</h3></div><p>Helpdesk tickets (if module installed).</p></div>
+        <div class="tool"><div class="tool-head"><h3>public_access_shop</h3></div><p>e-Commerce shop listing + product details.</p></div>
+        <div class="tool"><div class="tool-head"><h3>public_access_sitemap</h3></div><p>Website sitemap for SEO audits.</p></div>
+        <div class="tool"><div class="tool-head"><h3>public_access_barcode</h3></div><p>Barcode scanner entry point (warehouse app).</p></div>
+      </div>
+    </section>
+
+    <!-- BG Localization -->
+    <section class="cat" id="bg-localization">
+      <div class="cat-head"><span class="cat-icon">🇧🇬</span>
+        <div><h2>Bulgaria Localization</h2><p>Fiscal position tax action maps tailored for НАП compliance.</p></div>
+        <span class="count-pill">5 tools</span></div>
+      <div class="tools">
+        <div class="tool"><div class="tool-head"><h3>odoo_fp_list</h3></div><p>List all fiscal positions in the current company.</p></div>
+        <div class="tool"><div class="tool-head"><h3>odoo_fp_details</h3></div><p>Detailed view of a fiscal position — tax mappings, account mappings, narration template.</p></div>
+        <div class="tool"><div class="tool-head"><h3>odoo_fp_types</h3></div><p>Enumerate l10n_bg fiscal position types (standard, customs, protocol, private_use).</p></div>
+        <div class="tool"><div class="tool-head"><h3>odoo_fp_configure</h3></div><p>Configure a fiscal position action: target tax, replacement account, narration template, customs_rate coefficient.</p></div>
+        <div class="tool"><div class="tool-head"><h3>odoo_fp_remove_action</h3></div><p>Remove a specific tax action from a fiscal position.</p></div>
+      </div>
+    </section>
+
+    <!-- AI -->
+    <section class="cat" id="ai">
+      <div class="cat-head"><span class="cat-icon">🧠</span>
+        <div><h2>AI Tokenizer</h2><p>Qdrant + Ollama vector embeddings per Odoo record.</p></div>
+        <span class="count-pill">5 tools</span></div>
+      <div class="tools">
+        <div class="tool"><div class="tool-head"><h3>ai_tokenize_record</h3></div><p>Embed a single record into Qdrant. Generates content summary + embedding via Ollama (<code>nomic-embed-text</code> default).</p></div>
+        <div class="tool"><div class="tool-head"><h3>ai_tokenize_collection</h3></div><p>Bulk embed all records of a model. Respects <code>ai.pipeline.step</code> filters.</p></div>
+        <div class="tool"><div class="tool-head"><h3>ai_search_similar</h3></div><p>Semantic search — find records similar to a query or another record via cosine distance.</p></div>
+        <div class="tool"><div class="tool-head"><h3>ai_list_documents</h3></div><p>List embedded docs in a Qdrant collection with their payloads.</p></div>
+        <div class="tool"><div class="tool-head"><h3>ai_collection_info</h3></div><p>Qdrant collection metadata — vector dim, points count, config.</p></div>
+      </div>
+    </section>
+
+    <!-- Memory -->
+    <section class="cat" id="memory">
+      <div class="cat-head"><span class="cat-icon">📚</span>
+        <div><h2>Memory System</h2><p>Per-user, shared, and licensed memory packs.</p></div>
+        <span class="count-pill">6 tools</span></div>
+      <div class="tools">
+        <div class="tool"><div class="tool-head"><h3>memory_read</h3></div><p>Read a memory file from any scope (user / shared / licensed).</p></div>
+        <div class="tool"><div class="tool-head"><h3>memory_write</h3></div><p>Create or update a memory file. Auto-classifies scope based on prefix.</p></div>
+        <div class="tool"><div class="tool-head"><h3>memory_list</h3></div><p>List all memory files with metadata.</p></div>
+        <div class="tool"><div class="tool-head"><h3>memory_share</h3></div><p>Promote user memory to shared / licensed scope. Controls distribution.</p></div>
+        <div class="tool"><div class="tool-head"><h3>memory_pull</h3></div><p>Pull memory on session start — merges shared + user into session context.</p></div>
+        <div class="tool"><div class="tool-head"><h3>memory_delete</h3></div><p>Remove a memory file.</p></div>
+      </div>
+    </section>
+
+    <!-- Google -->
+    <section class="cat" id="google">
+      <div class="cat-head"><span class="cat-icon">📧</span>
+        <div><h2>Google Workspace</h2><p>Gmail, Calendar, Drive via OAuth.</p></div>
+        <span class="count-pill">11 tools</span></div>
+      <div class="tools">
+        <div class="tool"><div class="tool-head"><h3>google_auth / google_auth_status</h3></div><p>Start OAuth flow and check status.</p></div>
+        <div class="tool"><div class="tool-head"><h3>google_gmail_search / read / send</h3></div><p>Gmail full-text search, read messages, send new/replies with attachments.</p></div>
+        <div class="tool"><div class="tool-head"><h3>google_gmail_labels</h3></div><p>List Gmail labels; apply/remove labels on threads.</p></div>
+        <div class="tool"><div class="tool-head"><h3>google_calendar_list / events</h3></div><p>List calendars; query events in range.</p></div>
+        <div class="tool"><div class="tool-head"><h3>google_calendar_create / update / delete_event</h3></div><p>CRUD on calendar events.</p></div>
+      </div>
+    </section>
+
+    <!-- Telegram -->
+    <section class="cat" id="telegram">
+      <div class="cat-head"><span class="cat-icon">✈️</span>
+        <div><h2>Telegram</h2><p>Full MTProto client, not just bot API.</p></div>
+        <span class="count-pill">7 tools</span></div>
+      <div class="tools">
+        <div class="tool"><div class="tool-head"><h3>telegram_configure</h3></div><p>Set API ID + hash + phone for this user's profile.</p></div>
+        <div class="tool"><div class="tool-head"><h3>telegram_auth</h3></div><p>Run login flow — SMS code verification.</p></div>
+        <div class="tool"><div class="tool-head"><h3>telegram_auth_status</h3></div><p>Check current session state.</p></div>
+        <div class="tool"><div class="tool-head"><h3>telegram_search_contacts</h3></div><p>Search your contact list by name or phone.</p></div>
+        <div class="tool"><div class="tool-head"><h3>telegram_get_dialogs</h3></div><p>List recent conversations (DMs, groups, channels).</p></div>
+        <div class="tool"><div class="tool-head"><h3>telegram_get_messages</h3></div><p>Fetch messages from a specific dialog.</p></div>
+        <div class="tool"><div class="tool-head"><h3>telegram_send_message</h3></div><p>Send text / media to a contact / group / channel.</p></div>
+      </div>
+    </section>
+
+    <!-- SSH & Git -->
+    <section class="cat" id="ssh-git">
+      <div class="cat-head"><span class="cat-icon">🖥️</span>
+        <div><h2>SSH &amp; Git</h2><p>Remote command execution and raw git access.</p></div>
+        <span class="count-pill">3 tools</span></div>
+      <div class="tools">
+        <div class="tool"><div class="tool-head"><h3>ssh_execute</h3></div><p>Run a command on a remote server via SSH. Supports SSH agent forwarding for passwordless git on remote.</p></div>
+        <div class="tool"><div class="tool-head"><h3>git_remote</h3></div><p>Query git remote metadata — branches, tags, last commit, ahead/behind status.</p></div>
+        <div class="tool"><div class="tool-head"><h3>github_api</h3></div><p>Raw GitHub API passthrough for unsupported endpoints (escape hatch).</p></div>
+      </div>
+    </section>
+
+    <!-- OCA & EE -->
+    <section class="cat" id="oca-ee">
+      <div class="cat-head"><span class="cat-icon">📦</span>
+        <div><h2>OCA &amp; Odoo Enterprise</h2><p>Module ecosystem management.</p></div>
+        <span class="count-pill">25 tools</span></div>
+      <div class="tools">
+        <div class="tool"><div class="tool-head"><h3>oca_search</h3></div><p>Search local OCA repos for a module by name, dependency, or code pattern.</p></div>
+        <div class="tool"><div class="tool-head"><h3>oca_clone_repo / oca_clone_all</h3></div><p>Clone a specific repo or the full OCA constellation.</p></div>
+        <div class="tool"><div class="tool-head"><h3>oca_update / oca_status</h3></div><p>Pull latest changes, show dirty repos.</p></div>
+        <div class="tool"><div class="tool-head"><h3>oca_deploy / oca_link</h3></div><p>Deploy / symlink modules into an Odoo instance's addons path.</p></div>
+        <div class="tool"><div class="tool-head"><h3>oca_gen_readme / icon / table / requirements</h3></div><p>Module metadata generators — README.rst from fragments, icon.png from template, account tag table, requirements.txt.</p></div>
+        <div class="tool"><div class="tool-head"><h3>oca_changelog / migrate / fix_website</h3></div><p>Newsfragment changelog, version migration (16→18), website theme fixes.</p></div>
+        <div class="tool"><div class="tool-head"><h3>ee_search / clone / deploy / link / unlink</h3></div><p>Enterprise repo management — selective EE addon inclusion in CE-only addons paths.</p></div>
+        <div class="tool"><div class="tool-head"><h3>ee_depends / ee_modules</h3></div><p>Dependency tree and module listing for EE.</p></div>
+        <div class="tool"><div class="tool-head"><h3>ee_oca_conflicts / ee_oca_recommend</h3></div><p>Detect conflicts between EE and OCA modules; recommend OCA alternatives.</p></div>
+        <div class="tool"><div class="tool-head"><h3>ee_license_status / ee_token_check</h3></div><p>Validate EE license and API token.</p></div>
+        <div class="tool"><div class="tool-head"><h3>ee_update</h3></div><p>Pull latest EE module code.</p></div>
+      </div>
+    </section>
+
+    <!-- Portainer -->
+    <section class="cat" id="portainer">
+      <div class="cat-head"><span class="cat-icon">🐳</span>
+        <div><h2>Portainer &amp; Docker</h2><p>Full Portainer API coverage.</p></div>
+        <span class="count-pill">30 tools</span></div>
+      <div class="tools">
+        <div class="tool"><div class="tool-head"><h3>listStacks / createStack / updateStack</h3></div><p>Stack lifecycle — create from compose, update with new env/content, support for pullImage.</p></div>
+        <div class="tool"><div class="tool-head"><h3>listEnvironments / listTeams / listUsers</h3></div><p>Enumerate Portainer resources.</p></div>
+        <div class="tool"><div class="tool-head"><h3>createAccessGroup / addEnvironmentToAccessGroup</h3></div><p>Access control — group environments, assign teams/users.</p></div>
+        <div class="tool"><div class="tool-head"><h3>createEnvironmentGroup / createEnvironmentTag</h3></div><p>Organizational grouping + tagging for multi-environment deployments.</p></div>
+        <div class="tool"><div class="tool-head"><h3>createLocalStack / startLocalStack / stopLocalStack / deleteLocalStack</h3></div><p>Manage local Docker-compose stacks from inside Portainer.</p></div>
+        <div class="tool"><div class="tool-head"><h3>dockerProxy / kubernetesProxy</h3></div><p>Raw Docker API / Kubernetes API proxy — when you need something Portainer doesn't expose as a named endpoint.</p></div>
+        <div class="tool"><div class="tool-head"><h3>getStackFile / getLocalStackFile / updateLocalStack</h3></div><p>Read / update stack compose content + env.</p></div>
+        <div class="tool"><div class="tool-head"><h3>getSettings</h3></div><p>Portainer instance global settings.</p></div>
+      </div>
+    </section>
+
+    <!-- GitHub -->
+    <section class="cat" id="github">
+      <div class="cat-head"><span class="cat-icon">🐙</span>
+        <div><h2>GitHub</h2><p>Official GitHub MCP server — 36 tools.</p></div>
+        <span class="count-pill">36 tools</span></div>
+      <div class="tools">
+        <div class="tool"><div class="tool-head"><h3>search_code / search_issues / search_pull_requests / search_repositories / search_users</h3></div><p>Full-text GitHub search.</p></div>
+        <div class="tool"><div class="tool-head"><h3>list_commits / get_commit / list_branches / list_tags / get_tag</h3></div><p>Git history traversal.</p></div>
+        <div class="tool"><div class="tool-head"><h3>list_issues / issue_read / list_pull_requests / pull_request_read</h3></div><p>Issues and PR metadata.</p></div>
+        <div class="tool"><div class="tool-head"><h3>get_file_contents / get_repository_tree</h3></div><p>Read files + directory listing.</p></div>
+        <div class="tool"><div class="tool-head"><h3>list_discussions / get_discussion / get_discussion_comments / list_discussion_categories</h3></div><p>GitHub Discussions.</p></div>
+        <div class="tool"><div class="tool-head"><h3>list_releases / get_latest_release / get_release_by_tag</h3></div><p>Releases metadata.</p></div>
+        <div class="tool"><div class="tool-head"><h3>actions_list / actions_get / get_job_logs</h3></div><p>Actions workflow runs + logs.</p></div>
+        <div class="tool"><div class="tool-head"><h3>list_gists / get_gist</h3></div><p>Gist access.</p></div>
+        <div class="tool"><div class="tool-head"><h3>get_label / list_label / get_me / list_starred_repositories</h3></div><p>Labels, current user metadata, starred repos.</p></div>
+      </div>
+    </section>
+
+    <!-- Filesystem -->
+    <section class="cat" id="filesystem">
+      <div class="cat-head"><span class="cat-icon">📁</span>
+        <div><h2>Filesystem</h2><p>Sandboxed filesystem for AI agents — scoped to allowed directories.</p></div>
+        <span class="count-pill">15 tools</span></div>
+      <div class="tools">
+        <div class="tool"><div class="tool-head"><h3>read_file / read_text_file / read_media_file / read_multiple_files</h3></div><p>Various read modes — text, binary, multiple at once.</p></div>
+        <div class="tool"><div class="tool-head"><h3>write_file / edit_file / move_file</h3></div><p>Create, edit, relocate.</p></div>
+        <div class="tool"><div class="tool-head"><h3>create_directory / list_directory / list_directory_with_sizes / directory_tree</h3></div><p>Directory operations.</p></div>
+        <div class="tool"><div class="tool-head"><h3>search_files / get_file_info</h3></div><p>Find by pattern, stat info.</p></div>
+        <div class="tool"><div class="tool-head"><h3>list_allowed_directories</h3></div><p>Report sandbox boundaries.</p></div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer class="footer">
+  © 2026 BL Consulting · <a href="https://github.com/rosenvladimirov/odoo-claude-mcp">GitHub</a> ·
+  <a href="https://github.com/rosenvladimirov/odoo-claude-mcp/blob/2.0/CHANGELOG.md">Changelog</a> ·
+  <a href="index.html">Back to landing</a>
+</footer>
+
+</body>
+</html>

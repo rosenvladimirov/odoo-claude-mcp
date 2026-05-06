@@ -1,0 +1,17 @@
+{
+  "name": "claude-terminal-gateway",
+  "version": "3.0.0",
+  "description": "Per-session Claude Terminal gateway — auth, docker spawn, WebSocket proxy",
+  "main": "gateway.js",
+  "scripts": {
+    "start": "node gateway.js"
+  },
+  "dependencies": {
+    "dockerode": "^4.0.2"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "Apache-2.0",
+  "author": "Rosen Vladimirov <vladimirov.rosen@gmail.com>"
+}

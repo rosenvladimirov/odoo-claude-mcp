@@ -1,0 +1,60 @@
+name: claude-terminal-test
+
+# Local-only test stack:
+#   - gateway: spawns session containers in `session_bridge`
+#   - mock-mcp: stub /api/user/register-connection
+#   - shared volume on host for /shared-data (claude-terminal-shared)
+#
+# Bring up:   docker compose -f test-stack/docker-compose.yml up -d --build
+# Tear down:  docker compose -f test-stack/docker-compose.yml down -v
+# Logs:       docker compose -f test-stack/docker-compose.yml logs -f gateway
+
+services:
+  mock-mcp:
+    image: python:3.12-slim
+    container_name: test-mock-mcp
+    networks:
+      - session-bridge-test
+    volumes:
+      - ./mock_mcp.py:/mock_mcp.py:ro
+    command: python3 /mock_mcp.py
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8084/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  gateway:
+    image: claude-terminal-gateway:3.0.0-test
+    container_name: test-gateway
+    depends_on:
+      mock-mcp:
+        condition: service_healthy
+    environment:
+      - GATEWAY_PORT=8080
+      - MCP_HOST=mock-mcp
+      - MCP_PORT=8084
+      - SESSION_IMAGE=claude-terminal-session:3.0.0-test
+      - SESSION_NETWORK=claude-terminal-test_session-bridge-test
+      - SHARED_HOST_PATH=/tmp/claude-terminal-test-shared/users
+      # Tight test limits so we can exercise the gates quickly.
+      - MCP_SESSION_MAX_CONCURRENT=3
+      - MCP_SESSION_PER_USER_LIMIT=2
+      - MCP_SESSION_IDLE_TIMEOUT=120
+      - MCP_SESSION_MEMORY_MB=384
+      - MCP_SESSION_CPU_QUOTA=30000
+      - MCP_SESSION_PIDS_LIMIT=80
+      # Dev: keep failed containers around for inspection.
+      - MCP_SESSION_AUTOREMOVE=0
+    ports:
+      - "18080:8080"
+    networks:
+      - session-bridge-test
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/claude-terminal-test-shared:/tmp/claude-terminal-test-shared
+    restart: "no"
+
+networks:
+  session-bridge-test:
+    driver: bridge

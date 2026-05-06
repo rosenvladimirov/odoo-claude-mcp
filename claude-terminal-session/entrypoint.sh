@@ -1,28 +1,28 @@
 #!/bin/bash
-# claude-terminal-session — per-session ephemeral container entrypoint
+# claude-terminal-session — per-session container init (PID 1 under tini)
 #
-# This script assumes the gateway has ALREADY:
-#   • validated the API_KEY against MCP /api/user/register-connection
-#   • resolved MCP_PROFILE
-#   • bind-mounted /shared/users/${MCP_PROFILE} → /home/claude
-#   • set the env vars below
+# The gateway has already validated the API key and bind-mounted
+# /srv/claude-terminal-shared/users/${MCP_PROFILE} → /home/claude.
+# This script provisions the workspace if needed, renders the per-session
+# .mcp.json with current credentials, then exec-replaces itself with ttyd
+# which serves a single WebSocket terminal session.
 #
-# It does NOT:
-#   • re-authenticate (gateway already did)
-#   • write /tmp/.claude_auth_vars (no race window — env is direct)
-#   • mkdir /data/users/* paths (per-session container has none)
+# Container lifecycle:
+#   gateway docker run → entrypoint.sh → exec ttyd → ttyd accepts WS →
+#   ttyd spawns session-shell.sh → claude CLI runs → user closes tab →
+#   ttyd exits → tini reaps → container exits → AutoRemove deletes container
 
 set -euo pipefail
 
-# ── Required from gateway ───────────────────────────────────────
+# ── Required env from gateway ───────────────────────────────────
 : "${API_KEY:?API_KEY required from gateway}"
 : "${ODOO_URL:?ODOO_URL required from gateway}"
 : "${ODOO_DB:?ODOO_DB required from gateway}"
 : "${USER_LOGIN:?USER_LOGIN required from gateway}"
 : "${MCP_PROFILE:?MCP_PROFILE required from gateway}"
-: "${MCP_URL:=http://odoo-rpc-mcp:8084}"
+export MCP_URL="${MCP_URL:-http://odoo-rpc-mcp:8084}"
 
-# ── Optional from gateway ───────────────────────────────────────
+# ── Optional env from gateway ───────────────────────────────────
 USER_NAME="${USER_NAME:-User}"
 USER_EMAIL="${USER_EMAIL:-}"
 ODOO_USER="${ODOO_USER:-admin}"
@@ -33,21 +33,20 @@ ODOO_VIEW_TYPE="${ODOO_VIEW_TYPE:-form}"
 TERMINAL_URL="${TERMINAL_URL:-}"
 SESSION_ID="${SESSION_ID:-}"
 CLAUDE_THEME="${CLAUDE_THEME:-github}"
+TTYD_PORT="${TTYD_PORT:-8081}"
 
-# ── Workspace setup (idempotent — only on first session) ────────
-# /home/claude is the bind-mounted persistent slice from
-# /shared/users/${MCP_PROFILE}/ on the host. First-time provisioning
-# templates a few files; subsequent sessions reuse them.
+# ── First-session workspace provisioning ────────────────────────
+# /home/claude is bind-mounted from /srv/claude-terminal-shared/users/$PROFILE.
+# Provision once; subsequent sessions reuse what's there.
 if [ ! -d "/home/claude/.claude" ]; then
     mkdir -p /home/claude/.claude/projects /home/claude/workspace
     echo '{}' > /home/claude/.claude.json
 fi
 
-# Defence in depth — tighten home dir mode every session.
+# Tighten home dir mode every session — defence in depth.
 chmod 700 /home/claude 2>/dev/null || true
 
-# ── Render fresh .mcp.json with current credentials ─────────────
-# Generated each session so headers carry the current Odoo API key.
+# ── Render fresh .mcp.json with current API key ─────────────────
 python3 <<MCPEOF > /home/claude/.mcp.json
 import json, os
 cfg = {
@@ -68,7 +67,7 @@ print(json.dumps(cfg, indent=2))
 MCPEOF
 chmod 600 /home/claude/.mcp.json
 
-# ── Write session context (read by Claude Code on launch) ───────
+# ── Write session context for Claude / future MCP tools ─────────
 cat > /home/claude/.odoo_session.json <<EOF
 {
   "session_id": "${SESSION_ID}",
@@ -89,26 +88,19 @@ cat > /home/claude/.odoo_session.json <<EOF
 EOF
 chmod 600 /home/claude/.odoo_session.json
 
-# ── Welcome banner ──────────────────────────────────────────────
-COLS=$(tput cols 2>/dev/null || echo 80)
-LINE=$(printf '%*s' "$COLS" '' | tr ' ' '─')
-echo ""
-echo "  Claude Terminal — isolated session"
-echo "$LINE"
-echo "  User:     ${USER_NAME} (${USER_LOGIN})"
-echo "  Odoo:     ${ODOO_URL}"
-echo "  Database: ${ODOO_DB}"
-if [ -n "${ODOO_MODEL}" ]; then
-    echo "  Context:  ${ODOO_MODEL} #${ODOO_RES_ID}"
-fi
-echo "  Session:  ephemeral — closes when you close the tab"
-echo "$LINE"
-echo ""
+# Export the env so session-shell.sh inherits it (ttyd preserves env).
+export API_KEY ODOO_URL ODOO_DB USER_LOGIN USER_NAME USER_EMAIL
+export ODOO_USER ODOO_UID ODOO_MODEL ODOO_RES_ID ODOO_VIEW_TYPE
+export TERMINAL_URL SESSION_ID MCP_PROFILE MCP_URL CLAUDE_THEME
 
-# ── Launch Claude Code ──────────────────────────────────────────
-# When the user closes their browser tab the gateway sends SIGTERM;
-# tini propagates it to claude which exits cleanly. The container's
-# tmpfs /tmp and /run are then discarded by the Docker engine while
-# /home/claude (bind mount) survives intact.
-cd /home/claude
-exec claude
+# ── Start ttyd, listen for the single WebSocket connection ──────
+# --once exits ttyd after the first connection closes — perfect for the
+# per-session model. Container then exits via tini reap and AutoRemove.
+exec ttyd \
+    --port "${TTYD_PORT}" \
+    --writable \
+    --once \
+    --client-option "titleFixed=Claude Terminal" \
+    --client-option "fontSize=13" \
+    --client-option "fontFamily=JetBrains Mono,Fira Code,Cascadia Code,monospace" \
+    /usr/local/bin/claude-session-shell
