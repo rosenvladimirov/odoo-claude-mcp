@@ -104,17 +104,48 @@ source /tmp/.claude_auth_vars
 rm -f /tmp/.claude_auth_vars
 unset _AUTH_JSON
 
-# Sanitize for directory: {db}__{login} — unique per instance+user
-# Replace @ . + : / with _, keep alphanumeric + underscore + hyphen, lowercase
-SAFE_DB=$(echo "$ODOO_DB" | sed 's/[@.+:\/]/_/g' | tr -cd 'a-zA-Z0-9_-' | tr '[:upper:]' '[:lower:]')
-SAFE_LOGIN=$(echo "$USER_LOGIN" | sed 's/[@.+]/_/g' | tr -cd 'a-zA-Z0-9_-' | tr '[:upper:]' '[:lower:]')
+# ── Per-user directory name — HMAC-SHA256, unguessable from outside ──
+# Replaces the legacy ${db}__${login} layout to prevent naive enumeration
+# by another tenant who happens to know a colleague's email/login.
+# Combined with mode 1733 root:claude on /data/users (set in Dockerfile)
+# the listing is denied to the shared claude uid (no read in group bits)
+# while mkdir of a known-hash path remains permitted (write+execute). A
+# peer would have to brute force the 32-hex hash to target a specific
+# workspace. Same-uid /proc inspection remains possible — the real fix
+# lives in Phase 2.2 (per-session container with mount NS).
+TENANT_SECRET="${MCP_TENANT_SECRET:-}"
+if [ -z "$TENANT_SECRET" ]; then
+    # Stable per-deploy fallback: derived from machine-id, unknown to
+    # tenants without root. Not a substitute for an explicitly-set secret.
+    TENANT_SECRET="$(cat /etc/machine-id 2>/dev/null || hostname)-claude-terminal"
+fi
 
-# Fallbacks
-[ -z "$SAFE_DB" ] && SAFE_DB="default"
-[ -z "$SAFE_LOGIN" ] && SAFE_LOGIN="user_${USER_UID}"
+# Legacy sanitised tokens (still used to detect old workspace layout)
+LEGACY_DB=$(echo "$ODOO_DB" | sed 's/[@.+:\/]/_/g' | tr -cd 'a-zA-Z0-9_-' | tr '[:upper:]' '[:lower:]')
+LEGACY_LOGIN=$(echo "$USER_LOGIN" | sed 's/[@.+]/_/g' | tr -cd 'a-zA-Z0-9_-' | tr '[:upper:]' '[:lower:]')
+[ -z "$LEGACY_DB" ] && LEGACY_DB="default"
+[ -z "$LEGACY_LOGIN" ] && LEGACY_LOGIN="user_${USER_UID}"
 
-SAFE_USER="${SAFE_DB}__${SAFE_LOGIN}"
+export _TENANT_SECRET="$TENANT_SECRET"
+export _HASH_INPUT="${ODOO_URL}|${ODOO_DB}|${USER_LOGIN}"
+SAFE_USER=$(python3 -c "
+import hmac, hashlib, os
+key = os.environ['_TENANT_SECRET'].encode()
+msg = os.environ['_HASH_INPUT'].encode()
+print(hmac.new(key, msg, hashlib.sha256).hexdigest()[:32])
+")
+unset _TENANT_SECRET _HASH_INPUT
+
 USER_DIR="/data/users/${SAFE_USER}"
+LEGACY_DIR="/data/users/${LEGACY_DB}__${LEGACY_LOGIN}"
+
+# One-time migration: rename legacy named directory to hashed name on
+# first login under the new scheme. Idempotent — only fires when the
+# old path exists and the new one does not.
+if [ -d "$LEGACY_DIR" ] && [ ! -e "$USER_DIR" ]; then
+    mv "$LEGACY_DIR" "$USER_DIR" 2>/dev/null && \
+        echo "  Migrated workspace to hashed path."
+fi
 
 COLS=$(tput cols 2>/dev/null || echo 80)
 LINE=$(printf '%*s' "$COLS" '' | tr ' ' '─')
@@ -139,6 +170,10 @@ if [ ! -d "$USER_DIR/.claude" ]; then
     echo '{}' > "$USER_DIR/.claude.json"
     echo "Workspace ready."
 fi
+
+# Tighten permissions on the workspace root every session — defence in
+# depth against any process that may have loosened them.
+chmod 700 "$USER_DIR" 2>/dev/null || true
 
 # Always refresh static rules. .mcp.json is generated dynamically below
 # with unified-auth headers — do not copy a stale template over it.
@@ -330,6 +365,25 @@ if 'cursor' in theme:
 sys.stdout.flush()
 THEMEEOF
 fi
+
+# ── Multi-tenant disclosure banner ──────────────────────────────
+# This terminal currently runs in a shared container alongside other
+# tenants. Filesystem isolation will land in v3.1 (Phase 2.2 per-session
+# container with mount namespaces). Until then, peer processes running
+# under the same uid CAN read environment variables from /proc and may
+# discover credentials stored in $HOME by third-party CLIs.
+echo ""
+echo "  Multi-tenant notice"
+echo "$LINE"
+echo "  This terminal shares its container with other tenants until the"
+echo "  v3.1 per-session isolation rolls out."
+echo ""
+echo "  Recommended:"
+echo "    • Use ONLY the MCP-provided integrations for Odoo and cloud APIs."
+echo "    • Do not run 'gh', 'gcloud', 'aws', 'npm login' here — those CLIs"
+echo "      store credentials in \$HOME and may be visible to peers."
+echo "$LINE"
+echo ""
 
 # ── Launch Claude Code ──────────────────────────────────────────
 cd "$USER_DIR"

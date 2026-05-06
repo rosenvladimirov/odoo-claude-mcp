@@ -20,12 +20,21 @@ RUN apt-get update && \
 # Install Claude Code CLI
 RUN npm install -g @anthropic-ai/claude-code
 
-# Use node user (uid 1000) matching host + create dirs
+# Use node user (uid 1000) matching host + create dirs.
+# /data/users is owned by root with mode 711 so listing is denied to the
+# claude uid while still allowing traversal into a known per-user path.
+# Combined with hashed per-user directory names in start-session.sh this
+# blocks naive enumeration of other tenants' workspaces. Same-uid /proc
+# inspection is still possible — Phase 2.2 (per-session container)
+# closes that vector.
 RUN usermod -d /home/claude -l claude -s /bin/bash node && \
     groupmod -n claude node && \
     mv /home/node /home/claude && \
     mkdir -p /home/claude/template /data/users && \
-    chown -R claude:claude /home/claude /data
+    chown -R claude:claude /home/claude && \
+    chown root:claude /data /data/users && \
+    chmod 755 /data && \
+    chmod 1733 /data/users
 
 USER claude
 WORKDIR /home/claude

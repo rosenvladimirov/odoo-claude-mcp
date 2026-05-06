@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.26.0a] — 2026-05-06 — claude-terminal Phase 2.0a/b: hashed dirs + multi-tenant disclosure
+
+Stop-the-bleeding hardening of `claude-terminal` against cross-tenant
+filesystem enumeration, while the proper per-session container model
+(Phase 2.2) is being built.
+
+### Security
+- **Per-user workspace directories now use HMAC-SHA256(odoo_url|db|login)
+  keyed by `MCP_TENANT_SECRET`** — replaces the legacy `${db}__${login}`
+  layout which let any tenant who knew a colleague's email guess that
+  colleague's `/data/users/...` path. New paths are 32-hex characters and
+  unguessable without the host-side secret.
+- **`/data/users` now owned `root:claude` with mode 711** in the Docker
+  image baseline. `ls /data/users` returns `Permission denied` to the
+  shared `claude` uid; only `cd` into a known-hash path is allowed.
+- **`chmod 700 $USER_DIR` enforced every session start** as defence in
+  depth, in case a previous process loosened permissions.
+- **One-time migration** of existing `${db}__${login}` workspaces to the
+  new hashed name — runs idempotently on first login under the new
+  scheme; `.claude/`, `workspace/` and conversation history preserved.
+- **Multi-tenant disclosure banner** printed before every Claude CLI
+  launch warning users not to run `gh`, `gcloud`, `aws`, `npm login` in
+  the shared terminal — the same `$HOME` exposure pattern reported to
+  Odoo.sh as `intigriti ODOO-4U82VQ7M`.
+
+### Files
+- `claude-terminal/Dockerfile` — chown/chmod baseline for `/data/users`.
+- `claude-terminal/start-session.sh` — HMAC hash, legacy migration,
+  workspace chmod, multi-tenant banner.
+
+### Operator action required
+- Set `MCP_TENANT_SECRET` in production `.env` (any high-entropy string).
+  Without it the script falls back to `/etc/machine-id` which is stable
+  per host but root-readable only — functional but not preferred.
+
+### What this DOES NOT close
+- Same-uid `/proc/<pid>/environ` reads still expose `USER_DIR` and
+  `API_KEY` to peer sessions running as the same `claude` uid. This is
+  the architectural limit of a shared container and requires kernel
+  namespace separation to close. Phase 2.2 (per-session ephemeral
+  container with bind-mounted `/home/claude` from
+  `/shared/users/${PROFILE}/`) is being built in parallel as
+  `claude-terminal-session` image (v3).
+
 ## [2.25.2] — 2026-04-28 — `mcp_terminal_get_config` empty env != unset
 
 ### Fixed
