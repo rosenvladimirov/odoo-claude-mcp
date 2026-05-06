@@ -1,0 +1,71 @@
+# claude-terminal Phase 2.2 production compose snippet.
+#
+# Replaces the old single `claude-terminal` service in Portainer compose
+# stack 10. The gateway is now a separate, slimmer container; session
+# containers are spawned per WebSocket connection by the gateway's
+# Docker socket access.
+#
+# Insertion points (current /var/lib/docker/volumes/portainer_data/_data/compose/10/docker-compose.yml):
+#   1. Replace the existing `claude-terminal:` service block with the
+#      `claude-terminal:` block below.
+#   2. Add the `claude-session-bridge` network at the bottom.
+#   3. Set MCP_TENANT_SECRET, ANTHROPIC_API_KEY (if enforced) in stack.env.
+#
+# Pre-deploy operator steps:
+#   - mkdir -p /srv/claude-terminal-shared/users
+#   - chown 0:1000 /srv/claude-terminal-shared/users
+#   - chmod 1733 /srv/claude-terminal-shared/users
+#   - Run gateway/migrate-from-2.0a.sh to import existing /data/users
+#   - docker pull vladimirovrosen/claude-terminal-gateway:3.0.0
+#   - docker pull vladimirovrosen/claude-terminal-session:3.0.0
+#
+
+services:
+  claude-terminal:
+    image: vladimirovrosen/claude-terminal-gateway:3.0.0
+    container_name: claude-terminal
+    environment:
+      - GATEWAY_PORT=8080
+      - MCP_HOST=odoo-rpc-mcp
+      - MCP_PORT=8084
+      - SESSION_IMAGE=vladimirovrosen/claude-terminal-session:3.0.0
+      # NB: actual Docker network name = "<compose-project>_<network-name>".
+      # Adjust if Portainer project name differs from "odoo-claude-mcp-main".
+      - SESSION_NETWORK=odoo-claude-mcp-main_claude-session-bridge
+      - SHARED_HOST_PATH=/srv/claude-terminal-shared/users
+      # Production capacity — verified on 23 GB main with 14 GB free.
+      - MCP_SESSION_MAX_CONCURRENT=${MCP_SESSION_MAX_CONCURRENT:-30}
+      - MCP_SESSION_PER_USER_LIMIT=${MCP_SESSION_PER_USER_LIMIT:-2}
+      - MCP_SESSION_IDLE_TIMEOUT=${MCP_SESSION_IDLE_TIMEOUT:-1800}
+      - MCP_SESSION_MAX_LIFETIME=${MCP_SESSION_MAX_LIFETIME:-14400}
+      - MCP_SESSION_MEMORY_MB=${MCP_SESSION_MEMORY_MB:-512}
+      - MCP_SESSION_CPU_QUOTA=${MCP_SESSION_CPU_QUOTA:-50000}
+      - MCP_SESSION_PIDS_LIMIT=${MCP_SESSION_PIDS_LIMIT:-100}
+      - MCP_SESSION_AUTOREMOVE=1
+      - CLAUDE_THEME=${CLAUDE_THEME:-github}
+    ports:
+      - ${TERMINAL_PORT:-8080}:8080
+    networks:
+      - public
+      - backend
+      - cloudflare-net
+      - claude-session-bridge
+    volumes:
+      # Gateway needs docker socket to spawn sessions.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persistent slice host path (mounted into spawned sessions on demand).
+      - /srv/claude-terminal-shared:/srv/claude-terminal-shared
+    labels:
+      - com.blconsulting.service=claude-terminal-gateway
+      - com.blconsulting.phase=2.2
+    restart: unless-stopped
+
+# ─────────────────────────────────────────────────────────────────
+# Add at the bottom of the compose file alongside other networks:
+networks:
+  claude-session-bridge:
+    driver: bridge
+    name: odoo-claude-mcp-main_claude-session-bridge
+    # Attaches both the gateway and the spawned session containers.
+    # Containers do NOT have outside network access via this bridge alone;
+    # they reach odoo-rpc-mcp via gateway's egress.

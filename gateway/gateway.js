@@ -38,7 +38,14 @@ const SHARED_HOST_PATH = process.env.SHARED_HOST_PATH || "/srv/claude-terminal-s
 // Capacity safeguards.
 const MAX_CONCURRENT = parseInt(process.env.MCP_SESSION_MAX_CONCURRENT || "30", 10);
 const PER_USER_LIMIT = parseInt(process.env.MCP_SESSION_PER_USER_LIMIT || "2", 10);
+// Idle timeout — counts only client→upstream data; WS pong frames may
+// keep the timer alive in current impl, so it functions more as a
+// "WS broken" detector than true "no user activity". Real idle detection
+// requires WS frame parsing (deferred to v3.1).
 const IDLE_TIMEOUT_MS = parseInt(process.env.MCP_SESSION_IDLE_TIMEOUT || "1800", 10) * 1000;
+// Absolute session lifetime — guarantees a zombie session dies eventually
+// even if WS pings keep the idle timer fresh. Defaults to 4 h.
+const MAX_LIFETIME_MS = parseInt(process.env.MCP_SESSION_MAX_LIFETIME || "14400", 10) * 1000;
 
 // Resource limits per session container.
 const SESSION_MEMORY_MB = parseInt(process.env.MCP_SESSION_MEMORY_MB || "512", 10);
@@ -350,9 +357,15 @@ server.on("upgrade", async (req, clientSocket, head) => {
         upstream.pipe(clientSocket);
     });
 
-    // Idle timeout — kill container if no activity.
+    // Idle timeout — kill container if no client→upstream traffic.
+    // We deliberately do NOT bump on upstream→client traffic because
+    // ttyd / libwebsockets emit periodic ping frames that would otherwise
+    // hold the timer open indefinitely. In practice the websocat / browser
+    // pong response also lands here as raw bytes, so this currently
+    // functions as a "WS broken" detector more than a true idle detector.
+    // Real idle (user-not-typing) requires WS frame parsing — TODO v3.1.
     let idleTimer = setTimeout(() => {
-        console.warn(`[session ${sessionId}] idle timeout, killing container`);
+        console.warn(`[session ${sessionId}] idle timeout (${IDLE_TIMEOUT_MS / 1000}s), killing container`);
         cleanup("idle-timeout");
     }, IDLE_TIMEOUT_MS);
     function bumpIdle() {
@@ -360,7 +373,13 @@ server.on("upgrade", async (req, clientSocket, head) => {
         idleTimer = setTimeout(() => cleanup("idle-timeout"), IDLE_TIMEOUT_MS);
     }
     clientSocket.on("data", bumpIdle);
-    upstream.on("data", bumpIdle);
+
+    // Absolute session lifetime cap — fires regardless of activity. This
+    // is the bulletproof zombie-session killer.
+    const lifetimeTimer = setTimeout(() => {
+        console.warn(`[session ${sessionId}] max lifetime reached (${MAX_LIFETIME_MS / 1000}s), killing container`);
+        cleanup("max-lifetime");
+    }, MAX_LIFETIME_MS);
 
     // Cleanup once on whatever closes first.
     let cleaned = false;
@@ -368,6 +387,7 @@ server.on("upgrade", async (req, clientSocket, head) => {
         if (cleaned) return;
         cleaned = true;
         clearTimeout(idleTimer);
+        clearTimeout(lifetimeTimer);
         SESSIONS.delete(sessionId);
         try { upstream.destroy(); } catch {}
         try { clientSocket.destroy(); } catch {}
