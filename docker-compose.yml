@@ -223,6 +223,33 @@ services:
     labels:
       - "com.blconsulting.service=mcp-backup"
 
+  # ─── Supervisor MCP (ADMIN: Odoo addons-topology) ────────
+  # ADMIN class. Owns the rule: canonical modules = /opt git;
+  # the two farm layers must be PURE symlinks into /opt.
+  # SSH-capable + powerful → bound to 127.0.0.1 only, and added
+  # ONLY to admin .mcp.json (never tenant/USER configs).
+  supervisor-mcp:
+    build:
+      context: ./supervisor-mcp
+      dockerfile: Dockerfile
+    container_name: mcp-supervisor
+    restart: unless-stopped
+    networks:
+      - backend
+    environment:
+      - MCP_PORT=8097
+      - SUPERVISOR_CONNECTIONS=/connections/connections.json
+      - SUPERVISOR_SSH_OPTS=${SUPERVISOR_SSH_OPTS:-}
+      - SSH_AUTH_SOCK=/ssh-agent
+    ports:
+      - "127.0.0.1:${SUPERVISOR_MCP_PORT:-8097}:8097"
+    volumes:
+      - ${HOME}/.ssh:/root/.ssh:ro
+      - ${SSH_AUTH_SOCK:-/dev/null}:/ssh-agent:ro
+      - ${HOME}/.claude/odoo_connections:/connections:ro
+    labels:
+      - "com.blconsulting.service=mcp-supervisor"
+
 volumes:
   mcp-repos:
     driver: local
