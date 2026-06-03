@@ -90,7 +90,9 @@ Replace global active connection with `registry: {session_id → ConnectionConte
 - **2026-06-03** — Phase 1 (per-session connection registry) DONE on v2 + v3, branch `feat/per-session-connection` (v2 `10b5062`, v3 `4cc4262`). Connection-isolation 7/7 on the live v2.25.2 container (202588745). v2↔v3 verified line-identical; v3-only modules (tenant_router/elevation/api_key_manager/provisioning) intact.
 - **2026-06-03** — Phase 2a (per-principal Telegram registry) DONE on v2 + v3 (same commits). Local registry isolation 6/6.
 - **2026-06-03** — Phase 3 scaffolding DONE on v2 + v3 (v2 `2e0d6f6`, v3 `1272ac0`): compose `centrifugo` service, `centrifugo/config.json` + README, `.env.example` secrets, `centrifugo_client.py` publish helper. **Not deployed.**
-- **Pending (blocked on decision):** Phase 2b (NewMessage handler + persistent loop → publish) needs the deployed hub; deploy needs host/TLS choice below.
+- **2026-06-03** — v3 + branch DEPLOYED to test stack 202588745 (host 164.68.114.107) as image `odoo-rpc-mcp-pstest:v3`; healthy, Restarts=0; isolation test 8/8 against live v3. Done all-ops "via bridge" (`ssh_execute`) — direct SSH:22 was fail2ban-blocked.
+- **2026-06-03** — Phase 3 hub LIVE: `centrifugo` v6.8.1 container on 164.68.114.107 (networks cloudflare-net + odoo-claude-mcp_default), secrets in `/opt/centrifugo/secrets.env`. Dedicated Cloudflare tunnel `centrifugo-hub` (id 2503390f-1a12-48f8-ab65-139115384dbe) + connector container `centrifugo-cloudflared` → **public https://centrifugo.mcpworks.net** (mcpworks.net brand domain, NOT odoo-shell). Internal publish (MCP→centrifugo:8000) + public routing both verified. CF API token: provided by Rosen (full access).
+- **Pending:** Phase 2b — wire MCP env (CENTRIFUGO_API_URL+CENTRIFUGO_API_KEY) + NewMessage handler (persistent asyncio loop) → publish telegram:&lt;principal&gt;; now testable against the live hub.
 
 ## Decisions locked (2026-06-03, cont.)
 - **Centrifugo external exposure = Cloudflare tunnel** (always — house standard; stack already has `cloudflare-net` + a `cloudflared` container). No Traefik. Add a tunnel ingress hostname → `centrifugo:8000`.
