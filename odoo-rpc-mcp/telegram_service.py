@@ -68,40 +68,87 @@ class TelegramServiceManager:
     def _init_client(self):
         try:
             import asyncio
+            import threading
             from telethon import TelegramClient
 
-            # Ensure we have an event loop for this thread
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_closed():
-                    raise RuntimeError
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-
+            # Persistent event loop in a dedicated daemon thread — required so
+            # live NewMessage handlers can fire. ALL ops dispatch onto it via
+            # _run() (run_coroutine_threadsafe), replacing the old per-call
+            # run_until_complete model which couldn't host live handlers.
+            loop = asyncio.new_event_loop()
             self._loop = loop
+            self._loop_thread = threading.Thread(
+                target=self._run_loop_forever, daemon=True, name=f"tg-loop-{self.key}",
+            )
+            self._loop_thread.start()
+
             self._client = TelegramClient(
                 self._session_path,
                 int(self._api_id),
                 self._api_hash,
                 loop=loop,
             )
-            loop.run_until_complete(self._client.connect())
-            if loop.run_until_complete(self._client.is_user_authorized()):
-                me = loop.run_until_complete(self._client.get_me())
+            self._run(self._client.connect())
+            if self._run(self._client.is_user_authorized()):
+                me = self._run(self._client.get_me())
                 logger.info(
-                    f"Telegram: authenticated as {me.first_name} "
+                    f"Telegram[{self.key}]: authenticated as {me.first_name} "
                     f"(@{me.username or 'no username'})"
                 )
+                self._start_push_listener()
             else:
-                logger.info("Telegram: connected but not authorized (call telegram_auth)")
+                logger.info(f"Telegram[{self.key}]: connected but not authorized (call telegram_auth)")
         except Exception as e:
             logger.warning(f"Telegram client init failed: {e}")
             self._client = None
 
-    def _run(self, coro):
-        """Run an async coroutine synchronously."""
-        return self._loop.run_until_complete(coro)
+    def _run_loop_forever(self):
+        import asyncio
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    def _start_push_listener(self):
+        """Register a NewMessage handler that publishes incoming messages to
+        the Centrifugo channel ``telegram:<principal>``. Stays idle (no-op) if
+        Centrifugo isn't configured, so single-user/offline setups are unaffected.
+        """
+        try:
+            from telethon import events
+            import centrifugo_client
+            if not centrifugo_client.is_configured():
+                logger.info(f"Telegram[{self.key}]: push listener idle (Centrifugo not configured)")
+                return
+
+            async def _on_new_message(event):
+                try:
+                    m = event.message
+                    try:
+                        s = await event.get_sender()
+                        nm = ((getattr(s, "first_name", "") or "")
+                              + ((" " + s.last_name) if getattr(s, "last_name", None) else "")).strip()
+                        un = getattr(s, "username", "") or ""
+                        frm = nm or (f"@{un}" if un else str(event.sender_id))
+                    except Exception:
+                        frm = str(getattr(event, "sender_id", ""))
+                    centrifugo_client.publish(f"telegram:{self.key}", {
+                        "chat_id": event.chat_id,
+                        "msg_id": m.id,
+                        "from": frm,
+                        "text": m.text or "",
+                        "date": m.date.isoformat() if m.date else "",
+                    })
+                except Exception as e:  # noqa: BLE001 — push is best-effort
+                    logger.warning(f"Telegram[{self.key}] push handler error: {e}")
+
+            self._client.add_event_handler(_on_new_message, events.NewMessage(incoming=True))
+            logger.info(f"Telegram[{self.key}]: NewMessage push listener active -> telegram:{self.key}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Telegram[{self.key}] push listener failed: {e}")
+
+    def _run(self, coro, timeout: int = 60):
+        """Dispatch a coroutine onto the persistent loop thread and wait."""
+        import asyncio
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout)
 
     @property
     def is_authenticated(self) -> bool:
