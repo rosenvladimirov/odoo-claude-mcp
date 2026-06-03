@@ -24,11 +24,19 @@ TELEGRAM_SESSION_PATH = os.environ.get(
 class TelegramServiceManager:
     """Manages Telegram client authentication and messaging."""
 
-    def __init__(self):
+    def __init__(self, session_path: str | None = None, config_file=None,
+                 key: str = "__global__"):
+        # Per-principal paths (Telegram identity is per human account). When
+        # not supplied, fall back to the legacy global session/config so a
+        # single, un-identified caller keeps working unchanged.
+        self.key = key
+        self._session_path = session_path or TELEGRAM_SESSION_PATH
+        self._config_file = Path(config_file) if config_file else TELEGRAM_CONFIG_FILE
         self._client = None
         self._api_id = None
         self._api_hash = None
         self._phone_code_hash = None
+        self._loop = None
         self._load_config()
 
     def _load_config(self):
@@ -37,9 +45,9 @@ class TelegramServiceManager:
         self._api_hash = os.environ.get("TELEGRAM_API_HASH", "")
 
         # From config file
-        if TELEGRAM_CONFIG_FILE.exists():
+        if self._config_file.exists():
             try:
-                data = json.loads(TELEGRAM_CONFIG_FILE.read_text())
+                data = json.loads(self._config_file.read_text())
                 if not self._api_id:
                     self._api_id = str(data.get("api_id", ""))
                 if not self._api_hash:
@@ -51,8 +59,8 @@ class TelegramServiceManager:
             self._init_client()
 
     def _save_config(self):
-        TELEGRAM_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        TELEGRAM_CONFIG_FILE.write_text(json.dumps({
+        self._config_file.parent.mkdir(parents=True, exist_ok=True)
+        self._config_file.write_text(json.dumps({
             "api_id": int(self._api_id),
             "api_hash": self._api_hash,
         }, indent=2))
@@ -73,7 +81,7 @@ class TelegramServiceManager:
 
             self._loop = loop
             self._client = TelegramClient(
-                TELEGRAM_SESSION_PATH,
+                self._session_path,
                 int(self._api_id),
                 self._api_hash,
                 loop=loop,
@@ -286,3 +294,31 @@ class TelegramServiceManager:
         if username:
             return f"{name} (@{username})" if name else f"@{username}"
         return name or str(sender.id)
+
+
+class TelegramRegistry:
+    """Per-principal Telegram clients.
+
+    Telegram identity is per USER (one human account), shared across that
+    user's MCP sessions — so we key by principal, NOT by session. This is
+    the deliberate counterpart to the per-SESSION Odoo connection registry:
+    two Claude sessions of the same user share one Telegram account, but two
+    different users never share one. Un-identified callers fall back to the
+    legacy global session (key ``__global__``), preserving single-user setups.
+    """
+
+    def __init__(self):
+        import threading
+        self._mgrs: dict[str, TelegramServiceManager] = {}
+        self._lock = threading.Lock()
+
+    def for_user(self, key: str, session_path: str | None = None,
+                 config_file=None) -> TelegramServiceManager:
+        with self._lock:
+            mgr = self._mgrs.get(key)
+            if mgr is None:
+                mgr = TelegramServiceManager(
+                    session_path=session_path, config_file=config_file, key=key,
+                )
+                self._mgrs[key] = mgr
+            return mgr

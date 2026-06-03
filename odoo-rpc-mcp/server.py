@@ -38,7 +38,7 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.types import TextContent, Tool
 
 from google_service import GoogleServiceManager
-from telegram_service import TelegramServiceManager
+from telegram_service import TelegramServiceManager, TelegramRegistry
 
 import ai_usage_log
 import ai_vision_service
@@ -1201,7 +1201,7 @@ class ConnectionManager:
 manager: ConnectionManager | None = None
 session_mgr: SessionManager | None = None
 google_mgr: GoogleServiceManager | None = None
-telegram_mgr: TelegramServiceManager | None = None
+telegram_registry: TelegramRegistry | None = None
 mcp_server = Server("odoo-rpc-mcp")
 
 
@@ -1267,7 +1267,23 @@ def _md_to_html(text: str) -> str:
 
 
 def _conn(args: dict) -> OdooConnection:
-    return _mgr().get(args.get("connection", "default"))
+    """Resolve the connection for a tool call.
+
+    Resolution order:
+      1. Explicit non-default named alias in ``args["connection"]`` →
+         honored from the global catalogue (``manager``).
+      2. This Claude session's active connection (per-session isolation) —
+         set by odoo_connect / identify / user_connection_activate.
+      3. Fallback: global ``manager["default"]`` (env bootstrap /
+         single-connection / backward compat for un-identified callers).
+    """
+    alias = args.get("connection", "default")
+    if alias and alias != "default":
+        return _mgr().get(alias)
+    sc = _get_session_conn()
+    if sc is not None:
+        return sc
+    return _mgr().get("default")
 
 
 # ── TZ + backup helpers (used by stock_initial_* tools) ──
@@ -1550,11 +1566,17 @@ class OdooWebSession:
         }
 
 
+def _web_session_key(alias: str) -> str:
+    """Composite key isolating web sessions per Claude session + alias."""
+    return f"{_get_mcp_session_key()}::{alias}"
+
+
 def _get_web_session(args: dict) -> OdooWebSession:
-    """Get or create web session from connection alias."""
+    """Get the per-session web session for a connection alias."""
     alias = args.get("connection", "default")
-    if alias in _web_sessions and _web_sessions[alias].authenticated:
-        return _web_sessions[alias]
+    key = _web_session_key(alias)
+    if key in _web_sessions and _web_sessions[key].authenticated:
+        return _web_sessions[key]
     raise RuntimeError(f"No active web session for '{alias}'. Call odoo_web_login first.")
 
 
@@ -1562,6 +1584,54 @@ def _get_web_session(args: dict) -> OdooWebSession:
 
 # In-memory: mcp_session_id -> user_name
 _session_users: dict[str, str] = {}
+
+# In-memory: mcp_session_id -> active OdooConnection for THIS Claude session.
+# Активната конекция е per-сесия (per закачен Claude), НЕ глобална за MCP
+# процеса — така два Claude-а (дори на един и същ Odoo юзер: prod vs test)
+# не си разменят конекциите. Глобалният ``manager`` остава само каталог на
+# именованите връзки + env bootstrap; живата "default" се пази тук per сесия.
+import threading as _sessconn_threading
+_session_conns: dict[str, "OdooConnection"] = {}
+_session_conns_lock = _sessconn_threading.Lock()
+
+
+def _set_session_conn(conn: "OdooConnection") -> None:
+    """Bind the active connection to the current MCP session."""
+    with _session_conns_lock:
+        _session_conns[_get_mcp_session_key()] = conn
+
+
+def _get_session_conn() -> "OdooConnection | None":
+    """Return this session's active connection, or None if not set."""
+    with _session_conns_lock:
+        return _session_conns.get(_get_mcp_session_key())
+
+
+def _clear_session_conn() -> None:
+    """Drop this session's active connection (on disconnect/session close)."""
+    with _session_conns_lock:
+        _session_conns.pop(_get_mcp_session_key(), None)
+
+
+def _tg() -> "TelegramServiceManager":
+    """Resolve the Telegram client for the current principal.
+
+    Telegram identity is per-USER (one human account), so we key by the
+    resolved MCP user — NOT by session. Un-identified callers fall back to
+    the legacy global session, preserving single-user setups.
+    """
+    reg = telegram_registry
+    if reg is None:
+        raise Exception("Telegram registry not initialized")
+    user = _get_current_user({})
+    if user:
+        base = _user_dir(user, create=True)
+        return reg.for_user(
+            user,
+            session_path=os.path.join(base, "telegram_session"),
+            config_file=os.path.join(base, "telegram_config.json"),
+        )
+    return reg.for_user("__global__")
 
 # Per-async-task user context (isolates concurrent MCP sessions)
 import contextvars
@@ -4984,21 +5054,37 @@ def _execute_tool(name: str, args: dict) -> Any:
     # ── Connection management ──
     if name == "odoo_connect":
         if SINGLE_CONNECTION:
-            # Only allow replacing the "default" connection
+            # Single-connection mode: one shared "default" in the global
+            # manager (persisted), as before.
             args["alias"] = "default"
-        conn = m.add(
-            alias=args.get("alias", "default"),
-            url=args["url"],
-            db=args["db"],
-            username=args["username"],
-            password=args.get("password", ""),
-            api_key=args.get("api_key", ""),
-            protocol=args.get("protocol", "xmlrpc"),
-            verify_ssl=bool(args.get("verify_ssl", True)),
-        )
+            conn = m.add(
+                alias="default",
+                url=args["url"],
+                db=args["db"],
+                username=args["username"],
+                password=args.get("password", ""),
+                api_key=args.get("api_key", ""),
+                protocol=args.get("protocol", "xmlrpc"),
+                verify_ssl=bool(args.get("verify_ssl", True)),
+            )
+        else:
+            # Multi-connection mode: build a session-scoped connection WITHOUT
+            # clobbering the global manager["default"] — that is exactly what
+            # caused cross-Claude connection bleed.
+            conn = OdooConnection(
+                alias=args.get("alias", "default"),
+                url=args["url"],
+                db=args["db"],
+                username=args["username"],
+                password=args.get("password", ""),
+                api_key=args.get("api_key", ""),
+                protocol=args.get("protocol", "xmlrpc"),
+                verify_ssl=bool(args.get("verify_ssl", True)),
+            )
         # Test authentication — also triggers first-time cert fetch when
         # verify_ssl=False.
         uid = conn.authenticate()
+        _set_session_conn(conn)
         return {"status": "connected", "uid": uid, **conn.to_dict()}
 
     elif name == "odoo_cert_info":
@@ -5060,8 +5146,11 @@ def _execute_tool(name: str, args: dict) -> Any:
         if SINGLE_CONNECTION:
             return {"error": "Single-connection mode: cannot remove connections."}
         alias = args.get("alias", "default")
+        # Drop this session's active connection; also remove from the global
+        # catalogue if it lives there (legacy).
+        _clear_session_conn()
         ok = m.remove(alias)
-        return {"status": "removed" if ok else "not_found", "alias": alias}
+        return {"status": "removed", "alias": alias, "session_cleared": True}
 
     elif name == "odoo_connections":
         return {"connections": m.list_all()}
@@ -5103,7 +5192,9 @@ def _execute_tool(name: str, args: dict) -> Any:
         if alias_to_activate and alias_to_activate in conns:
             c = conns[alias_to_activate]
             try:
-                conn = m.add(
+                # Session-scoped: bind to THIS Claude session, do not clobber
+                # the global manager["default"].
+                conn = OdooConnection(
                     alias="default",
                     url=c["url"], db=c["db"],
                     username=c["user"],
@@ -5112,6 +5203,7 @@ def _execute_tool(name: str, args: dict) -> Any:
                     protocol=c.get("protocol", "xmlrpc"),
                 )
                 conn.authenticate()
+                _set_session_conn(conn)
                 logger.info(f"User {user_name}: auto-activated connection '{alias_to_activate}'")
             except Exception as e:
                 logger.warning(f"User {user_name}: auto-activate '{alias_to_activate}' failed: {e}")
@@ -5204,9 +5296,9 @@ def _execute_tool(name: str, args: dict) -> Any:
             return {"error": f"Connection '{alias}' not found. Use user_connection_list to see available."}
         c = conns[alias]
         _save_user_active(user, {"alias": alias, **c})
-        # Also activate in MCP server
+        # Activate for THIS Claude session only (no global clobber).
         try:
-            conn = m.add(
+            conn = OdooConnection(
                 alias="default",
                 url=c["url"], db=c["db"],
                 username=c["user"],
@@ -5215,6 +5307,7 @@ def _execute_tool(name: str, args: dict) -> Any:
                 protocol=c.get("protocol", "xmlrpc"),
             )
             uid = conn.authenticate()
+            _set_session_conn(conn)
             return {"status": "activated", "alias": alias, "uid": uid, "url": c["url"]}
         except Exception as e:
             _save_user_active(user, {"alias": alias, **c})
@@ -6745,7 +6838,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         ws = OdooWebSession(url, db, login, password)
         try:
             info = ws.authenticate()
-            _web_sessions[alias] = ws
+            _web_sessions[_web_session_key(alias)] = ws
             return {
                 "status": "authenticated",
                 "uid": ws.uid,
@@ -6800,7 +6893,7 @@ def _execute_tool(name: str, args: dict) -> Any:
 
     elif name == "odoo_web_logout":
         alias = args.get("connection", "default")
-        ws = _web_sessions.pop(alias, None)
+        ws = _web_sessions.pop(_web_session_key(alias), None)
         if ws:
             ws.destroy()
             return {"status": "logged_out", "connection": alias}
@@ -9257,39 +9350,39 @@ def _execute_tool(name: str, args: dict) -> Any:
             calendar_id=args.get("calendar_id", "primary"),
         )
 
-    # ── Telegram ──
+    # ── Telegram (per-principal client via _tg()) ──
     elif name == "telegram_configure":
-        if telegram_mgr is None:
+        if telegram_registry is None:
             return {"error": "Telegram service not initialized"}
-        return telegram_mgr.configure(args["api_id"], args["api_hash"])
+        return _tg().configure(args["api_id"], args["api_hash"])
 
     elif name == "telegram_auth":
-        if telegram_mgr is None:
+        if telegram_registry is None:
             return {"error": "Telegram service not initialized"}
         code = args.get("code", "")
         if code:
-            return telegram_mgr.auth_verify(
+            return _tg().auth_verify(
                 phone=args["phone"], code=code,
                 password=args.get("password", ""),
             )
-        return telegram_mgr.auth_send_code(args["phone"])
+        return _tg().auth_send_code(args["phone"])
 
     elif name == "telegram_auth_status":
-        if telegram_mgr is None:
+        if telegram_registry is None:
             return {"status": "not_initialized"}
-        return telegram_mgr.auth_status()
+        return _tg().auth_status()
 
     elif name == "telegram_get_dialogs":
-        return telegram_mgr.get_dialogs(limit=args.get("limit", 20))
+        return _tg().get_dialogs(limit=args.get("limit", 20))
 
     elif name == "telegram_search_contacts":
-        return telegram_mgr.search_contacts(args["query"])
+        return _tg().search_contacts(args["query"])
 
     elif name == "telegram_get_messages":
         chat = args["chat"]
         if chat.lstrip("-").isdigit():
             chat = int(chat)
-        return telegram_mgr.get_messages(
+        return _tg().get_messages(
             chat=chat, limit=args.get("limit", 10),
             search=args.get("search", ""),
         )
@@ -9298,7 +9391,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         chat = args["chat"]
         if chat.lstrip("-").isdigit():
             chat = int(chat)
-        return telegram_mgr.send_message(
+        return _tg().send_message(
             chat=chat, message=args["message"],
             reply_to=args.get("reply_to", 0),
         )
@@ -9325,7 +9418,7 @@ async def health_endpoint(request):
 
 
 def create_app():
-    global manager, google_mgr, telegram_mgr, session_mgr
+    global manager, google_mgr, telegram_registry, session_mgr
 
     manager = ConnectionManager(CONNECTIONS_FILE)
     logger.info(f"Loaded {len(manager.connections)} connection(s): {list(manager.connections.keys())}")
@@ -9342,11 +9435,9 @@ def create_app():
     else:
         logger.info("Google services: not authenticated (call google_auth to connect)")
 
-    telegram_mgr = TelegramServiceManager()
-    if telegram_mgr.is_authenticated:
-        logger.info("Telegram: authenticated")
-    else:
-        logger.info("Telegram: not authenticated (call telegram_configure + telegram_auth)")
+    # Per-principal Telegram clients (lazy, created on first use per user).
+    telegram_registry = TelegramRegistry()
+    logger.info("Telegram: per-principal registry ready (clients created lazily)")
 
     # --- AI Invoice Pipeline plugin discovery ---
     _plugins_dir = os.environ.get(
