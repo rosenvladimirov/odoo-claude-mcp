@@ -86,6 +86,18 @@ Replace global active connection with `registry: {session_id → ConnectionConte
 - **Deploy:** Centrifugo as Docker service in the MCP stack, externally exposed.
 - **Secrets:** two split secrets in `.env` (client-JWT HMAC + publish API key).
 
-## Open items
-- Centrifugo FQDN + TLS termination (Traefik vs Cloudflare tunnel) on the chosen host.
-- Whether to retire the hourly cron entirely once push is live.
+## Progress log
+- **2026-06-03** — Phase 1 (per-session connection registry) DONE on v2 + v3, branch `feat/per-session-connection` (v2 `10b5062`, v3 `4cc4262`). Connection-isolation 7/7 on the live v2.25.2 container (202588745). v2↔v3 verified line-identical; v3-only modules (tenant_router/elevation/api_key_manager/provisioning) intact.
+- **2026-06-03** — Phase 2a (per-principal Telegram registry) DONE on v2 + v3 (same commits). Local registry isolation 6/6.
+- **2026-06-03** — Phase 3 scaffolding DONE on v2 + v3 (v2 `2e0d6f6`, v3 `1272ac0`): compose `centrifugo` service, `centrifugo/config.json` + README, `.env.example` secrets, `centrifugo_client.py` publish helper. **Not deployed.**
+- **Pending (blocked on decision):** Phase 2b (NewMessage handler + persistent loop → publish) needs the deployed hub; deploy needs host/TLS choice below.
+
+## Decisions locked (2026-06-03, cont.)
+- **Centrifugo external exposure = Cloudflare tunnel** (always — house standard; stack already has `cloudflare-net` + a `cloudflared` container). No Traefik. Add a tunnel ingress hostname → `centrifugo:8000`.
+- **Branches pushed** to `origin` (rosenvladimirov/odoo-claude-mcp): `feat/per-session-connection-2.0` and `feat/per-session-connection-3.0` (distinct names — same remote, divergent 2.0/3.0 histories). PRs open-able.
+
+## Open items (need Rosen)
+- On which host/stack to deploy the Centrifugo container + which Cloudflare tunnel + the ingress hostname (FQDN).
+- REST `/api/connect` + `/api/identify` endpoints still clobber global `manager["default"]` (non-MCP surface) — fix too?
+- Validate `centrifugo/config.json` keys (SSE/WS flags) against pinned `centrifugo/centrifugo:v6` tag before first `up`.
+- Phase 2b loop-rewrite: only after a live hub exists to validate against (risk of breaking the sync model otherwise).
