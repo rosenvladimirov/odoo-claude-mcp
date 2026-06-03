@@ -38,6 +38,7 @@ from mcp.types import TextContent, Tool
 
 from google_service import GoogleServiceManager
 from telegram_service import TelegramServiceManager, TelegramRegistry
+import telegram_agent
 
 import ai_usage_log
 import ai_vision_service
@@ -3451,6 +3452,91 @@ TOOLS = [
                 "reply_to": {"type": "integer", "description": "Message ID to reply to", "default": 0},
             },
             "required": ["chat", "message"],
+        },
+    ),
+    # ── Telegram Agent (intent-routed, scenario-driven chat handling) ──
+    Tool(
+        name="telegram_agent_enroll",
+        description=("Enroll a Telegram chat for agentic handling with a scenario. "
+                     "mode: auto (self-converse) | advisory (suggest, human sends) | notify. "
+                     "scenario (optional dict): persona, default_toolset, data_scope "
+                     "{models,fields,pricelist}, forbid[], company_id, quote_send (approve|auto), "
+                     "skills[] ({name,toolset,triggers[]}). Confidentiality is enforced by data_scope."),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "chat_id": {"type": "string", "description": "Chat/group id (e.g. -100123...)"},
+                "mode": {"type": "string", "enum": ["auto", "advisory", "notify"], "default": "notify"},
+                "scenario": {"type": "object", "description": "Scenario policy (see description)"},
+            },
+            "required": ["chat_id"],
+        },
+    ),
+    Tool(
+        name="telegram_agent_unenroll",
+        description="Stop agentic handling for a chat.",
+        inputSchema={"type": "object", "properties": {"chat_id": {"type": "string"}}, "required": ["chat_id"]},
+    ),
+    Tool(
+        name="telegram_agent_list",
+        description="List enrolled chats with their mode/persona/skills.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="telegram_agent_get_scenario",
+        description="Get the full scenario for an enrolled chat.",
+        inputSchema={"type": "object", "properties": {"chat_id": {"type": "string"}}, "required": ["chat_id"]},
+    ),
+    Tool(
+        name="telegram_agent_set_scenario",
+        description="Replace the scenario for an enrolled chat.",
+        inputSchema={
+            "type": "object",
+            "properties": {"chat_id": {"type": "string"}, "scenario": {"type": "object"}},
+            "required": ["chat_id", "scenario"],
+        },
+    ),
+    Tool(
+        name="telegram_agent_route",
+        description=("Classify the conversation direction for an enrolled chat and return the "
+                     "active TOOLSET to switch to (based on the scenario's skills), plus the "
+                     "data_scope/forbid guardrails and a memory_search_hint. Call this on each "
+                     "incoming message before acting."),
+        inputSchema={
+            "type": "object",
+            "properties": {"chat_id": {"type": "string"}, "text": {"type": "string", "description": "The incoming message text"}},
+            "required": ["chat_id", "text"],
+        },
+    ),
+    Tool(
+        name="telegram_agent_product_lookup",
+        description=("Search products for an enrolled chat, returning ONLY the scenario's "
+                     "allowlisted fields (confidential fields withheld by design). Uses the "
+                     "scenario's company + pricelist."),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "chat_id": {"type": "string"},
+                "query": {"type": "string", "description": "Product name or code fragment"},
+                "limit": {"type": "integer", "default": 20},
+                "connection": {"type": "string", "default": "default"},
+            },
+            "required": ["chat_id", "query"],
+        },
+    ),
+    Tool(
+        name="telegram_agent_create_quote",
+        description=("Create a DRAFT sale.order in the scenario's company. Returns a shareable "
+                     "summary. Honors quote_send (approve → confirm before sending; auto → may send)."),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "chat_id": {"type": "string"},
+                "lines": {"type": "array", "description": "[{product_id|default_code, qty, [price_unit]}]"},
+                "partner_id": {"type": "integer", "default": 0},
+                "connection": {"type": "string", "default": "default"},
+            },
+            "required": ["chat_id", "lines"],
         },
     ),
     # ── Connection Manager GUI ──
@@ -8857,6 +8943,25 @@ def _execute_tool(name: str, args: dict) -> Any:
             chat=chat, message=args["message"],
             reply_to=args.get("reply_to", 0),
         )
+
+    # ── Telegram Agent ──
+    elif name == "telegram_agent_enroll":
+        return telegram_agent.enroll(args["chat_id"], args.get("mode", "notify"), args.get("scenario"))
+    elif name == "telegram_agent_unenroll":
+        return telegram_agent.unenroll(args["chat_id"])
+    elif name == "telegram_agent_list":
+        return telegram_agent.list_enrolled()
+    elif name == "telegram_agent_get_scenario":
+        return telegram_agent.get_scenario(args["chat_id"])
+    elif name == "telegram_agent_set_scenario":
+        return telegram_agent.set_scenario(args["chat_id"], args["scenario"])
+    elif name == "telegram_agent_route":
+        return telegram_agent.route(args["chat_id"], args.get("text", ""))
+    elif name == "telegram_agent_product_lookup":
+        return telegram_agent.product_lookup(_conn(args), args["chat_id"], args["query"], args.get("limit", 20))
+    elif name == "telegram_agent_create_quote":
+        return telegram_agent.create_quote(_conn(args), args["chat_id"], args["lines"],
+                                           args.get("partner_id") or None)
 
     return {"error": f"Unknown tool: {name}"}
 
