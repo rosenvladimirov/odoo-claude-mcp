@@ -19,7 +19,7 @@
     ]
   },
   "sse": { "enabled": true },
+  "uni_sse": { "enabled": true },
   "http_stream": { "enabled": true },
-  "websocket": { "enabled": true },
   "admin": { "enabled": false }
 }
