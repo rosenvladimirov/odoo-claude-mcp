@@ -278,6 +278,34 @@ services:
     labels:
       - "com.blconsulting.service=mcp-backup"
 
+  # ─── Centrifugo (realtime push hub: SSE + WebSocket) ──────────
+  # Fans out per-principal events (telegram:<principal>) to the MCP wake-loop,
+  # the hardware proxy, or a human. MCP publishes via HTTP API; subscribers
+  # use a per-user JWT scoped to their channel. Externally exposed (TLS at
+  # Cloudflare/Traefik). Secrets via env (override config.json placeholders).
+  # See centrifugo/README.md — validate config keys vs pinned image before up.
+  centrifugo:
+    image: centrifugo/centrifugo:v6
+    container_name: centrifugo
+    restart: unless-stopped
+    networks:
+      - backend
+      - cloudflare-net
+    command: ["centrifugo", "-c", "/centrifugo/config.json"]
+    environment:
+      - CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY=${CENTRIFUGO_TOKEN_HMAC_SECRET:-}
+      - CENTRIFUGO_HTTP_API_KEY=${CENTRIFUGO_API_KEY:-}
+    ports:
+      - "${CENTRIFUGO_PORT:-8000}:8000"
+    volumes:
+      - ./centrifugo/config.json:/centrifugo/config.json:ro
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    labels:
+      - "com.blconsulting.service=centrifugo"
+
 volumes:
   claude-user-data:
     driver: local
