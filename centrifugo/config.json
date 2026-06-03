@@ -1,0 +1,25 @@
+{
+  "client": {
+    "token": {
+      "hmac_secret_key": "set-via-CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY-env"
+    },
+    "allowed_origins": ["*"]
+  },
+  "http_api": {
+    "key": "set-via-CENTRIFUGO_HTTP_API_KEY-env"
+  },
+  "channel": {
+    "namespaces": [
+      {
+        "name": "telegram",
+        "history_size": 20,
+        "history_ttl": "300s",
+        "force_recovery": true
+      }
+    ]
+  },
+  "sse": { "enabled": true },
+  "http_stream": { "enabled": true },
+  "websocket": { "enabled": true },
+  "admin": { "enabled": false }
+}
