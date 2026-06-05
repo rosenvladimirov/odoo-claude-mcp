@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "2.25.0"
+__version__ = "2.26.0"
 
 import asyncio
 import hmac
@@ -1632,6 +1632,14 @@ def _tg() -> "TelegramServiceManager":
             config_file=os.path.join(base, "telegram_config.json"),
         )
     return reg.for_user("__global__")
+
+
+def _tg_subs_file(principal: str | None) -> str:
+    """Резолва per-principal subscription файл (admin раздава кои чатове да
+    слуша). principal=None → текущия user (или __global__)."""
+    user = principal or _get_current_user({}) or "__global__"
+    base = DATA_DIR if user == "__global__" else _user_dir(user, create=True)
+    return os.path.join(base, "telegram_subscriptions.json")
 
 # Per-async-task user context (isolates concurrent MCP sessions)
 import contextvars
@@ -3708,6 +3716,48 @@ TOOLS = [
                 "reply_to": {"type": "integer", "description": "Message ID to reply to", "default": 0},
             },
             "required": ["chat", "message"],
+        },
+    ),
+    Tool(
+        name="telegram_sub_add",
+        description=(
+            "Subscribe a principal's Telegram listener to a chat (admin allow-list). "
+            "No subscriptions for a principal = listen to ALL (back-compat). Once a "
+            "principal has any subscription, only those chats are pushed to its "
+            "telegram:<principal> channel. Use 'principal' to assign for another user."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "chat_id": {"type": "integer", "description": "Telegram chat id (negative for groups)"},
+                "principal": {"type": "string", "description": "Target principal/user (default: current)"},
+                "title": {"type": "string", "default": ""},
+                "note": {"type": "string", "default": ""},
+                "mode": {"type": "string", "default": "auto"},
+            },
+            "required": ["chat_id"],
+        },
+    ),
+    Tool(
+        name="telegram_sub_list",
+        description="List a principal's Telegram chat subscriptions. allow_all=true means no filter (listens to all).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "principal": {"type": "string", "description": "Target principal/user (default: current)"},
+            },
+        },
+    ),
+    Tool(
+        name="telegram_sub_remove",
+        description="Remove a chat from a principal's Telegram subscription allow-list.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "chat_id": {"type": "integer"},
+                "principal": {"type": "string", "description": "Target principal/user (default: current)"},
+            },
+            "required": ["chat_id"],
         },
     ),
     # ── Connection Manager GUI ──
@@ -9395,6 +9445,26 @@ def _execute_tool(name: str, args: dict) -> Any:
             chat=chat, message=args["message"],
             reply_to=args.get("reply_to", 0),
         )
+
+    elif name == "telegram_sub_add":
+        import telegram_subscriptions as _tsub
+        return _tsub.add_sub(
+            _tg_subs_file(args.get("principal")), args["chat_id"],
+            title=args.get("title", ""), note=args.get("note", ""),
+            mode=args.get("mode", "auto"))
+
+    elif name == "telegram_sub_list":
+        import telegram_subscriptions as _tsub
+        path = _tg_subs_file(args.get("principal"))
+        return {
+            "principal": args.get("principal") or _get_current_user({}) or "__global__",
+            "allow_all": _tsub.allowed_chats(path) is None,
+            "subscriptions": _tsub.list_subs(path),
+        }
+
+    elif name == "telegram_sub_remove":
+        import telegram_subscriptions as _tsub
+        return _tsub.remove_sub(_tg_subs_file(args.get("principal")), args["chat_id"])
 
     return {"error": f"Unknown tool: {name}"}
 

@@ -32,6 +32,8 @@ class TelegramServiceManager:
         self.key = key
         self._session_path = session_path or TELEGRAM_SESSION_PATH
         self._config_file = Path(config_file) if config_file else TELEGRAM_CONFIG_FILE
+        # Per-principal subscription allow-list (admin-assigned). До config-а.
+        self._subs_file = str(self._config_file.parent / "telegram_subscriptions.json")
         self._client = None
         self._api_id = None
         self._api_hash = None
@@ -121,6 +123,14 @@ class TelegramServiceManager:
 
             async def _on_new_message(event):
                 try:
+                    # Subscription allow-list (admin per principal; None = allow ALL)
+                    try:
+                        import telegram_subscriptions as _tsub
+                        _allowed = _tsub.allowed_chats(self._subs_file)
+                        if _allowed is not None and event.chat_id not in _allowed:
+                            return
+                    except Exception:
+                        pass
                     m = event.message
                     try:
                         s = await event.get_sender()
