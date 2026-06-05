@@ -529,6 +529,15 @@ code.apikey {
 
 
 def _html_shell(title: str, body: str, extra_head: str = "") -> str:
+    # Inline SVG favicon — purple shield + "M" (MCP). No external request.
+    favicon = (
+        "data:image/svg+xml;utf8,"
+        "%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E"
+        "%3Crect%20width='64'%20height='64'%20rx='12'%20fill='%23714BA0'/%3E"
+        "%3Ctext%20x='32'%20y='46'%20font-family='Inter,sans-serif'%20"
+        "font-size='40'%20font-weight='800'%20fill='white'%20"
+        "text-anchor='middle'%3EM%3C/text%3E%3C/svg%3E"
+    )
     return f"""<!DOCTYPE html>
 <html lang="bg">
 <head>
@@ -536,6 +545,7 @@ def _html_shell(title: str, body: str, extra_head: str = "") -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="robots" content="noindex, nofollow, noarchive">
 <title>{title}</title>
+<link rel="icon" type="image/svg+xml" href="{favicon}">
 <link href="{BOOTSTRAP_CSS}" rel="stylesheet">
 <link href="{BOOTSTRAP_ICONS}" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
