@@ -1354,6 +1354,11 @@ def _get_web_session(args: dict) -> OdooWebSession:
 # In-memory: mcp_session_id -> user_name
 _session_users: dict[str, str] = {}
 
+# In-memory: mcp_session_id -> Telegram phone bound to THIS session. Lets several
+# humans sharing one principal/Odoo key keep SEPARATE persistent Telegram sessions
+# (keyed by the phone = the Telegram account they auth with). Set by telegram_auth.
+_session_tg_phone: dict[str, str] = {}
+
 # In-memory: mcp_session_id -> active OdooConnection for THIS Claude session.
 # Активната конекция е per-сесия (per закачен Claude), НЕ глобална за MCP
 # процеса — така два Claude-а (дори на един и същ Odoo юзер: prod vs test)
@@ -1393,12 +1398,34 @@ def _tg() -> "TelegramServiceManager":
     if reg is None:
         raise Exception("Telegram registry not initialized")
     user = _get_current_user({})
+    # Phone-keyed: when several humans share one principal/Odoo key (so they
+    # resolve to the same mcp_user), each still gets a SEPARATE persistent
+    # Telegram session, keyed by the phone (Telegram account) bound to THIS
+    # MCP session via telegram_auth. Falls back to the legacy per-user session
+    # when no phone is bound (single-user / pre-auth).
+    phone = _session_tg_phone.get(_get_mcp_session_key())
     if user:
         base = _user_dir(user, create=True)
+        config_file = os.path.join(base, "telegram_config.json")
+        if phone:
+            tag = _sanitize_name(phone)
+            return reg.for_user(
+                f"{user}:{tag}",
+                session_path=os.path.join(base, f"telegram_{tag}"),
+                config_file=config_file,
+            )
         return reg.for_user(
             user,
             session_path=os.path.join(base, "telegram_session"),
-            config_file=os.path.join(base, "telegram_config.json"),
+            config_file=config_file,
+        )
+    if phone:
+        tag = _sanitize_name(phone)
+        gdir = os.path.dirname(os.environ.get(
+            "TELEGRAM_SESSION_PATH", "/data/telegram_session")) or "/data"
+        return reg.for_user(
+            f"__global__:{tag}",
+            session_path=os.path.join(gdir, f"telegram_{tag}"),
         )
     return reg.for_user("__global__")
 
@@ -8907,6 +8934,10 @@ def _execute_tool(name: str, args: dict) -> Any:
     elif name == "telegram_auth":
         if telegram_registry is None:
             return {"error": "Telegram service not initialized"}
+        # Bind this MCP session to the Telegram account (phone) being used, so
+        # humans sharing one principal/key get separate persistent sessions.
+        if args.get("phone"):
+            _session_tg_phone[_get_mcp_session_key()] = args["phone"]
         code = args.get("code", "")
         if code:
             return _tg().auth_verify(
