@@ -267,6 +267,47 @@ def is_protected_execute(tool_name: str, arguments: dict | None) -> tuple[bool, 
     return False, model, method, ""
 
 
+# Credential-bearing models with NO safe per-user "own record" concept — these
+# are shared secret stores (database.secret, SMTP/IMAP passwords, license keys,
+# API keys, TOTP secrets). A USER reading them = reading everyone's secrets, so
+# read/search is refused for USER role (requires elevation). A USER may still
+# read their OWN data on ordinary models (res.partner, their own res.users via
+# Odoo's record rules) — those are not in this set.
+DEFAULT_CREDENTIAL_READ_MODELS: set = {
+    "ir.config_parameter",
+    "ir.mail_server",
+    "fetchmail.server",
+    "res.users.apikeys",
+    "auth.totp.user",
+    "auth.totp.device",
+}
+CREDENTIAL_READ_MODELS = _csv("MCP_CREDENTIAL_READ_MODELS",
+                              DEFAULT_CREDENTIAL_READ_MODELS)
+# Read tools + read methods the gate inspects for credential models.
+_READ_TOOLS: set = {"odoo_read", "odoo_search", "odoo_search_read",
+                    "odoo_search_count", "odoo_fields_get", "odoo_read_group"}
+_READ_METHODS: set = {"read", "search", "search_read", "search_count",
+                      "read_group", "name_get", "name_search", "fields_get"}
+
+
+def is_protected_credential_read(tool_name: str, arguments: dict | None) -> tuple[bool, str]:
+    """Refuse USER reads of shared credential stores (own data stays allowed).
+
+    Covers both the direct read tools (odoo_read/search/search_read/...) and
+    odoo_execute with a read method. Returns (is_blocked, model)."""
+    args = arguments or {}
+    model = (args.get("model") or "").strip().lower()
+    if not model or model not in CREDENTIAL_READ_MODELS:
+        return False, model
+    if tool_name in _READ_TOOLS:
+        return True, model
+    if tool_name == "odoo_execute":
+        method = (args.get("method") or "").strip().lower()
+        if method in _READ_METHODS:
+            return True, model
+    return False, model
+
+
 def is_protected_write_create(tool_name: str, arguments: dict | None) -> tuple[bool, str, str]:
     """For odoo_write / odoo_create, refuse on protected models.
 
@@ -351,6 +392,21 @@ def check_call(tool_name: str, arguments: dict | None,
             "hint": (
                 f"Cannot {op} on protected model '{model}'. Use mcp_elevate "
                 f"first or scope changes to non-protected models."
+            ),
+        }
+
+    # Credential-read tier: USER may not read shared secret stores.
+    blocked, model = is_protected_credential_read(tool_name, arguments)
+    if blocked:
+        return False, {
+            "reason": "protected_credential_read",
+            "tool": tool_name,
+            "model": model,
+            "role": role,
+            "hint": (
+                f"Reading shared credential store '{model}' requires admin. "
+                f"Use mcp_elevate(reason='...', ttl=300). Your own records on "
+                f"ordinary models remain readable."
             ),
         }
 
