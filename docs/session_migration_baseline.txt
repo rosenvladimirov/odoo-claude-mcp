@@ -1,0 +1,9 @@
+=== baseline grep gate snapshot 2026-06-10 ===
+74
+--- __global__:
+telegram_service.py:2
+server.py:6
+--- run_in_executor:
+250:            return await asyncio.get_event_loop().run_in_executor(
+4375:            await asyncio.get_event_loop().run_in_executor(None, _discover_proxy_tools, None)
+4383:            result = await asyncio.get_event_loop().run_in_executor(
