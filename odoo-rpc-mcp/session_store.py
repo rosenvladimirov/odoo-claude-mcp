@@ -124,11 +124,14 @@ class SessionStore:
         self.ttl_seconds = ttl_seconds
         self.retention_days = retention_days
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # SECURITY: web session cookies live in this DB at rest. WAL mode also
+        # writes -wal/-shm sidecars carrying the same data, so chmod all three.
         self._init_db()
-        try:
-            os.chmod(self.db_path, 0o600)  # web cookies are secrets at rest
-        except OSError:
-            pass
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.chmod(Path(str(self.db_path) + suffix), 0o600)
+            except OSError:
+                pass
 
     @contextmanager
     def _connect(self):

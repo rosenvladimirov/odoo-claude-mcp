@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.30.1] — 2026-06-10 — Security hardening (audit fixes P0/P1/P2)
+
+Closes findings from the 2026-06-10 security audit
+(`docs/SECURITY_AUDIT_2026_06_10.md`). The strict session model itself was
+sound; these fixes harden the surrounding HTTP layer (mostly pre-existing).
+
+### Security — P0
+- **Credential leak via AUTH-DEBUG removed** — full request headers (incl.
+  `Authorization: Bearer <Odoo api_key>`) were logged at INFO on every /mcp +
+  OAuth request. Now OFF by default; gated behind `MCP_DEBUG_HEADERS=1` and
+  even then Authorization/X-Odoo-*/Cookie/X-Api-Token are redacted.
+- **/api/user/connections IDOR fixed** — GET/POST now require unified-auth
+  ownership proof (`caller.mcp_user == sanitize(name)`); GET redacts
+  api_key/password. Previously any token holder could read (plaintext keys)
+  or overwrite any profile's connections.
+- **OAuth no longer hands out the master token** — `/oauth/register` mints a
+  per-client random secret; `/oauth/token` and `/oauth/authorize` mint
+  short-lived random access tokens/codes (in-memory, TTL). `MCP_SECRET_TOKEN`
+  is never returned through the public OAuth flow. The gate accepts the
+  long-lived secret (admin/legacy) OR a live issued token. Restart → clients
+  re-auth automatically.
+- **Arbitrary file write (save_path) confined** — `odoo_web_report` +
+  `public_access_*` now write only under `users/<principal>/downloads/`
+  (`_safe_save_path`); absolute paths and `..` rejected. Was: write anywhere
+  the process could (authorized_keys, cron, server.py) → RCE.
+
+### Security — P1
+- **AI extract endpoints** (`/api/ai/extract-raw`, `/api/ai/customs/extract-raw`)
+  now require `MCP_ADMIN_TOKEN` unconditionally — removed the bypassable
+  "172.x source IP is internal" trust (Cloudflare tunnel traffic shares the
+  docker bridge range, so every proxied request looked internal).
+- **SSRF guard** — with no `ALLOWED_ODOO_URLS` whitelist, outbound auth XMLRPC
+  to private/loopback/link-local hosts is refused (`_ssrf_target_allowed`),
+  blocking blind backend port-scans via a dummy Bearer + `X-Odoo-Url`.
+- **identify(name) impersonation guard** — a name-only identify (no
+  unified-auth headers) can no longer claim an EXISTING profile that holds
+  saved connections; bootstrap of new/empty profiles still works. Opt back in
+  on single-user stacks with `MCP_ALLOW_NAME_IDENTIFY=1`.
+
+### Security — P2
+- `git_remote` shlex-quotes `repo_path`/`extra_args` (shell injection).
+- `_sanitize_name` rejects `.`/`..` traversal components.
+- WAL sidecar files (`-wal`/`-shm`) are chmod 0600 alongside the DB.
+- Constant-time secret comparison (`_hmac_eq`) on token paths.
+
+### Known remaining (deliberately deferred)
+- TLS verification stays `verify=False`/`CERT_NONE` for Odoo XMLRPC/web —
+  flipping it globally on 8 production stacks with self-signed/pinned Odoo
+  instances needs per-connection testing; tracked for a follow-up.
+
+### Tests
+- `tests/test_security_fixes.py` (sanitize traversal, save_path confinement,
+  SSRF guard, constant-time compare).
+
 ## [2.30.0] — 2026-06-10 — Strict session model (fail-closed, SQLite session store)
 
 **BREAKING.** Complete migration of all per-session/per-user state to a

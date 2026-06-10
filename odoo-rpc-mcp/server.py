@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "2.30.0"
+__version__ = "2.30.1"
 
 import asyncio
 import json
@@ -1505,7 +1505,7 @@ _CYR_TO_LAT = str.maketrans({
 
 
 def _sanitize_name(name: str) -> str:
-    """Transliterate to ASCII and sanitize for use as directory name."""
+    """Transliterate to ASCII and sanitize for use as a single directory name."""
     # Cyrillic transliteration first, then NFKD for accented Latin
     text = name.lower().translate(_CYR_TO_LAT)
     nfkd = unicodedata.normalize("NFKD", text)
@@ -1513,7 +1513,13 @@ def _sanitize_name(name: str) -> str:
     safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in ascii_name)
     while "__" in safe:
         safe = safe.replace("__", "_")
-    return safe.strip("_") or "user"
+    safe = safe.strip("_")
+    # SECURITY: never let a name resolve to a path-traversal component. A bare
+    # "." / ".." (the only traversal a single component can express, since "/"
+    # is already mapped to "_") would point _user_dir at /data root.
+    if safe in ("", ".", "..") or set(safe) == {"."}:
+        return "user"
+    return safe
 
 
 # ─── AI Invoice — tenant helpers ─────────────────────────
@@ -1969,6 +1975,35 @@ _auth_cache_lock = _auth_threading.Lock()
 AUTH_CACHE_TTL = int(os.environ.get("AUTH_CACHE_TTL", "300"))  # 5 minutes default
 
 
+def _hmac_eq(a: str, b: str) -> bool:
+    """Constant-time string comparison for secrets/tokens."""
+    import hmac as _hmac
+    if not a or not b:
+        return False
+    return _hmac.compare_digest(str(a), str(b))
+
+
+def _safe_save_path(save_path: str) -> str:
+    """Confine a caller-supplied save_path under the principal's downloads dir.
+
+    SECURITY: prevents arbitrary file writes (authorized_keys, cron, server.py).
+    The path is treated as a RELATIVE leaf inside
+    ``/data/users/<principal>/downloads/`` — absolute paths and ``..`` escapes
+    are rejected (fail-closed). Creates parent dirs and returns the safe path.
+    """
+    principal = _require_principal()
+    base = os.path.realpath(os.path.join(_user_dir(principal, create=True), "downloads"))
+    os.makedirs(base, exist_ok=True)
+    leaf = str(save_path).lstrip("/\\")
+    target = os.path.realpath(os.path.join(base, leaf))
+    if target != base and not target.startswith(base + os.sep):
+        raise ValueError(
+            "save_path must stay inside your per-user downloads directory "
+            "(no absolute paths or '..').")
+    os.makedirs(os.path.dirname(target) or base, exist_ok=True)
+    return target
+
+
 def _resolve_mcp_user(url: str, db: str, login: str, api_key: str) -> tuple[str, str] | None:
     """Find the MCP user whose connections.json contains exactly this 4-tuple.
 
@@ -2033,6 +2068,36 @@ def _xmlrpc_validate(url: str, db: str, login: str, api_key: str) -> int | None:
         return None
 
 
+def _ssrf_target_allowed(url: str) -> bool:
+    """Return False if the URL host resolves to a private/loopback/link-local
+    address (SSRF guard for outbound auth XMLRPC when no whitelist is set).
+
+    Conservative: on resolution failure we ALLOW (a public FQDN that briefly
+    fails DNS shouldn't lock out legitimate logins); the whitelist is the
+    strong control, this is the safety net for the empty-whitelist default.
+    """
+    import ipaddress
+    import socket as _socket
+    from urllib.parse import urlparse
+    host = (urlparse(url).hostname or "").strip()
+    if not host:
+        return False
+    try:
+        infos = _socket.getaddrinfo(host, None)
+    except Exception:
+        return True  # can't resolve → not our call to block; whitelist is the gate
+    for info in infos:
+        ip = info[4][0]
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        if (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_reserved or addr.is_multicast or addr.is_unspecified):
+            return False
+    return True
+
+
 def get_caller_odoo_user(headers: dict) -> dict | None:
     """Resolve calling MCP user from HTTP headers.
 
@@ -2062,6 +2127,13 @@ def get_caller_odoo_user(headers: dict) -> dict | None:
         if url not in allowed:
             logger.warning(f"[AUTH] Rejected non-whitelisted Odoo URL: {url}")
             return None
+    elif not _ssrf_target_allowed(url):
+        # SECURITY: with no explicit whitelist, refuse outbound XMLRPC to
+        # private/loopback/link-local targets — otherwise a dummy Bearer +
+        # X-Odoo-Url=http://qdrant:6333 turns this auth path into a blind
+        # SSRF/port-scanner against the backend network.
+        logger.warning(f"[AUTH] Rejected SSRF-unsafe Odoo URL (private/loopback): {url}")
+        return None
 
     cache_key = _auth_hashlib.sha256(f"{url}|{db}|{login}|{api_key}".encode()).hexdigest()
     now = _auth_time.time()
@@ -5178,6 +5250,25 @@ def _execute_tool(name: str, args: dict) -> Any:
                 }
             safe_name = _sanitize_name(user_name)
             preferred_alias = None
+            # SECURITY (impersonation guard): a name-only identify (no unified-auth
+            # headers — claude.ai OAuth / shared token) must NOT grant access to an
+            # EXISTING profile that holds saved connections (real Odoo credentials).
+            # Otherwise any token holder could `identify(name="Rosen")` and inherit
+            # Rosen's saved keys / Telegram / Google. Binding to a NEW or empty
+            # profile (bootstrap) stays allowed. Stacks with a single trusted human
+            # may opt back in with MCP_ALLOW_NAME_IDENTIFY=1.
+            _existing_conns = _load_user_connections(user_name)
+            if _existing_conns and os.environ.get("MCP_ALLOW_NAME_IDENTIFY") != "1":
+                return {
+                    "status": "forbidden",
+                    "error": (
+                        f"Profile '{safe_name}' already has saved connections. "
+                        "Name-only identify cannot claim a profile with stored "
+                        "credentials. Connect with unified-auth headers "
+                        "(Authorization: Bearer <odoo_api_key> + X-Odoo-Url/Db/Login), "
+                        "or set MCP_ALLOW_NAME_IDENTIFY=1 on a single-user stack."
+                    ),
+                }
             # Bind to the session row; a session already bound to a DIFFERENT
             # identity is refused (SessionPrincipalMismatch → structured error).
             session_store_inst.bind_principal(sc.session_key, safe_name, "identify")
@@ -5661,15 +5752,21 @@ def _execute_tool(name: str, args: dict) -> Any:
         if not host or not user:
             return {"error": f"SSH config incomplete for '{conn_alias}'"}
 
+        # SECURITY: quote caller-controlled extra_args so they can't break out
+        # of the git command into the shell (e.g. extra_args="; rm -rf /").
+        import shlex as _shlex
+        _ea = _shlex.quote(extra_args) if extra_args else ""
         git_commands = {
             "status": "git status",
             "pull": "git pull",
-            "log": f"git log --oneline {extra_args or '-20'}",
-            "branch": f"git branch {extra_args}",
-            "diff": f"git diff {extra_args}",
+            "log": f"git log --oneline {_ea or '-20'}",
+            "branch": f"git branch {_ea}",
+            "diff": f"git diff {_ea}",
             "remote": "git remote -v",
             "fetch": "git fetch --all",
-            "stash": f"git stash {extra_args}",
+            "stash": f"git stash {_ea}",
+            # 'custom' is an explicit arbitrary-remote-command escape hatch; it is
+            # equivalent to ssh_execute and gated by the same principal/connection.
             "custom": extra_args or args.get("custom_command", ""),
         }
 
@@ -5682,7 +5779,8 @@ def _execute_tool(name: str, args: dict) -> Any:
         needs_remote = operation in ("pull", "fetch", "custom")
         use_fwd = fwd and needs_remote
 
-        full_cmd = f"cd {repo_path} && {git_cmd}"
+        # SECURITY: quote repo_path so it can't inject shell metacharacters.
+        full_cmd = f"cd {_shlex.quote(repo_path)} && {git_cmd}"
         logger.info(f"Git remote: {user}@{host} agent={use_fwd} $ {full_cmd}")
         return _ssh_execute(host, user, full_cmd, port, key_file, 60, forward_agent=use_fwd)
 
@@ -6685,7 +6783,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         if save_path:
             import base64
             data = base64.b64decode(content_b64)
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            save_path = _safe_save_path(save_path)
             with open(save_path, "wb") as f:
                 f.write(data)
             result["saved_to"] = save_path
@@ -6862,7 +6960,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         pdf_bytes = ws.get_report_pdf(args["report_name"], args["ids"])
         save_path = args.get("save_path", "")
         if save_path:
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            save_path = _safe_save_path(save_path)
             with open(save_path, "wb") as f:
                 f.write(pdf_bytes)
             return {"status": "saved", "path": save_path, "size": len(pdf_bytes)}
@@ -6927,7 +7025,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         content = resp.content
         save_path = args.get("save_path", "")
         if save_path:
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            save_path = _safe_save_path(save_path)
             with open(save_path, "wb") as f:
                 f.write(content)
             return {"status": "saved", "path": save_path, "size": len(content), "format": fmt, "records": len(ids)}
@@ -6945,7 +7043,7 @@ def _execute_tool(name: str, args: dict) -> Any:
             return {"error": f"HTTP {resp.status_code}", "body": resp.text[:500]}
         save_path = args.get("save_path", "")
         if save_path:
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            save_path = _safe_save_path(save_path)
             with open(save_path, "wb") as f:
                 f.write(resp.content)
             return {"status": "saved", "path": save_path, "size": len(resp.content)}
@@ -6976,7 +7074,7 @@ def _execute_tool(name: str, args: dict) -> Any:
             filename = cd.split("filename=")[-1].strip('"').strip("'")
         save_path = args.get("save_path", "")
         if save_path:
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            save_path = _safe_save_path(save_path)
             with open(save_path, "wb") as f:
                 f.write(resp.content)
             return {"status": "saved", "path": save_path, "size": len(resp.content), "content_type": ct, "filename": filename}
@@ -6995,7 +7093,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         ct = resp.headers.get("Content-Type", "")
         save_path = args.get("save_path", "")
         if save_path:
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            save_path = _safe_save_path(save_path)
             with open(save_path, "wb") as f:
                 f.write(resp.content)
             return {"status": "saved", "path": save_path, "size": len(resp.content), "content_type": ct}
@@ -7017,7 +7115,7 @@ def _execute_tool(name: str, args: dict) -> Any:
             return {"error": f"HTTP {resp.status_code}"}
         save_path = args.get("save_path", "")
         if save_path:
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            save_path = _safe_save_path(save_path)
             with open(save_path, "wb") as f:
                 f.write(resp.content)
             return {"status": "saved", "path": save_path, "size": len(resp.content)}
@@ -7060,7 +7158,7 @@ def _execute_tool(name: str, args: dict) -> Any:
             return {"error": f"HTTP {resp.status_code}", "body": resp.text[:500]}
         save_path = args.get("save_path", "")
         if save_path:
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            save_path = _safe_save_path(save_path)
             with open(save_path, "wb") as f:
                 f.write(resp.content)
             return {"status": "saved", "path": save_path, "size": len(resp.content)}
@@ -9461,6 +9559,48 @@ def create_app():
             "MCP_REQUIRE_AUTH=1 but MCP_SECRET_TOKEN is empty — every /mcp request "
             "will be rejected. Set MCP_SECRET_TOKEN or MCP_REQUIRE_AUTH=0 (NOT for prod)."
         )
+
+    # ── OAuth ephemeral issuance (security fix) ──
+    # SECURITY: never hand out MCP_SECRET_TOKEN through the public OAuth flow.
+    # Dynamic client registration mints a per-client random secret; the token
+    # and authorize endpoints mint short-lived random artifacts kept in memory.
+    # _check_auth accepts the long-lived secret_token (admin/legacy) OR a live
+    # issued access token. Restart invalidates issued tokens → clients re-auth
+    # (MCP/claude.ai connectors do this automatically).
+    import secrets as _secrets
+    _oauth_clients: dict[str, dict] = {}   # client_id -> {"secret":..., "ts":...}
+    _oauth_codes: dict[str, float] = {}    # auth code -> expiry (monotonic)
+    _oauth_tokens: dict[str, float] = {}   # access token -> expiry (monotonic)
+    _oauth_lock = _auth_threading.Lock()
+    _OAUTH_CODE_TTL = 300        # 5 min
+    _OAUTH_TOKEN_TTL = 86400     # 24h
+
+    def _oauth_mint(store: dict, ttl: int) -> str:
+        import time as _t
+        tok = _secrets.token_urlsafe(32)
+        with _oauth_lock:
+            now = _t.monotonic()
+            # opportunistic cleanup of expired entries
+            for k in [k for k, exp in store.items() if exp < now]:
+                store.pop(k, None)
+            store[tok] = now + ttl
+        return tok
+
+    def _oauth_consume(store: dict, tok: str) -> bool:
+        import time as _t
+        if not tok:
+            return False
+        with _oauth_lock:
+            exp = store.pop(tok, None)
+        return bool(exp) and exp >= _t.monotonic()
+
+    def _oauth_token_valid(tok: str) -> bool:
+        import time as _t
+        if not tok:
+            return False
+        with _oauth_lock:
+            exp = _oauth_tokens.get(tok)
+        return bool(exp) and exp >= _t.monotonic()
     ollama_upstream = os.environ.get("OLLAMA_UPSTREAM", "http://ollama:11434").rstrip("/")
     ollama_api_key = os.environ.get("OLLAMA_API_KEY", "").strip()
     protected_paths = {"/mcp", "/sse", "/messages", "/api/session/register",
@@ -9482,12 +9622,13 @@ def create_app():
         if not secret_token:
             return True
         api_token = headers.get(b"x-api-token", b"").decode()
-        if api_token and api_token == secret_token:
+        if api_token and _hmac_eq(api_token, secret_token):
             return True
         auth = headers.get(b"authorization", b"").decode()
         if auth.startswith("Bearer "):
             bearer = auth[7:]
-            if bearer == secret_token:
+            # Long-lived admin/legacy secret OR a live OAuth-issued token.
+            if _hmac_eq(bearer, secret_token) or _oauth_token_valid(bearer):
                 return True
         return False
 
@@ -9545,9 +9686,17 @@ def create_app():
             await _admin_app(scope, receive, send)
             return
 
-        # ── Debug: log all headers on /mcp requests ────────────────
-        if scope["type"] == "http" and path in ("/mcp", "/oauth/token", "/oauth/authorize", "/oauth/register"):
-            hdrs = {k.decode(): v.decode() for k, v in scope.get("headers", [])}
+        # ── Optional auth debug (OFF by default; secrets always redacted) ──
+        # SECURITY: never log Authorization / X-Odoo-* / Cookie / X-Api-Token —
+        # the Bearer value IS a live Odoo api_key. Gated behind MCP_DEBUG_HEADERS=1
+        # for diagnostics only; even then sensitive headers are masked.
+        if (os.environ.get("MCP_DEBUG_HEADERS") == "1"
+                and scope["type"] == "http"
+                and path in ("/mcp", "/oauth/token", "/oauth/authorize", "/oauth/register")):
+            _redact = {"authorization", "x-api-token", "cookie",
+                       "x-odoo-url", "x-odoo-db", "x-odoo-login"}
+            hdrs = {k.decode(): ("<redacted>" if k.decode().lower() in _redact else v.decode())
+                    for k, v in scope.get("headers", [])}
             logger.info(f"[AUTH-DEBUG] {scope.get('method', '?')} {path} headers: {json.dumps(hdrs, indent=2)}")
 
         # ── OAuth 2.0 metadata ─────────────────────────────────────
@@ -9610,22 +9759,33 @@ def create_app():
                             cid, csecret = decoded.split(":", 1)
 
                 if grant_type == "client_credentials":
-                    if cid == oauth_client_id and csecret == oauth_client_secret:
+                    # Valid against the configured client OR any dynamically
+                    # registered client. Mint a fresh random access token —
+                    # NEVER return secret_token.
+                    with _oauth_lock:
+                        reg = _oauth_clients.get(cid)
+                    ok_static = (_hmac_eq(cid or "", oauth_client_id)
+                                 and _hmac_eq(csecret or "", oauth_client_secret)
+                                 and oauth_client_secret
+                                 and not _hmac_eq(oauth_client_secret, secret_token))
+                    ok_dynamic = bool(reg) and _hmac_eq(csecret or "", reg["secret"])
+                    if ok_static or ok_dynamic:
                         response = JSONResponse({
-                            "access_token": secret_token,
+                            "access_token": _oauth_mint(_oauth_tokens, _OAUTH_TOKEN_TTL),
                             "token_type": "Bearer",
-                            "expires_in": 86400,
+                            "expires_in": _OAUTH_TOKEN_TTL,
                         })
                     else:
                         response = JSONResponse(
                             {"error": "invalid_client"}, status_code=401)
                 elif grant_type == "authorization_code":
                     code = params.get("code", [None])[0]
-                    if code == secret_token:
+                    # Code must be a live, single-use artifact minted by /authorize.
+                    if _oauth_consume(_oauth_codes, code):
                         response = JSONResponse({
-                            "access_token": secret_token,
+                            "access_token": _oauth_mint(_oauth_tokens, _OAUTH_TOKEN_TTL),
                             "token_type": "Bearer",
-                            "expires_in": 86400,
+                            "expires_in": _OAUTH_TOKEN_TTL,
                         })
                     else:
                         response = JSONResponse(
@@ -9648,8 +9808,10 @@ def create_app():
             redirect_uri = request.query_params.get("redirect_uri", "")
             state = request.query_params.get("state", "")
             if redirect_uri:
+                # Mint a single-use, short-lived code — NOT secret_token.
+                code = _oauth_mint(_oauth_codes, _OAUTH_CODE_TTL)
                 sep = "&" if "?" in redirect_uri else "?"
-                target = f"{redirect_uri}{sep}code={secret_token}"
+                target = f"{redirect_uri}{sep}code={code}"
                 if state:
                     target += f"&state={state}"
                 response = RedirectResponse(target)
@@ -9665,9 +9827,19 @@ def create_app():
             request = Request(scope, receive)
             try:
                 body = await request.json()
+                # Dynamic client registration: mint a UNIQUE per-client id +
+                # random secret. NEVER expose the global secret_token here.
+                new_cid = "mcp-" + _secrets.token_urlsafe(12)
+                new_secret = _secrets.token_urlsafe(32)
+                import time as _t
+                with _oauth_lock:
+                    # cap registry size to avoid unbounded growth
+                    if len(_oauth_clients) > 1000:
+                        _oauth_clients.clear()
+                    _oauth_clients[new_cid] = {"secret": new_secret, "ts": _t.monotonic()}
                 response = JSONResponse({
-                    "client_id": oauth_client_id,
-                    "client_secret": oauth_client_secret,
+                    "client_id": new_cid,
+                    "client_secret": new_secret,
                     "client_name": body.get("client_name", "mcp-client"),
                     "redirect_uris": body.get("redirect_uris", []),
                     "grant_types": ["authorization_code", "client_credentials"],
@@ -10333,23 +10505,47 @@ def create_app():
             from starlette.responses import JSONResponse
             request = Request(scope, receive)
             method = scope.get("method", "GET")
+            # SECURITY (IDOR fix): caller must prove ownership of <name> via
+            # unified-auth headers — caller.mcp_user must equal sanitize(name).
+            # Without that proof a token holder could read/overwrite any
+            # profile's connections (incl. plaintext api_key). No fallback.
+            _hdrs = dict(scope.get("headers") or [])
+            _caller = get_caller_odoo_user(_hdrs) if _hdrs.get(b"x-odoo-url") else None
+
+            def _owns(target_name: str) -> bool:
+                return bool(_caller) and _caller["mcp_user"] == _sanitize_name(target_name)
+
+            def _redact_conns(conns: dict) -> dict:
+                out = {}
+                for alias, c in (conns or {}).items():
+                    c2 = dict(c)
+                    if c2.get("api_key"):
+                        c2["api_key"] = "<set>"
+                    if c2.get("password"):
+                        c2["password"] = "<set>"
+                    out[alias] = c2
+                return out
             try:
                 if method == "GET":
-                    # GET /api/user/connections?name=Rosen
                     name = request.query_params.get("name", "")
                     if not name:
                         response = JSONResponse({"error": "name parameter required"}, status_code=400)
+                    elif not _owns(name):
+                        response = JSONResponse(
+                            {"error": "Forbidden: prove ownership via unified-auth "
+                                      "headers (Authorization: Bearer <odoo_api_key> + "
+                                      "X-Odoo-Url/Db/Login) matching this profile."},
+                            status_code=403)
                     else:
                         conns = _load_user_connections(name)
                         active = _load_user_active(name)
                         response = JSONResponse({
                             "user": name,
                             "profile": _sanitize_name(name),
-                            "connections": conns,
+                            "connections": _redact_conns(conns),
                             "active": active.get("alias"),
                         })
                 elif method == "POST":
-                    # POST /api/user/connections — save full connections dict
                     body = await request.json()
                     name = body.get("name", "")
                     connections = body.get("connections", {})
@@ -10357,9 +10553,15 @@ def create_app():
                         response = JSONResponse({"error": "name required"}, status_code=400)
                     elif not isinstance(connections, dict):
                         response = JSONResponse({"error": "connections must be a dict"}, status_code=400)
+                    elif not _owns(name):
+                        response = JSONResponse(
+                            {"error": "Forbidden: prove ownership via unified-auth "
+                                      "headers matching this profile. To register a new "
+                                      "connection use POST /api/user/register-connection "
+                                      "(validates the key by XMLRPC)."},
+                            status_code=403)
                     else:
                         _save_user_connections(name, connections)
-                        # Optionally save active connection
                         if body.get("active"):
                             _save_user_active(name, {"alias": body["active"]})
                         response = JSONResponse({
@@ -10378,16 +10580,16 @@ def create_app():
             from starlette.requests import Request as _Req
             from starlette.responses import JSONResponse as _JSONResp
             _request = _Req(scope, receive)
-            # Internal Docker network (172.24.x / 172.27.x) is trusted without token
-            _client_ip = (scope.get("client") or ("", 0))[0]
-            _is_internal = _client_ip.startswith("172.") or _client_ip == "127.0.0.1"
-            if not _is_internal:
-                _expected = os.environ.get("MCP_ADMIN_TOKEN", "")
-                _provided = (_request.headers.get("authorization") or "").replace("Bearer ", "", 1).strip()
-                if not _expected or _provided != _expected:
-                    _r = _JSONResp({"error": "auth required"}, status_code=401)
-                    await _r(scope, receive, send)
-                    return
+            # SECURITY: always require MCP_ADMIN_TOKEN. The old "internal Docker
+            # network (172.x) is trusted" check was bypassable — Cloudflare tunnel
+            # traffic arrives over the docker bridge with a 172.x source IP, so
+            # every proxied external request looked internal. No IP-based trust.
+            _expected = os.environ.get("MCP_ADMIN_TOKEN", "")
+            _provided = (_request.headers.get("authorization") or "").replace("Bearer ", "", 1).strip()
+            if not _expected or not _hmac_eq(_provided, _expected):
+                _r = _JSONResp({"error": "auth required"}, status_code=401)
+                await _r(scope, receive, send)
+                return
             try:
                 import base64 as _b64x
                 _body = await _request.json()
@@ -10478,15 +10680,14 @@ def create_app():
             from starlette.requests import Request as _CReq
             from starlette.responses import JSONResponse as _CResp
             _creq = _CReq(scope, receive)
-            _client_ip = (scope.get("client") or ("", 0))[0]
-            _is_internal = _client_ip.startswith("172.") or _client_ip == "127.0.0.1"
-            if not _is_internal:
-                _expected = os.environ.get("MCP_ADMIN_TOKEN", "")
-                _provided = (_creq.headers.get("authorization") or "").replace("Bearer ", "", 1).strip()
-                if not _expected or _provided != _expected:
-                    _r = _CResp({"error": "auth required"}, status_code=401)
-                    await _r(scope, receive, send)
-                    return
+            # SECURITY: always require MCP_ADMIN_TOKEN (no 172.x IP-based trust —
+            # CF tunnel traffic shares the docker bridge source range).
+            _expected = os.environ.get("MCP_ADMIN_TOKEN", "")
+            _provided = (_creq.headers.get("authorization") or "").replace("Bearer ", "", 1).strip()
+            if not _expected or not _hmac_eq(_provided, _expected):
+                _r = _CResp({"error": "auth required"}, status_code=401)
+                await _r(scope, receive, send)
+                return
             try:
                 import base64 as _b64c, json as _jsc, re as _rec, time as _tmc
                 import httpx as _hxc
