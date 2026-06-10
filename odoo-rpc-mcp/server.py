@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.0.0-alpha.13"
+__version__ = "3.0.0-alpha.14"
 
 import asyncio
 import hmac
@@ -53,6 +53,8 @@ import fleet_manager
 import secrets_registry
 import module_deploy
 import client_onboard
+import backup_manager
+import health_monitor
 
 # ─── Feature flags ───────────────────────────────────────────
 # MCP_DISABLE_FEATURES=ssh,portainer,github,google,telegram,memory,ai,public,website,web,proxy
@@ -5050,6 +5052,8 @@ async def list_tools() -> list[Tool]:
     base.extend(secrets_registry.get_admin_tools())
     base.extend(module_deploy.get_admin_tools())
     base.extend(client_onboard.get_admin_tools())
+    base.extend(backup_manager.get_admin_tools())
+    base.extend(health_monitor.get_admin_tools())
     # v3 security: filter destructive tools for USER role (admin/legacy keep all).
     _role = tool_security.get_role(
         principal=_principal, admin_principals=_admin_principals())
@@ -5102,6 +5106,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 _admin_group = module_deploy
             elif name in client_onboard.ADMIN_TOOL_NAMES:
                 _admin_group = client_onboard
+            elif name in backup_manager.ADMIN_TOOL_NAMES:
+                _admin_group = backup_manager
+            elif name in health_monitor.ADMIN_TOOL_NAMES:
+                _admin_group = health_monitor
             if _admin_group is not None:
                 _prov_denied = None
                 if not sc.principal:
@@ -11479,6 +11487,13 @@ if __name__ == "__main__":
         ensure_ssh_master=_ensure_ssh_master,
         get_conn=lambda alias: _mgr().get(alias),
     )
+    # v3 backup/DR: pg_dump + filestore → S3, restore to staging.
+    backup_manager.wire(
+        ssh_execute=_ssh_execute,
+        ensure_ssh_master=_ensure_ssh_master,
+    )
+    # v3 health monitor: scan all stacks, classify, emit alerts.
+    health_monitor.wire(fleet_manager=fleet_manager)
 
     # ── Discover proxy tools — eager only for always-on tenants (main).
     # Other tenants are discovered lazily on first tenant_use(name).

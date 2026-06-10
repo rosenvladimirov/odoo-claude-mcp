@@ -122,6 +122,15 @@ def test_onboard_tools_user_denied(monkeypatch):
     assert out2.get("error") == "denied"
 
 
+def test_backup_health_tools_user_denied(monkeypatch):
+    for tool, args in (("tenant_backup", {"target": "x"}),
+                       ("tenant_restore", {"target": "x"}),
+                       ("health_scan", {}),
+                       ("stack_health", {"stack": "x"})):
+        out = _run(tool, args, "lyubomir", monkeypatch)
+        assert out.get("error") == "denied", tool
+
+
 def test_user_can_request_elevation(monkeypatch):
     """The elevation control plane stays reachable by a plain USER."""
     out = _run("mcp_elevate", {"reason": "need to fix data", "ttl": 60},

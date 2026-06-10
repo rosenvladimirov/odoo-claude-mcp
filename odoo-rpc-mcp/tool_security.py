@@ -69,6 +69,14 @@ DEFAULT_USER_BLOCKED_TOOLS: set[str] = {
     # v3 client onboarding wizard
     "client_onboard",
     "client_onboard_status",
+    # v3 backup / DR
+    "tenant_backup",
+    "tenant_restore",
+    "backup_list",
+    "backup_history",
+    # v3 health monitor
+    "health_scan",
+    "stack_health",
 }
 
 DEFAULT_USER_BLOCKED_PROXY_PREFIXES: set[str] = {
