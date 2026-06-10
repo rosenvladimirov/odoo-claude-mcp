@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.0.0-alpha.15"
+__version__ = "3.0.0-alpha.16"
 
 import asyncio
 import hmac
@@ -56,6 +56,7 @@ import client_onboard
 import backup_manager
 import health_monitor
 import session_handoff
+import tenant_migrate
 
 # ─── Feature flags ───────────────────────────────────────────
 # MCP_DISABLE_FEATURES=ssh,portainer,github,google,telegram,memory,ai,public,website,web,proxy
@@ -5055,6 +5056,7 @@ async def list_tools() -> list[Tool]:
     base.extend(client_onboard.get_admin_tools())
     base.extend(backup_manager.get_admin_tools())
     base.extend(health_monitor.get_admin_tools())
+    base.extend(tenant_migrate.get_admin_tools())
     # v3 security: filter destructive tools for USER role (admin/legacy keep all).
     _role = tool_security.get_role(
         principal=_principal, admin_principals=_admin_principals())
@@ -5113,6 +5115,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 _admin_group = backup_manager
             elif name in health_monitor.ADMIN_TOOL_NAMES:
                 _admin_group = health_monitor
+            elif name in tenant_migrate.ADMIN_TOOL_NAMES:
+                _admin_group = tenant_migrate
             if _admin_group is not None:
                 _prov_denied = None
                 if not sc.principal:
@@ -11509,6 +11513,8 @@ if __name__ == "__main__":
     )
     # v3 health monitor: scan all stacks, classify, emit alerts.
     health_monitor.wire(fleet_manager=fleet_manager)
+    # v3 tenant migration: assess + plan (backup→staging→smoke→cutover plan).
+    tenant_migrate.wire(backup_manager=backup_manager, health_monitor=health_monitor)
     # v3 session handoff: two-phase consent transfer between principals.
     session_handoff.wire(
         set_tenant=(lambda sk, tenant: session_store_inst.set_state(

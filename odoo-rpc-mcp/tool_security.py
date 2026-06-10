@@ -77,6 +77,9 @@ DEFAULT_USER_BLOCKED_TOOLS: set[str] = {
     # v3 health monitor
     "health_scan",
     "stack_health",
+    # v3 tenant migration
+    "migrate_assess",
+    "migrate_history",
 }
 
 DEFAULT_USER_BLOCKED_PROXY_PREFIXES: set[str] = {

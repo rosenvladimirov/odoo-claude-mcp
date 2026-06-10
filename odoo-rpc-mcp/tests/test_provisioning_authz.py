@@ -131,6 +131,19 @@ def test_backup_health_tools_user_denied(monkeypatch):
         assert out.get("error") == "denied", tool
 
 
+def test_migrate_tools_user_denied(monkeypatch):
+    out = _run("migrate_assess", {"source": "x"}, "lyubomir", monkeypatch)
+    assert out.get("error") == "denied"
+    out2 = _run("migrate_history", {}, "lyubomir", monkeypatch)
+    assert out2.get("error") == "denied"
+
+
+def test_handoff_reachable_by_user(monkeypatch):
+    """session_handoff is a control plane — a plain USER can offer/list."""
+    out = _run("session_handoff_status", {}, "lyubomir", monkeypatch)
+    assert out.get("error") != "denied"
+
+
 def test_user_can_request_elevation(monkeypatch):
     """The elevation control plane stays reachable by a plain USER."""
     out = _run("mcp_elevate", {"reason": "need to fix data", "ttl": 60},
