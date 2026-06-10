@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.0.0-alpha.14"
+__version__ = "3.0.0-alpha.15"
 
 import asyncio
 import hmac
@@ -55,6 +55,7 @@ import module_deploy
 import client_onboard
 import backup_manager
 import health_monitor
+import session_handoff
 
 # ─── Feature flags ───────────────────────────────────────────
 # MCP_DISABLE_FEATURES=ssh,portainer,github,google,telegram,memory,ai,public,website,web,proxy
@@ -5061,6 +5062,8 @@ async def list_tools() -> list[Tool]:
         base, role=_role, elevated=elevation.is_elevated(_skey))
     # Always expose elevation control tools (so USER can request elevation).
     base.extend(elevation.get_control_tools())
+    # Session handoff control plane (any authenticated principal).
+    base.extend(session_handoff.get_control_tools())
     return base
 
 
@@ -5142,6 +5145,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if name in elevation.CONTROL_TOOL_NAMES:
                 result = elevation.handle(name, arguments,
                                           key=sc.session_key, principal=sc.principal)
+                text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+                try:
+                    import metrics
+                    metrics.observe_tool_call(name, _m_status)
+                except Exception:
+                    pass
+                return [TextContent(type="text", text=text)]
+            # ── v3 session handoff control plane (per-session; any principal) ──
+            if name in session_handoff.CONTROL_TOOL_NAMES:
+                result = session_handoff.handle(
+                    name, arguments,
+                    session_key=sc.session_key, principal=sc.principal)
                 text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
                 try:
                     import metrics
@@ -11494,6 +11509,14 @@ if __name__ == "__main__":
     )
     # v3 health monitor: scan all stacks, classify, emit alerts.
     health_monitor.wire(fleet_manager=fleet_manager)
+    # v3 session handoff: two-phase consent transfer between principals.
+    session_handoff.wire(
+        set_tenant=(lambda sk, tenant: session_store_inst.set_state(
+            sk, "tenant", "active", {"name": tenant}))
+            if session_store_inst is not None else None,
+        revoke_session=(lambda sk: session_store_inst.revoke(sk, "handoff_transfer"))
+            if session_store_inst is not None else None,
+    )
 
     # ── Discover proxy tools — eager only for always-on tenants (main).
     # Other tenants are discovered lazily on first tenant_use(name).
