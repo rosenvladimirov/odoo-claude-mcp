@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.0.0-alpha.18"
+__version__ = "3.0.0"
 
 import asyncio
 import hmac
