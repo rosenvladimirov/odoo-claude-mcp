@@ -13,25 +13,26 @@ from typing import Any
 
 logger = logging.getLogger("telegram-service")
 
-TELEGRAM_CONFIG_FILE = Path(os.environ.get(
-    "TELEGRAM_CONFIG_FILE", "/data/telegram_config.json"
-))
-TELEGRAM_SESSION_PATH = os.environ.get(
-    "TELEGRAM_SESSION_PATH", "/data/telegram_session"
-)
+# Strict session model: no global TELEGRAM_SESSION_PATH/TELEGRAM_CONFIG_FILE
+# fallbacks — session/config paths are always per principal (+ phone) and
+# supplied explicitly by the server.
 
 
 class TelegramServiceManager:
     """Manages Telegram client authentication and messaging."""
 
-    def __init__(self, session_path: str | None = None, config_file=None,
-                 key: str = "__global__"):
-        # Per-principal paths (Telegram identity is per human account). When
-        # not supplied, fall back to the legacy global session/config so a
-        # single, un-identified caller keeps working unchanged.
+    def __init__(self, session_path: str, config_file, key: str):
+        # Strict session model: per-principal paths are REQUIRED — there is
+        # no shared/global session or config fallback. The caller (server.py
+        # _tg()) always derives them from the principal + bound phone.
+        if not session_path or not config_file or not key:
+            raise ValueError(
+                "TelegramServiceManager requires explicit session_path, "
+                "config_file and key (strict session model — no global fallback)."
+            )
         self.key = key
-        self._session_path = session_path or TELEGRAM_SESSION_PATH
-        self._config_file = Path(config_file) if config_file else TELEGRAM_CONFIG_FILE
+        self._session_path = session_path
+        self._config_file = Path(config_file)
         # Per-principal subscription allow-list (admin-assigned). До config-а.
         self._subs_file = str(self._config_file.parent / "telegram_subscriptions.json")
         self._client = None
@@ -108,6 +109,25 @@ class TelegramServiceManager:
         import asyncio
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
+
+    def disconnect(self):
+        """Disconnect the Telethon client and stop its event loop.
+
+        Releases the SQLite session-file lock so another process (or a later
+        re-auth) can open it cleanly. Safe to call repeatedly.
+        """
+        try:
+            if self._client is not None and self._loop is not None:
+                self._run(self._client.disconnect(), timeout=10)
+        except Exception as e:
+            logger.warning(f"Telegram[{self.key}]: disconnect failed: {e}")
+        try:
+            if self._loop is not None and self._loop.is_running():
+                self._loop.call_soon_threadsafe(self._loop.stop)
+        except Exception:
+            pass
+        self._client = None
+        self._loop = None
 
     def _start_push_listener(self):
         """Register a NewMessage handler that publishes incoming messages to
@@ -357,11 +377,12 @@ class TelegramRegistry:
     """Per-principal Telegram clients.
 
     Telegram identity is per USER (one human account), shared across that
-    user's MCP sessions — so we key by principal, NOT by session. This is
-    the deliberate counterpart to the per-SESSION Odoo connection registry:
-    two Claude sessions of the same user share one Telegram account, but two
-    different users never share one. Un-identified callers fall back to the
-    legacy global session (key ``__global__``), preserving single-user setups.
+    user's MCP sessions — so we key by '<principal>:<phone_tag>', NOT by
+    session. This is the deliberate counterpart to the per-SESSION Odoo
+    connection registry: two MCP sessions of the same human (same phone)
+    share one Telegram client, but two humans never share one. Strict
+    session model: un-identified callers are refused upstream (no global
+    fallback key).
     """
 
     def __init__(self):
@@ -369,8 +390,8 @@ class TelegramRegistry:
         self._mgrs: dict[str, TelegramServiceManager] = {}
         self._lock = threading.Lock()
 
-    def for_user(self, key: str, session_path: str | None = None,
-                 config_file=None) -> TelegramServiceManager:
+    def for_user(self, key: str, session_path: str,
+                 config_file) -> TelegramServiceManager:
         with self._lock:
             mgr = self._mgrs.get(key)
             if mgr is None:
@@ -379,3 +400,17 @@ class TelegramRegistry:
                 )
                 self._mgrs[key] = mgr
             return mgr
+
+    def keys(self) -> list:
+        with self._lock:
+            return list(self._mgrs.keys())
+
+    def disconnect(self, key: str) -> bool:
+        """Disconnect and evict one client (orphan reaper / admin revoke)."""
+        with self._lock:
+            mgr = self._mgrs.pop(key, None)
+        if mgr is None:
+            return False
+        mgr.disconnect()
+        logger.info(f"Telegram[{key}]: client disconnected and evicted")
+        return True

@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "2.26.0"
+__version__ = "2.30.0"
 
 import asyncio
 import json
@@ -36,7 +36,7 @@ from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.types import TextContent, Tool
 
-from google_service import GoogleServiceManager
+from google_service import GoogleServiceManager, GoogleRegistry
 from telegram_service import TelegramServiceManager, TelegramRegistry
 
 import ai_usage_log
@@ -952,9 +952,9 @@ class ConnectionManager:
         return False
 
     def get(self, alias: str = "default") -> OdooConnection:
+        # Strict: explicit alias miss is always an error (no silent
+        # single-connection fallback — that masked cross-session bleed).
         if alias not in self.connections:
-            if len(self.connections) == 1:
-                return next(iter(self.connections.values()))
             raise Exception(
                 f"Connection '{alias}' not found. "
                 f"Available: {list(self.connections.keys())}"
@@ -968,7 +968,7 @@ class ConnectionManager:
 # ─── MCP Server ─────────────────────────────────────────────
 manager: ConnectionManager | None = None
 session_mgr: SessionManager | None = None
-google_mgr: GoogleServiceManager | None = None
+google_registry: GoogleRegistry | None = None
 telegram_registry: TelegramRegistry | None = None
 mcp_server = Server("odoo-rpc-mcp")
 
@@ -1034,24 +1034,67 @@ def _md_to_html(text: str) -> str:
         )
 
 
-def _conn(args: dict) -> OdooConnection:
-    """Resolve the connection for a tool call.
+def _rehydrate_session_conn(sc: "SessionContext", desc: dict) -> "OdooConnection | None":
+    """Rebuild a live OdooConnection from the session-store descriptor.
 
-    Resolution order:
+    Descriptors carry NO secrets. 'user_profile' descriptors re-read the
+    credentials from the principal's connections.json; 'inline' descriptors
+    cannot be rehydrated (secrets were never persisted) — caller must
+    odoo_connect again.
+    """
+    src = desc.get("source")
+    if src == "user_profile":
+        user, alias = desc.get("user"), desc.get("alias")
+        if not user or not alias:
+            return None
+        c = _load_user_connections(user).get(alias)
+        if not c:
+            return None
+        conn = OdooConnection(
+            alias="default",
+            url=c["url"], db=c["db"], username=c["user"],
+            api_key=c.get("api_key", ""), password=c.get("password", ""),
+            protocol=c.get("protocol", "xmlrpc"),
+        )
+        conn.authenticate()
+        return conn
+    return None  # inline / unknown → re-connect explicitly
+
+
+def _conn(args: dict) -> OdooConnection:
+    """Resolve the connection for a tool call (strict session model).
+
+    Resolution order — NO silent fallback:
       1. Explicit non-default named alias in ``args["connection"]`` →
          honored from the global catalogue (``manager``).
-      2. This Claude session's active connection (per-session isolation) —
-         set by odoo_connect / identify / user_connection_activate.
-      3. Fallback: global ``manager["default"]`` (env bootstrap /
-         single-connection / backward compat for un-identified callers).
+      2. SINGLE_CONNECTION=1 deployments → global "default" (explicit
+         single-tenant opt-in, documented).
+      3. This session's active connection: live object from SessionRuntime,
+         else rehydrated from the session-store descriptor.
+      4. Refusal: MCP_NO_CONNECTION (fail-closed).
     """
     alias = args.get("connection", "default")
     if alias and alias != "default":
         return _mgr().get(alias)
-    sc = _get_session_conn()
-    if sc is not None:
-        return sc
-    return _mgr().get("default")
+    if SINGLE_CONNECTION:
+        return _mgr().get("default")
+    sc = _sctx()
+    conn = session_runtime.get_conn(sc.session_key)
+    if conn is not None:
+        return conn
+    desc = session_store_inst.get_state(sc.session_key, "connection", "active")
+    if desc:
+        try:
+            conn = _rehydrate_session_conn(sc, desc)
+        except Exception as e:
+            logger.warning(f"[SESSION] conn rehydrate failed for {sc.session_key}: {e}")
+            conn = None
+        if conn is not None:
+            session_runtime.set_conn(sc.session_key, conn)
+            return conn
+        # Stale/unrehydratable descriptor → drop it, then refuse below.
+        session_store_inst.delete_state(sc.session_key, "connection", "active")
+    raise _sm_error("MCP_NO_CONNECTION")
 
 
 # ── TZ + backup helpers (used by stock_initial_* tools) ──
@@ -1168,8 +1211,6 @@ def _field_info(conn: OdooConnection, model: str, field_name: str) -> dict:
 # ─── Web Session Manager ─────────────────────────────────
 
 import requests as http_requests
-
-_web_sessions: dict[str, "OdooWebSession"] = {}
 
 
 class OdooWebSession:
@@ -1334,111 +1375,89 @@ class OdooWebSession:
         }
 
 
-def _web_session_key(alias: str) -> str:
-    """Composite key isolating web sessions per Claude session + alias."""
-    return f"{_get_mcp_session_key()}::{alias}"
-
-
 def _get_web_session(args: dict) -> OdooWebSession:
-    """Get the per-session web session for a connection alias."""
+    """Get this session's web session for a connection alias (strict model).
+
+    Live object from SessionRuntime; on miss, rehydrate from the session-store
+    cookie descriptor (survives in-process evictions). No global fallback.
+    """
     alias = args.get("connection", "default")
-    key = _web_session_key(alias)
-    if key in _web_sessions and _web_sessions[key].authenticated:
-        return _web_sessions[key]
+    sc = _sctx()
+    ws = session_runtime.get_web(sc.session_key, alias)
+    if ws is not None and ws.authenticated:
+        return ws
+    desc = session_store_inst.get_state(sc.session_key, "web", alias)
+    if desc and desc.get("session_cookie"):
+        ws = OdooWebSession(desc["url"], desc["db"], desc.get("login", ""), "")
+        ws.session.cookies.set("session_id", desc["session_cookie"])
+        ws.uid = desc.get("uid")
+        session_runtime.set_web(sc.session_key, alias, ws)
+        return ws
     raise RuntimeError(f"No active web session for '{alias}'. Call odoo_web_login first.")
 
 
 # ─── Per-user storage ──────────────────────────────────────
-
-# In-memory: mcp_session_id -> user_name
-_session_users: dict[str, str] = {}
-
-# In-memory: mcp_session_id -> Telegram phone bound to THIS session. Lets several
-# humans sharing one principal/Odoo key keep SEPARATE persistent Telegram sessions
-# (keyed by the phone = the Telegram account they auth with). Set by telegram_auth.
-_session_tg_phone: dict[str, str] = {}
-
-# In-memory: mcp_session_id -> active OdooConnection for THIS Claude session.
-# Активната конекция е per-сесия (per закачен Claude), НЕ глобална за MCP
-# процеса — така два Claude-а (дори на един и същ Odoo юзер: prod vs test)
-# не си разменят конекциите. Глобалният ``manager`` остава само каталог на
-# именованите връзки + env bootstrap; живата "default" се пази тук per сесия.
-import threading as _sessconn_threading
-_session_conns: dict[str, "OdooConnection"] = {}
-_session_conns_lock = _sessconn_threading.Lock()
+# Strict session model: all per-session state (identity, active connection,
+# telegram phone, web cookies) lives in the SQLite session store + the
+# SessionRuntime live-object cache. No in-memory fallback dicts.
 
 
-def _set_session_conn(conn: "OdooConnection") -> None:
-    """Bind the active connection to the current MCP session."""
-    with _session_conns_lock:
-        _session_conns[_get_mcp_session_key()] = conn
-
-
-def _get_session_conn() -> "OdooConnection | None":
-    """Return this session's active connection, or None if not set."""
-    with _session_conns_lock:
-        return _session_conns.get(_get_mcp_session_key())
-
-
-def _clear_session_conn() -> None:
-    """Drop this session's active connection (on disconnect/session close)."""
-    with _session_conns_lock:
-        _session_conns.pop(_get_mcp_session_key(), None)
+def _tg_session_phone() -> str:
+    """Return the Telegram phone bound to THIS session (strict, fail-closed)."""
+    sc = _sctx()
+    st = session_store_inst.get_state(sc.session_key, "telegram", "phone")
+    phone = (st or {}).get("phone", "")
+    if not phone:
+        raise _sm_error("MCP_NO_TELEGRAM_PHONE")
+    return phone
 
 
 def _tg() -> "TelegramServiceManager":
-    """Resolve the Telegram client for the current principal.
+    """Resolve the Telegram client for the current principal + bound phone.
 
-    Telegram identity is per-USER (one human account), so we key by the
-    resolved MCP user — NOT by session. Un-identified callers fall back to
-    the legacy global session, preserving single-user setups.
+    Strict session model: requires BOTH a bound principal (identity) and a
+    phone bound to this session via telegram_auth. Registry key is
+    '<principal>:<phone_tag>' — several humans sharing one principal/Odoo
+    key still get fully separate persistent Telegram sessions. No global
+    fallback; config_file is ALWAYS per-principal.
     """
     reg = telegram_registry
     if reg is None:
-        raise Exception("Telegram registry not initialized")
-    user = _get_current_user({})
-    # Phone-keyed: when several humans share one principal/Odoo key (so they
-    # resolve to the same mcp_user), each still gets a SEPARATE persistent
-    # Telegram session, keyed by the phone (Telegram account) bound to THIS
-    # MCP session via telegram_auth. Falls back to the legacy per-user session
-    # when no phone is bound (single-user / pre-auth).
-    phone = _session_tg_phone.get(_get_mcp_session_key())
-    if user:
-        base = _user_dir(user, create=True)
-        config_file = os.path.join(base, "telegram_config.json")
-        if phone:
-            tag = _sanitize_name(phone)
-            return reg.for_user(
-                f"{user}:{tag}",
-                session_path=os.path.join(base, f"telegram_{tag}"),
-                config_file=config_file,
-            )
-        return reg.for_user(
-            user,
-            session_path=os.path.join(base, "telegram_session"),
-            config_file=config_file,
-        )
-    if phone:
-        tag = _sanitize_name(phone)
-        gdir = os.path.dirname(os.environ.get(
-            "TELEGRAM_SESSION_PATH", "/data/telegram_session")) or "/data"
-        return reg.for_user(
-            f"__global__:{tag}",
-            session_path=os.path.join(gdir, f"telegram_{tag}"),
-        )
-    return reg.for_user("__global__")
+        raise Exception("Telegram service not initialized")
+    user = _require_principal()
+    phone = _tg_session_phone()
+    tag = _sanitize_name(phone)
+    base = _user_dir(user, create=True)
+    return reg.for_user(
+        f"{user}:{tag}",
+        session_path=os.path.join(base, f"telegram_{tag}"),
+        config_file=os.path.join(base, "telegram_config.json"),
+    )
 
 
 def _tg_subs_file(principal: str | None) -> str:
-    """Резолва per-principal subscription файл (admin раздава кои чатове да
-    слуша). principal=None → текущия user (или __global__)."""
-    user = principal or _get_current_user({}) or "__global__"
-    base = DATA_DIR if user == "__global__" else _user_dir(user, create=True)
-    return os.path.join(base, "telegram_subscriptions.json")
+    """Resolve the per-principal subscription allow-list file.
 
-# Per-async-task user context (isolates concurrent MCP sessions)
+    principal=None → the session's bound principal (strict, no global file).
+    An explicit principal arg is the admin path (assigning to OTHERS).
+    """
+    user = principal or _require_principal()
+    return os.path.join(_user_dir(user, create=True), "telegram_subscriptions.json")
+
+
+def _google() -> "GoogleServiceManager":
+    """Resolve the Google manager for the current principal (strict model).
+
+    OAuth token lives under the principal's data dir; the shared OAuth
+    client credentials file identifies the application, not the user.
+    """
+    if google_registry is None:
+        raise Exception("Google service not initialized")
+    principal = _require_principal()
+    token_file = os.path.join(_user_dir(principal, create=True), "google_token.json")
+    return google_registry.for_user(principal, token_file=token_file)
+
 import contextvars
-_current_user_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar("current_user", default=None)
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 REPOS_DIR = os.environ.get("REPOS_DIR", "/repos")
@@ -1654,43 +1673,288 @@ def _save_user_active(user_name: str, active: dict):
         json.dump(active, f, indent=2, ensure_ascii=False)
 
 
-def _get_mcp_session_key() -> str:
-    """Get unique key for the current MCP session (per-client isolation)."""
+# ─── Strict session model (v2.30.0) ─────────────────────────
+# Source of truth: SQLite session store (session_store.py). Fail-closed:
+# no fallbacks — a tool call without resolvable session data is refused
+# with a structured error (error_code + how_to_fix).
+import session_store as _ss
+from dataclasses import dataclass as _sm_dataclass
+
+session_store_inst: "_ss.SessionStore | None" = None
+session_runtime: "_ss.SessionRuntime | None" = None
+
+
+@_sm_dataclass(frozen=True)
+class SessionContext:
+    """Resolved identity of the running tool call (set by the call_tool gate)."""
+    session_key: str            # 'mcp:<sid>' | 'sse:<sid>'
+    transport: str              # 'streamable_http' | 'sse'
+    principal: str | None       # mcp_user safe name (None until bound)
+    principal_src: str | None   # 'unified_auth' | 'identify' | None
+    caller: dict | None         # unified-auth dict {mcp_user, alias, url, db, login, uid}
+
+
+_session_ctx: "contextvars.ContextVar[SessionContext | None]" = contextvars.ContextVar(
+    "mcp_session_ctx", default=None,
+)
+
+# Canonical session error messages (English — translated client-side if ever needed)
+_SM_MSG = {
+    "MCP_NO_SESSION": (
+        "No MCP session established.",
+        "Re-initialize the MCP connection (the client must echo the Mcp-Session-Id "
+        "header issued at initialize). If the server was restarted, reconnect the client.",
+    ),
+    "MCP_SESSION_ORPHANED": (
+        "This MCP session has expired or was orphaned by a server restart.",
+        "Reconnect the MCP client to start a fresh session, then re-run identify()/"
+        "telegram_auth() as needed.",
+    ),
+    "MCP_NO_IDENTITY": (
+        "No identity is bound to this MCP session.",
+        "Either reconnect with unified-auth headers (Authorization: Bearer <odoo_api_key> "
+        "+ X-Odoo-Url, X-Odoo-Db, X-Odoo-Login) or call identify(name='<your profile>') "
+        "once in this session.",
+    ),
+    "MCP_NO_CONNECTION": (
+        "No active Odoo connection in this session.",
+        "Call identify(...) to auto-activate your saved connection, or "
+        "odoo_connect(url=, db=, username=, api_key=), or user_connection_activate(alias=).",
+    ),
+    "MCP_NO_TELEGRAM_PHONE": (
+        "No Telegram account is bound to this session.",
+        "Call telegram_auth(phone='+359...') first — if this phone was authorized "
+        "before, no SMS code is needed.",
+    ),
+    "MCP_AUTH_FAILED": (
+        "Unified-auth headers are present but failed validation against Odoo.",
+        "Check Authorization: Bearer <odoo_api_key> + X-Odoo-Url/X-Odoo-Db/X-Odoo-Login "
+        "values, and that the connection is registered (POST /api/user/register-connection).",
+    ),
+    "MCP_SESSION_PRINCIPAL_MISMATCH": (
+        "This MCP session is already bound to a different identity.",
+        "Reconnect the MCP client to start a fresh session.",
+    ),
+}
+
+
+def _sm_error(code: str) -> "_ss.SessionError":
+    msg, fix = _SM_MSG[code]
+    return _ss.SessionError(code, msg, fix)
+
+
+def _auth_fingerprint(raw_headers: dict) -> str | None:
+    """sha256 over url|db|login|api_key from unified-auth headers (audit only)."""
+    try:
+        auth = raw_headers.get(b"authorization", b"").decode()
+        key = auth[7:] if auth.startswith("Bearer ") else ""
+        blob = "|".join([
+            raw_headers.get(b"x-odoo-url", b"").decode().rstrip("/"),
+            raw_headers.get(b"x-odoo-db", b"").decode(),
+            raw_headers.get(b"x-odoo-login", b"").decode(),
+            key,
+        ])
+        return _auth_hashlib.sha256(blob.encode()).hexdigest()
+    except Exception:
+        return None
+
+
+_SM_REAP_INTERVAL = 900  # seconds between inline reaper passes
+_sm_last_reap = 0.0
+
+
+def _tg_reap_clients() -> list:
+    """Disconnect Telethon clients with no active session AND no subscriptions.
+
+    Clients are keyed '<principal>:<phone_tag>'. A client whose phone is still
+    bound to at least one ACTIVE session row stays. A client with a non-empty
+    subscription allow-list also stays — its Centrifugo push feed is a feature
+    that deliberately outlives MCP sessions. Everything else is disconnected,
+    which releases the Telethon SQLite session-file lock.
+    """
+    if telegram_registry is None or session_store_inst is None:
+        return []
+    try:
+        import telegram_subscriptions as _tsub
+    except Exception:
+        _tsub = None
+    live_keys = set()
+    try:
+        for s in session_store_inst.list_sessions(include_orphaned=False):
+            principal = s.get("principal")
+            if not principal:
+                continue
+            st = session_store_inst.get_state(s["session_key"], "telegram", "phone")
+            phone = (st or {}).get("phone")
+            if phone:
+                live_keys.add(f"{principal}:{_sanitize_name(phone)}")
+    except Exception as e:
+        logger.warning(f"[SESSION] tg reap: store scan failed: {e}")
+        return []
+    reaped = []
+    for key in telegram_registry.keys():
+        if key in live_keys:
+            continue
+        principal = key.split(":", 1)[0]
+        subs_path = os.path.join(_user_dir(principal), "telegram_subscriptions.json")
+        try:
+            has_subs = bool(_tsub.list_subs(subs_path)) if _tsub else False
+        except Exception:
+            has_subs = False
+        if has_subs:
+            continue  # push feed pinned by subscriptions — keep the client
+        if telegram_registry.disconnect(key):
+            reaped.append(key)
+    return reaped
+
+
+def _sm_maybe_reap() -> None:
+    """Inline reaper: orphan TTL-expired sessions + purge old ones, ≤1/15min."""
+    global _sm_last_reap
+    import time as _t
+    now = _t.monotonic()
+    if now - _sm_last_reap < _SM_REAP_INTERVAL:
+        return
+    _sm_last_reap = now
+    try:
+        res = session_store_inst.cleanup()
+        gone = (res.get("newly_orphaned") or []) + (res.get("purged") or [])
+        if gone and session_runtime is not None:
+            session_runtime.evict(gone, on_evict=_sm_teardown)
+        if gone:
+            logger.info(f"[SESSION] reaper: orphaned={len(res.get('newly_orphaned') or [])} "
+                        f"purged={len(res.get('purged') or [])}")
+        tg_reaped = _tg_reap_clients()
+        if tg_reaped:
+            logger.info(f"[SESSION] reaper: telegram clients disconnected: {tg_reaped}")
+        try:
+            import metrics
+            for _k in (res.get("newly_orphaned") or []):
+                metrics.observe_session_reaped("ttl_expired")
+            for _k in (res.get("purged") or []):
+                metrics.observe_session_reaped("purged")
+            rows = session_store_inst.list_sessions()
+            metrics.observe_session_store_counts(
+                sum(1 for r in rows if r.get("status") == "active"),
+                sum(1 for r in rows if r.get("status") != "active"),
+            )
+        except Exception:
+            pass
+    except Exception as e:
+        logger.warning(f"[SESSION] reaper failed: {e}")
+
+
+def _sm_teardown(kind: str, key, obj) -> None:
+    """Best-effort teardown of live per-session objects on evict."""
+    try:
+        if kind == "web" and obj is not None:
+            obj.destroy()
+    except Exception:
+        pass
+    # Odoo RPC connections hold no persistent socket — dropping the ref suffices.
+    # Telegram clients are per principal:phone and refcounted separately (see
+    # _tg_maybe_disconnect) because Centrifugo push must survive session loss.
+
+
+async def resolve_session_context() -> "SessionContext":
+    """Resolve (or establish) the session row for the running MCP request.
+
+    Must be called from the async handler task, where mcp_server.request_context
+    is available. Raises SessionError on any unresolvable state (fail-closed).
+    """
+    store = session_store_inst
+    if store is None:
+        raise _ss.SessionError("MCP_NO_SESSION", "Session store is not initialized.",
+                               "Server startup bug — check server logs.")
     try:
         ctx = mcp_server.request_context
-        return str(id(ctx.session))
     except (LookupError, AttributeError):
-        return "default"
+        raise _sm_error("MCP_NO_SESSION")
+    req = getattr(ctx, "request", None)
+    skey = transport = None
+    if req is not None:
+        try:
+            sid = req.headers.get("mcp-session-id")
+        except Exception:
+            sid = None
+        if sid:
+            skey, transport = f"mcp:{sid}", "streamable_http"
+        else:
+            try:
+                qsid = req.query_params.get("session_id")
+            except Exception:
+                qsid = None
+            if qsid:
+                skey, transport = f"sse:{qsid}", "sse"
+    if skey is None:
+        raise _sm_error("MCP_NO_SESSION")
+
+    # Principal from unified-auth headers (validated per request, 5-min cached)
+    caller = None
+    raw_headers = dict(req.scope.get("headers") or [])
+    if raw_headers.get(b"x-odoo-url"):
+        caller = get_caller_odoo_user(raw_headers)
+        if not caller:
+            raise _sm_error("MCP_AUTH_FAILED")
+
+    row = store.resolve(skey)
+    if row is None:
+        # The transport-level session is alive (the SDK already validated the
+        # session id), so a missing row means "first tool call" — create it.
+        # create() returns None when an orphaned/revoked row holds this key.
+        ci = {}
+        try:
+            ci = {"user_agent": req.headers.get("user-agent", ""),
+                  "remote": (req.client.host if req.client else "")}
+        except Exception:
+            pass
+        row = store.create(
+            skey, transport,
+            principal=(caller or {}).get("mcp_user"),
+            principal_src="unified_auth" if caller else None,
+            auth_fp=_auth_fingerprint(raw_headers) if caller else None,
+            client_info=ci,
+        )
+        if row is None:
+            raise _sm_error("MCP_SESSION_ORPHANED")
+    else:
+        store.touch(skey)
+        if caller:
+            if row.principal is None:
+                store.bind_principal(skey, caller["mcp_user"], "unified_auth",
+                                     auth_fp=_auth_fingerprint(raw_headers))
+                row = store.resolve(skey) or row
+            elif row.principal != caller["mcp_user"]:
+                store.mark_orphaned(skey, "principal_mismatch")
+                raise _sm_error("MCP_SESSION_PRINCIPAL_MISMATCH")
+    _sm_maybe_reap()
+    return SessionContext(
+        session_key=skey, transport=transport,
+        principal=row.principal, principal_src=row.principal_src,
+        caller=caller,
+    )
 
 
-def _get_current_user(args: dict) -> str | None:
-    """Resolve the current MCP user for the running request.
+def _admin_principals() -> set:
+    """Principals allowed to see/revoke other users' sessions (env CSV)."""
+    raw = os.environ.get("MCP_ADMIN_PRINCIPALS", "")
+    return {p.strip() for p in raw.split(",") if p.strip()}
 
-    Security invariant (task 4): this function NEVER reads identity from
-    ``args``. Callers of memory_* / user_connection_* tools cannot pass a
-    ``user`` argument and address another profile — identity comes only
-    from the HTTP-validated ContextVar or from the per-session slot set
-    by ``identify()``.
 
-    Priority:
-      0. HTTP-validated Odoo caller (unified-auth, task 2).
-         ContextVar ``_odoo_caller_ctx`` is set by the ASGI middleware
-         after successful XMLRPC validation + connection lookup.
-      1. Per-session user bound by ``identify()`` tool call (stdio).
-      2. Backward-compat "current" slot (single-session legacy).
+def _sctx() -> "SessionContext":
+    """Session context accessor for sync tool code. Fail-closed."""
+    sc = _session_ctx.get()
+    if sc is None:
+        raise _sm_error("MCP_NO_SESSION")
+    return sc
 
-    Returns None if no identity is bound — tools should then error with
-    "Call identify(name) first" or "Use unified-auth headers".
-    """
-    caller = _odoo_caller_ctx.get()
-    if caller:
-        return caller["mcp_user"]
-    key = _get_mcp_session_key()
-    if key in _session_users:
-        return _session_users[key]
-    if "current" in _session_users:
-        return _session_users["current"]
-    return None
+
+def _require_principal() -> str:
+    """Return the bound principal or refuse (fail-closed)."""
+    sc = _sctx()
+    if not sc.principal:
+        raise _sm_error("MCP_NO_IDENTITY")
+    return sc.principal
 
 
 # ─── Odoo API-key authentication middleware (unified auth, task 2) ──
@@ -1703,12 +1967,6 @@ import ssl as _auth_ssl
 _auth_cache: dict[str, tuple[str, str, int, float]] = {}
 _auth_cache_lock = _auth_threading.Lock()
 AUTH_CACHE_TTL = int(os.environ.get("AUTH_CACHE_TTL", "300"))  # 5 minutes default
-
-# Per-async-task validated Odoo caller. Set by ASGI middleware,
-# read by MCP tool handlers via _get_current_user.
-_odoo_caller_ctx: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
-    "odoo_caller", default=None,
-)
 
 
 def _resolve_mcp_user(url: str, db: str, login: str, api_key: str) -> tuple[str, str] | None:
@@ -3628,6 +3886,38 @@ TOOLS = [
         inputSchema={"type": "object", "properties": {}},
     ),
     Tool(
+        name="session_list",
+        description=(
+            "List MCP session-store rows. Regular callers see their own "
+            "sessions; admin principals (MCP_ADMIN_PRINCIPALS) see all."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "include_orphaned": {"type": "boolean",
+                                     "description": "Include orphaned/revoked rows (default true)"},
+                "principal": {"type": "string",
+                              "description": "Admin only: filter by principal"},
+            },
+        },
+    ),
+    Tool(
+        name="session_revoke",
+        description=(
+            "Revoke one MCP session (admin, or your own): marks the row "
+            "revoked and tears down its live resources (connection, web, "
+            "telegram client when unreferenced)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_key": {"type": "string",
+                                "description": "Session key as shown by session_list"},
+            },
+            "required": ["session_key"],
+        },
+    ),
+    Tool(
         name="user_connection_add",
         description=(
             "Add/update a personal Odoo connection (saved per-user). "
@@ -4364,25 +4654,32 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 pass
             return [TextContent(type="text", text=json.dumps(
                 {"error": f"Tool '{name}' is disabled on this server (MCP_DISABLE_FEATURES)."}))]
-        # ── Handle proxied tools directly in async context ──
-        if name in PROXY_TOOLS:
-            info = PROXY_TOOLS[name]
-            result = await _async_proxy_call(info["service"], info["tool"], arguments)
-        elif name == "proxy_call":
-            result = await _async_proxy_call(
-                arguments["service"], arguments["tool"], arguments.get("arguments", {}))
-        elif name == "proxy_refresh":
-            await asyncio.get_event_loop().run_in_executor(None, _discover_proxy_tools, None)
-            result = {
-                "status": "refreshed",
-                "proxied_tools": len(PROXY_TOOLS),
-                "services": {svc: sum(1 for v in PROXY_TOOLS.values() if v["service"] == svc)
-                             for svc in _get_proxy_services()},
-            }
-        else:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None, _execute_tool, name, arguments
-            )
+        # ── Session gate (strict model, v2.30.0) ──
+        # Every tool call must resolve to a session row in the store.
+        # asyncio.to_thread (not run_in_executor) so contextvars — including
+        # _session_ctx — propagate into the worker thread.
+        sc = await resolve_session_context()
+        _ctx_token = _session_ctx.set(sc)
+        try:
+            # ── Handle proxied tools directly in async context ──
+            if name in PROXY_TOOLS:
+                info = PROXY_TOOLS[name]
+                result = await _async_proxy_call(info["service"], info["tool"], arguments)
+            elif name == "proxy_call":
+                result = await _async_proxy_call(
+                    arguments["service"], arguments["tool"], arguments.get("arguments", {}))
+            elif name == "proxy_refresh":
+                await asyncio.to_thread(_discover_proxy_tools, None)
+                result = {
+                    "status": "refreshed",
+                    "proxied_tools": len(PROXY_TOOLS),
+                    "services": {svc: sum(1 for v in PROXY_TOOLS.values() if v["service"] == svc)
+                                 for svc in _get_proxy_services()},
+                }
+            else:
+                result = await asyncio.to_thread(_execute_tool, name, arguments)
+        finally:
+            _session_ctx.reset(_ctx_token)
         text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
         if len(text) > 100_000:
             text = text[:100_000] + "\n... (truncated, use limit/fields to narrow)"
@@ -4392,6 +4689,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         except Exception:
             pass
         return [TextContent(type="text", text=text)]
+    except _ss.SessionError as se:
+        # Fail-closed refusal: structured, machine-actionable error payload.
+        logger.info(f"[SESSION] tool {name} denied: {se.error_code}")
+        try:
+            import metrics
+            metrics.observe_tool_call(name, "session_denied")
+        except Exception:
+            pass
+        return [TextContent(type="text", text=json.dumps(
+            se.to_dict(), ensure_ascii=False, indent=2))]
     except Exception as e:
         logger.error(f"Tool {name} error: {e}")
         try:
@@ -4496,21 +4803,29 @@ def _open_connection_manager() -> dict:
 #   2. Direct SSH with ControlMaster            — always available as fallback.
 
 import threading as _threading
-_ssh_masters: dict = {}          # (user, host, port) → ControlPath str
+_ssh_masters: dict = {}          # (principal, user, host, port) → ControlPath str
 _ssh_masters_lock = _threading.Lock()
 _SSH_CTRL_DIR = Path("/tmp/.ssh-mux")
 
 
 def _ensure_ssh_master(user: str, host: str, port: int,
                        key_filename: str | None = None) -> str:
-    """Return a live ControlMaster socket path, creating one if needed."""
+    """Return a live ControlMaster socket path, creating one if needed.
+
+    Strict session model: multiplexed channels are isolated per PRINCIPAL —
+    a separate ControlPath directory (0700) per principal prevents one
+    identity from riding another's master socket.
+    """
+    principal = _require_principal()
+    ctrl_dir = _SSH_CTRL_DIR / _sanitize_name(principal)
     _SSH_CTRL_DIR.mkdir(mode=0o700, exist_ok=True)
-    key = (user, host, port)
+    ctrl_dir.mkdir(mode=0o700, exist_ok=True)
+    key = (principal, user, host, port)
     with _ssh_masters_lock:
         ctrl = _ssh_masters.get(key)
         if ctrl and Path(ctrl).exists():
             return ctrl
-        ctrl = str(_SSH_CTRL_DIR / f"{user}@{host}:{port}")
+        ctrl = str(ctrl_dir / f"{user}@{host}:{port}")
         _ssh_masters[key] = ctrl
 
     home_ssh = Path.home() / ".ssh"
@@ -4761,7 +5076,14 @@ def _execute_tool(name: str, args: dict) -> Any:
         # Test authentication — also triggers first-time cert fetch when
         # verify_ssl=False.
         uid = conn.authenticate()
-        _set_session_conn(conn)
+        sc = _sctx()
+        session_runtime.set_conn(sc.session_key, conn)
+        # Inline descriptor: secrets are NOT persisted in the session store —
+        # after a server restart the client must odoo_connect again.
+        session_store_inst.set_state(sc.session_key, "connection", "active", {
+            "source": "inline", "url": conn.url, "db": conn.db,
+            "username": conn.username, "protocol": conn.protocol,
+        })
         return {"status": "connected", "uid": uid, **conn.to_dict()}
 
     elif name == "odoo_cert_info":
@@ -4825,7 +5147,9 @@ def _execute_tool(name: str, args: dict) -> Any:
         alias = args.get("alias", "default")
         # Drop this session's active connection; also remove from the global
         # catalogue if it lives there (legacy).
-        _clear_session_conn()
+        sc = _sctx()
+        session_runtime.pop_conn(sc.session_key)
+        session_store_inst.delete_state(sc.session_key, "connection", "active")
         ok = m.remove(alias)
         return {"status": "removed", "alias": alias, "session_cleared": True}
 
@@ -4833,11 +5157,13 @@ def _execute_tool(name: str, args: dict) -> Any:
         return {"connections": m.list_all()}
 
     elif name == "identify":
-        # Unified-auth priority: if HTTP middleware validated the caller,
-        # use that identity (cannot be spoofed via args["name"]). Fall
-        # back to args["name"] only for stdio/local contexts where no
-        # HTTP validation is available.
-        caller = _odoo_caller_ctx.get()
+        # Unified-auth priority: when the gate validated the caller, identity
+        # comes from the Bearer key (cannot be spoofed via args["name"]) and
+        # is already bound to the session row. args["name"] is honored only
+        # for sessions without unified-auth headers (e.g. claude.ai OAuth) —
+        # it binds the principal to THIS session row (cookie semantics).
+        sc = _sctx()
+        caller = sc.caller
         if caller:
             user_name = caller["mcp_user"]
             safe_name = user_name  # already a safe dir name from registry
@@ -4852,16 +5178,16 @@ def _execute_tool(name: str, args: dict) -> Any:
                 }
             safe_name = _sanitize_name(user_name)
             preferred_alias = None
+            # Bind to the session row; a session already bound to a DIFFERENT
+            # identity is refused (SessionPrincipalMismatch → structured error).
+            session_store_inst.bind_principal(sc.session_key, safe_name, "identify")
+            sc = SessionContext(
+                session_key=sc.session_key, transport=sc.transport,
+                principal=safe_name, principal_src="identify", caller=None,
+            )
+            _session_ctx.set(sc)
 
         is_new = not os.path.isdir(os.path.join(DATA_DIR, "users", safe_name))
-
-        # Only write to session_users when we're NOT relying on unified-auth
-        # ContextVar. When caller is set, ContextVar is authoritative and
-        # session_users would just be stale noise for later calls.
-        if not caller:
-            session_key = _get_mcp_session_key()
-            _session_users[session_key] = user_name
-            _session_users["current"] = user_name  # backward compat
 
         conns = _load_user_connections(user_name)
         active = _load_user_active(user_name)
@@ -4869,8 +5195,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         if alias_to_activate and alias_to_activate in conns:
             c = conns[alias_to_activate]
             try:
-                # Session-scoped: bind to THIS Claude session, do not clobber
-                # the global manager["default"].
+                # Session-scoped: bind to THIS session, never the global manager.
                 conn = OdooConnection(
                     alias="default",
                     url=c["url"], db=c["db"],
@@ -4880,7 +5205,11 @@ def _execute_tool(name: str, args: dict) -> Any:
                     protocol=c.get("protocol", "xmlrpc"),
                 )
                 conn.authenticate()
-                _set_session_conn(conn)
+                session_runtime.set_conn(sc.session_key, conn)
+                session_store_inst.set_state(sc.session_key, "connection", "active", {
+                    "source": "user_profile", "user": safe_name,
+                    "alias": alias_to_activate,
+                })
                 logger.info(f"User {user_name}: auto-activated connection '{alias_to_activate}'")
             except Exception as e:
                 logger.warning(f"User {user_name}: auto-activate '{alias_to_activate}' failed: {e}")
@@ -4901,22 +5230,78 @@ def _execute_tool(name: str, args: dict) -> Any:
         return result
 
     elif name == "who_am_i":
-        user = _get_current_user(args)
-        if not user:
-            return {"status": "not_identified", "hint": "Call identify(name) first"}
+        # Diagnostic: never refuses — reports session + identity state with
+        # bootstrap instructions when identity is missing.
+        sc = _sctx()
+        row = session_store_inst.resolve(sc.session_key)
+        session_info = {
+            "session": sc.session_key[:24] + ("..." if len(sc.session_key) > 24 else ""),
+            "transport": sc.transport,
+            "principal_src": sc.principal_src,
+            "created_at": getattr(row, "created_at", None),
+            "last_seen": getattr(row, "last_seen", None),
+            "expires_at": getattr(row, "expires_at", None),
+        }
+        if not sc.principal:
+            return {
+                "status": "not_identified",
+                **session_info,
+                "hint": _SM_MSG["MCP_NO_IDENTITY"][1],
+            }
+        user = sc.principal
         active = _load_user_active(user)
         conns = _load_user_connections(user)
+        conn_state = session_store_inst.get_state(sc.session_key, "connection", "active")
+        tg_state = session_store_inst.get_state(sc.session_key, "telegram", "phone")
+        tg_phone = (tg_state or {}).get("phone", "")
+        web_aliases = [r["key"] for r in
+                       session_store_inst.list_state(sc.session_key, "web")]
         return {
             "user": user,
+            **session_info,
             "connections": list(conns.keys()),
             "active": active.get("alias", None),
             "active_details": active,
+            "session_connection": conn_state,
+            "telegram_phone": (tg_phone[:5] + "..." if tg_phone else None),
+            "web_sessions": web_aliases,
         }
 
+    elif name == "session_list":
+        principal = _require_principal()
+        is_admin = principal in _admin_principals()
+        target = args.get("principal") if is_admin else principal
+        if args.get("principal") and not is_admin:
+            return {"error": "Only admin principals may filter by another principal.",
+                    "admin_env": "MCP_ADMIN_PRINCIPALS"}
+        rows = session_store_inst.list_sessions(
+            principal=target if (target or not is_admin) else None,
+            include_orphaned=args.get("include_orphaned", True),
+        )
+        return {"caller": principal, "admin": is_admin, "sessions": rows,
+                "telegram_clients": telegram_registry.keys() if (is_admin and telegram_registry) else None}
+
+    elif name == "session_revoke":
+        principal = _require_principal()
+        target_key = args["session_key"]
+        row = next((r for r in session_store_inst.list_sessions()
+                    if r.get("session_key") == target_key), None)
+        if row is None:
+            return {"error": f"Session '{target_key}' not found."}
+        is_admin = principal in _admin_principals()
+        if not is_admin and row.get("principal") != principal:
+            return {"error": "You may revoke only your own sessions "
+                             "(or be listed in MCP_ADMIN_PRINCIPALS)."}
+        session_store_inst.revoke(target_key)
+        if session_runtime is not None:
+            session_runtime.evict([target_key], on_evict=_sm_teardown)
+        tg_reaped = _tg_reap_clients()
+        return {"status": "revoked", "session_key": target_key,
+                "principal": row.get("principal"),
+                "telegram_clients_disconnected": tg_reaped}
+
     elif name == "user_connection_add":
-        user = _get_current_user(args)
-        if not user:
-            return {"error": "Call identify(name) first"}
+        user = _require_principal()
         conns = _load_user_connections(user)
         alias = args["alias"]
         conn_data = {
@@ -4946,9 +5331,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         return {"status": "saved", "alias": alias, "user": user}
 
     elif name == "user_connection_list":
-        user = _get_current_user(args)
-        if not user:
-            return {"error": "Call identify(name) first"}
+        user = _require_principal()
         conns = _load_user_connections(user)
         active = _load_user_active(user)
         result = []
@@ -4964,16 +5347,15 @@ def _execute_tool(name: str, args: dict) -> Any:
         return {"user": user, "connections": result}
 
     elif name == "user_connection_activate":
-        user = _get_current_user(args)
-        if not user:
-            return {"error": "Call identify(name) first"}
+        user = _require_principal()
         alias = args["alias"]
         conns = _load_user_connections(user)
         if alias not in conns:
             return {"error": f"Connection '{alias}' not found. Use user_connection_list to see available."}
         c = conns[alias]
         _save_user_active(user, {"alias": alias, **c})
-        # Activate for THIS Claude session only (no global clobber).
+        # Activate for THIS session only (no global clobber).
+        sc = _sctx()
         try:
             conn = OdooConnection(
                 alias="default",
@@ -4984,7 +5366,10 @@ def _execute_tool(name: str, args: dict) -> Any:
                 protocol=c.get("protocol", "xmlrpc"),
             )
             uid = conn.authenticate()
-            _set_session_conn(conn)
+            session_runtime.set_conn(sc.session_key, conn)
+            session_store_inst.set_state(sc.session_key, "connection", "active", {
+                "source": "user_profile", "user": user, "alias": alias,
+            })
             return {"status": "activated", "alias": alias, "uid": uid, "url": c["url"]}
         except Exception as e:
             _save_user_active(user, {"alias": alias, **c})
@@ -4992,9 +5377,7 @@ def _execute_tool(name: str, args: dict) -> Any:
                     "hint": "Connection saved but auth failed. Check credentials."}
 
     elif name == "user_connection_delete":
-        user = _get_current_user(args)
-        if not user:
-            return {"error": "Call identify(name) first"}
+        user = _require_principal()
         alias = args["alias"]
         conns = _load_user_connections(user)
         if alias not in conns:
@@ -5011,7 +5394,7 @@ def _execute_tool(name: str, args: dict) -> Any:
     elif name == "memory_list":
         scope = args.get("scope", "all")
         result = {}
-        user = _get_current_user(args)
+        user = _sctx().principal
         if scope in ("all", "personal"):
             if user:
                 result["personal"] = _memory_list_files(_memory_user_dir(user))
@@ -5024,7 +5407,7 @@ def _execute_tool(name: str, args: dict) -> Any:
             # Licensed memories come from purchased memory packs; resolve
             # the tenant via the caller's Odoo context (db_name becomes
             # tenant_code for billing lookups).
-            caller = _odoo_caller_ctx.get() if "_odoo_caller_ctx" in globals() else None
+            caller = _sctx().caller
             tenant_code = (args.get("tenant_code") or "").strip()
             if not tenant_code and caller and caller.get("db"):
                 tenant_code = caller["db"]
@@ -5048,14 +5431,14 @@ def _execute_tool(name: str, args: dict) -> Any:
         # Sanitize
         filename = os.path.basename(filename)
         scope = args.get("scope", "")
-        user = _get_current_user(args)
+        user = _sctx().principal
 
         # Licensed scope uses tenant_code; resolve from auth ctx if absent.
         def _resolve_tenant():
             tc = (args.get("tenant_code") or "").strip()
             if tc:
                 return tc
-            caller = _odoo_caller_ctx.get() if "_odoo_caller_ctx" in globals() else None
+            caller = _sctx().caller
             return (caller or {}).get("db") if caller else None
 
         fpath = None
@@ -5108,9 +5491,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         if scope == "shared":
             directory = _memory_shared_dir(create=True)
         else:
-            user = _get_current_user(args)
-            if not user:
-                return {"error": "Call identify(name) first to write personal files"}
+            user = _require_principal()
             directory = _memory_user_dir(user, create=True)
 
         fpath = os.path.join(directory, filename)
@@ -5130,9 +5511,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         if scope == "shared":
             fpath = os.path.join(_memory_shared_dir(), filename)
         else:
-            user = _get_current_user(args)
-            if not user:
-                return {"error": "Call identify(name) first"}
+            user = _require_principal()
             fpath = os.path.join(_memory_user_dir(user), filename)
         if not os.path.isfile(fpath):
             return {"error": f"File '{filename}' not found in {scope}"}
@@ -5140,9 +5519,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         return {"status": "deleted", "filename": filename, "scope": scope}
 
     elif name == "memory_share":
-        user = _get_current_user(args)
-        if not user:
-            return {"error": "Call identify(name) first"}
+        user = _require_principal()
         import shutil
         filename = args["filename"].strip()
         user_dir = _memory_user_dir(user)
@@ -5176,9 +5553,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         }
 
     elif name == "memory_pull":
-        user = _get_current_user(args)
-        if not user:
-            return {"error": "Call identify(name) first"}
+        user = _require_principal()
         import shutil
         filename = args["filename"].strip()
         user_dir = _memory_user_dir(user, create=True)
@@ -5319,8 +5694,13 @@ def _execute_tool(name: str, args: dict) -> Any:
             params=args.get("params"),
         )
 
-    # ── All other tools need a connection ──
-    conn = _conn(args)
+    # ── Most remaining tools need an Odoo connection — but NOT all of them.
+    # Strict session model: _conn() now refuses (MCP_NO_CONNECTION) instead of
+    # silently falling back, so it must not run eagerly for connection-free
+    # tools (telegram/google/web/public/session admin) further down this chain.
+    _CONN_FREE_PREFIXES = ("telegram_", "google_", "session_", "odoo_web_",
+                           "public_access_", "mcp_terminal_", "ai_usage_log_")
+    conn = None if name.startswith(_CONN_FREE_PREFIXES) else _conn(args)
 
     if name == "odoo_version":
         common = xmlrpc.client.ServerProxy(
@@ -6422,7 +6802,7 @@ def _execute_tool(name: str, args: dict) -> Any:
 
             # Check saved user connection for web credentials
             if not login or not password:
-                current_user = _get_current_user(args)
+                current_user = _sctx().principal
                 if current_user:
                     conns = _load_user_connections(current_user)
                     conn_cfg = conns.get(alias, {})
@@ -6438,7 +6818,15 @@ def _execute_tool(name: str, args: dict) -> Any:
         ws = OdooWebSession(url, db, login, password)
         try:
             info = ws.authenticate()
-            _web_sessions[_web_session_key(alias)] = ws
+            sc = _sctx()
+            session_runtime.set_web(sc.session_key, alias, ws)
+            # Cookie descriptor → store (rehydratable; the cookie is the secret,
+            # which is why mcp_sessions.db is created with mode 0600).
+            session_store_inst.set_state(sc.session_key, "web", alias, {
+                "url": ws.url, "db": ws.db, "login": ws.login,
+                "session_cookie": ws.session_id, "uid": ws.uid,
+                "authenticated_at": datetime.now(timezone.utc).isoformat(),
+            })
             return {
                 "status": "authenticated",
                 "uid": ws.uid,
@@ -6489,7 +6877,9 @@ def _execute_tool(name: str, args: dict) -> Any:
 
     elif name == "odoo_web_logout":
         alias = args.get("connection", "default")
-        ws = _web_sessions.pop(_web_session_key(alias), None)
+        sc = _sctx()
+        ws = session_runtime.pop_web(sc.session_key, alias)
+        session_store_inst.delete_state(sc.session_key, "web", alias)
         if ws:
             ws.destroy()
             return {"status": "logged_out", "connection": alias}
@@ -8814,32 +9204,33 @@ def _execute_tool(name: str, args: dict) -> Any:
             ),
         }
 
-    # ── Google Services ──
+    # ── Google Services (per-principal manager via _google()) ──
     elif name == "google_auth":
-        if google_mgr is None:
+        if google_registry is None:
             return {"error": "Google service not initialized"}
-        return google_mgr.authenticate(args.get("credentials_file", ""))
+        return _google().authenticate(args.get("credentials_file", ""))
 
     elif name == "google_auth_status":
-        if google_mgr is None:
+        if google_registry is None:
             return {"status": "not_initialized"}
+        gm = _google()
         return {
-            "status": "authenticated" if google_mgr.is_authenticated else "not_authenticated",
-            "email": google_mgr._get_email() if google_mgr.is_authenticated else None,
+            "status": "authenticated" if gm.is_authenticated else "not_authenticated",
+            "email": gm._get_email() if gm.is_authenticated else None,
         }
 
     elif name == "google_gmail_search":
-        return google_mgr.gmail_search(
+        return _google().gmail_search(
             query=args["query"],
             max_results=args.get("max_results", 10),
             label_ids=args.get("label_ids"),
         )
 
     elif name == "google_gmail_read":
-        return google_mgr.gmail_read(args["message_id"])
+        return _google().gmail_read(args["message_id"])
 
     elif name == "google_gmail_send":
-        return google_mgr.gmail_send(
+        return _google().gmail_send(
             to=args["to"],
             subject=args["subject"],
             body=args["body"],
@@ -8850,13 +9241,13 @@ def _execute_tool(name: str, args: dict) -> Any:
         )
 
     elif name == "google_gmail_labels":
-        return google_mgr.gmail_labels()
+        return _google().gmail_labels()
 
     elif name == "google_calendar_list":
-        return google_mgr.calendar_list()
+        return _google().calendar_list()
 
     elif name == "google_calendar_events":
-        return google_mgr.calendar_events(
+        return _google().calendar_events(
             calendar_id=args.get("calendar_id", "primary"),
             time_min=args.get("time_min", ""),
             time_max=args.get("time_max", ""),
@@ -8865,7 +9256,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         )
 
     elif name == "google_calendar_create_event":
-        return google_mgr.calendar_create_event(
+        return _google().calendar_create_event(
             summary=args["summary"],
             start=args["start"],
             end=args["end"],
@@ -8879,36 +9270,52 @@ def _execute_tool(name: str, args: dict) -> Any:
     elif name == "google_calendar_update_event":
         event_id = args.pop("event_id")
         calendar_id = args.pop("calendar_id", "primary")
-        return google_mgr.calendar_update_event(
+        return _google().calendar_update_event(
             event_id=event_id, calendar_id=calendar_id, **args,
         )
 
     elif name == "google_calendar_delete_event":
-        return google_mgr.calendar_delete_event(
+        return _google().calendar_delete_event(
             event_id=args["event_id"],
             calendar_id=args.get("calendar_id", "primary"),
         )
 
-    # ── Telegram (per-principal client via _tg()) ──
+    # ── Telegram (per principal:phone client via _tg()) ──
     elif name == "telegram_configure":
         if telegram_registry is None:
             return {"error": "Telegram service not initialized"}
-        return _tg().configure(args["api_id"], args["api_hash"])
+        # Write api credentials straight to the principal's config file —
+        # no Telethon client is needed (and no phone is bound yet).
+        principal = _require_principal()
+        base = _user_dir(principal, create=True)
+        cfg_path = os.path.join(base, "telegram_config.json")
+        try:
+            api_id = int(args["api_id"])
+        except (TypeError, ValueError):
+            return {"error": "api_id must be an integer"}
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"api_id": api_id, "api_hash": args["api_hash"]}, f, indent=2)
+        return {"status": "configured", "principal": principal}
 
     elif name == "telegram_auth":
         if telegram_registry is None:
             return {"error": "Telegram service not initialized"}
-        # Bind this MCP session to the Telegram account (phone) being used, so
-        # humans sharing one principal/key get separate persistent sessions.
-        if args.get("phone"):
-            _session_tg_phone[_get_mcp_session_key()] = args["phone"]
+        # Bind this MCP session to the Telegram account (phone) FIRST — the
+        # session store row is the single source of truth for the binding.
+        phone = (args.get("phone") or "").strip()
+        if not phone:
+            return {"error": "phone is required (e.g. telegram_auth(phone='+359...'))."}
+        sc = _sctx()
+        _require_principal()
+        session_store_inst.set_state(sc.session_key, "telegram", "phone",
+                                     {"phone": phone})
         code = args.get("code", "")
         if code:
             return _tg().auth_verify(
-                phone=args["phone"], code=code,
+                phone=phone, code=code,
                 password=args.get("password", ""),
             )
-        return _tg().auth_send_code(args["phone"])
+        return _tg().auth_send_code(phone)
 
     elif name == "telegram_auth_status":
         if telegram_registry is None:
@@ -8950,7 +9357,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         import telegram_subscriptions as _tsub
         path = _tg_subs_file(args.get("principal"))
         return {
-            "principal": args.get("principal") or _get_current_user({}) or "__global__",
+            "principal": args.get("principal") or _require_principal(),
             "allow_all": _tsub.allowed_chats(path) is None,
             "subscriptions": _tsub.list_subs(path),
         }
@@ -8981,10 +9388,29 @@ async def health_endpoint(request):
 
 
 def create_app():
-    global manager, google_mgr, telegram_registry, session_mgr
+    global manager, google_registry, telegram_registry, session_mgr
+    global session_store_inst, session_runtime
 
     manager = ConnectionManager(CONNECTIONS_FILE)
     logger.info(f"Loaded {len(manager.connections)} connection(s): {list(manager.connections.keys())}")
+
+    # ── Strict session model (v2.30.0): SQLite session store ──
+    session_store_inst = _ss.SessionStore(
+        _ss.DEFAULT_DB_PATH, ttl_seconds=_ss.DEFAULT_TTL,
+        retention_days=_ss.DEFAULT_RETENTION_DAYS,
+    )
+    session_runtime = _ss.SessionRuntime()
+    # Server restart orphans every transport-level session (the SDK keeps them
+    # in memory) — mark all previously-active rows so the reaper can purge them
+    # and clients get MCP_SESSION_ORPHANED instead of silent state reuse.
+    _orphaned = session_store_inst.mark_all_active_orphaned("server_restart")
+    if _orphaned:
+        logger.info(f"[SESSION] restart: orphaned {len(_orphaned)} stale session(s)")
+    _purged = session_store_inst.cleanup()
+    if _purged.get("purged"):
+        logger.info(f"[SESSION] startup purge: {len(_purged['purged'])} old row(s)")
+    logger.info(f"[SESSION] strict session store ready at {_ss.DEFAULT_DB_PATH} "
+                f"(ttl={_ss.DEFAULT_TTL}s, retention={_ss.DEFAULT_RETENTION_DAYS}d)")
 
     session_mgr = SessionManager(SESSIONS_DB)
     stale = session_mgr.cleanup_stale()
@@ -8992,11 +9418,9 @@ def create_app():
         logger.info(f"Cleaned up {stale} stale session(s)")
     logger.info(f"Session manager ready at {SESSIONS_DB}")
 
-    google_mgr = GoogleServiceManager()
-    if google_mgr.is_authenticated:
-        logger.info("Google services: authenticated")
-    else:
-        logger.info("Google services: not authenticated (call google_auth to connect)")
+    # Per-principal Google managers (lazy; token under users/<principal>/).
+    google_registry = GoogleRegistry()
+    logger.info("Google: per-principal registry ready (managers created lazily)")
 
     # Per-principal Telegram clients (lazy, created on first use per user).
     telegram_registry = TelegramRegistry()
@@ -9068,23 +9492,23 @@ def create_app():
         return False
 
     def _check_auth_and_resolve(headers):
-        """Auth check that also resolves the calling MCP user.
+        """HTTP-level auth gate (401 boundary only).
 
         Strategy:
-          1. If headers carry the new unified-auth schema (X-Odoo-Url +
-             Bearer + X-Odoo-Db + X-Odoo-Login), validate XMLRPC and
-             resolve to a registered MCP user. Success → set ContextVar.
-             Failure → reject (do NOT fall back to legacy — caller chose
-             this schema explicitly).
-          2. Otherwise, fall back to legacy `_check_auth` (no caller
-             identity bound; tools rely on identify()/_session_users).
+          1. If headers carry the unified-auth schema (X-Odoo-Url + Bearer
+             + X-Odoo-Db + X-Odoo-Login), validate XMLRPC and resolve to a
+             registered MCP user. Failure → reject (no legacy fallback —
+             the caller chose this schema explicitly).
+          2. Otherwise, fall back to legacy `_check_auth`.
+
+        Identity binding to the MCP session happens in the call_tool gate
+        (resolve_session_context) — NOT here. No ContextVar side effects.
 
         Returns (ok: bool, caller: dict | None).
         """
         if headers.get(b"x-odoo-url"):
             caller = get_caller_odoo_user(headers)
             if caller:
-                _odoo_caller_ctx.set(caller)
                 return True, caller
             return False, None
         return _check_auth(headers), None
@@ -9770,10 +10194,11 @@ def create_app():
                 response = JSONResponse({"error": str(e)}, status_code=400)
             await response(scope, receive, send)
         elif path == "/api/identify" and scope["type"] == "http" and scope.get("method") == "POST":
-            # Unified-auth-aware: if middleware validated the caller,
-            # identity comes from ContextVar (spoof-proof). Only when no
-            # HTTP auth was enforced (no secret_token, no X-Odoo-*) we
-            # fall back to body.name for dev/local compatibility.
+            # Profile-info endpoint for claude-terminal bootstrap. Strict
+            # session model: this endpoint has NO MCP session — it neither
+            # binds identity to any session nor touches the global manager
+            # (both legacy behaviors removed). Unified-auth headers, when
+            # present, are validated directly (spoof-proof).
             from starlette.requests import Request
             from starlette.responses import JSONResponse
             request = Request(scope, receive)
@@ -9781,7 +10206,8 @@ def create_app():
                 body = await request.json() if await request.body() else {}
             except Exception:
                 body = {}
-            caller = _odoo_caller_ctx.get()
+            _hdrs = dict(scope.get("headers") or [])
+            caller = get_caller_odoo_user(_hdrs) if _hdrs.get(b"x-odoo-url") else None
             try:
                 if caller:
                     user_name = caller["mcp_user"]
@@ -9799,24 +10225,9 @@ def create_app():
                     preferred_alias = None
 
                 is_new = not os.path.isdir(os.path.join(DATA_DIR, "users", safe_name))
-                _session_users["current"] = user_name
                 conns = _load_user_connections(user_name)
                 active = _load_user_active(user_name)
                 alias_to_activate = preferred_alias or active.get("alias")
-                if alias_to_activate and alias_to_activate in conns:
-                    c = conns[alias_to_activate]
-                    try:
-                        conn = manager.add(
-                            alias="default",
-                            url=c["url"], db=c["db"],
-                            username=c["user"],
-                            api_key=c.get("api_key", ""),
-                            password=c.get("password", ""),
-                            protocol=c.get("protocol", "xmlrpc"),
-                        )
-                        conn.authenticate()
-                    except Exception:
-                        pass
                 response = JSONResponse({
                     "status": "new_profile" if is_new else "identified",
                     "user": user_name,
