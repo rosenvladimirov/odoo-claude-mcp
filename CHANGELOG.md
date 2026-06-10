@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] — 2026-06-10 — integrator platform GA
+
+Promotes the v3 integrator track to GA. Security GA-gate (B.0: 6 catastrophic
+multi-tenant holes closed — fail-closed role default, odoo_execute read-only
+allowlist, SQL data-modifying-CTE full-AST scan, per-session tenant + elevation,
+provision_* admin-principal gate, credential-read tier) plus the full
+implementator suite: fleet manager (B.1), secrets registry (B.4), module deploy
+pipeline (B.2), client onboarding wizard (B.3), backup/DR (B.5), health monitor
+(B.6), session handoff (A/B.8), tenant migration assess (B.7), and the
+tg_listen runbook helper. All admin-mutating tools DRY-RUN by default +
+admin-principal gated. Merged with the parallel Centrifugo + claude-terminal
+2.26.0a security line. 449 tests passing. Caveat: live-infra paths
+(Portainer/ssh/S3/Centrifugo) unit-mocked, not yet validated in production.
+
 ## [3.0.0-alpha.6] — 2026-05-04 — QA T3 batch + T4-4 leak tightening
 
 Closes the T3 set surfaced by the alpha.3+alpha.4 QA review,
@@ -384,6 +398,85 @@ client install/lifecycle tools и skills bundle.
   `mcp_terminal_get_config`.
 - Validated на 2026-04-28: 7 remote endpoints (122 + 6×151 = 1028 prefixed
   tools). Active tenant routing предстои за token cost reduction.
+## [2.26.0a] — 2026-05-06 — claude-terminal Phase 2.0a/b: hashed dirs + multi-tenant disclosure
+
+Stop-the-bleeding hardening of `claude-terminal` against cross-tenant
+filesystem enumeration, while the proper per-session container model
+(Phase 2.2) is being built.
+
+### Security
+- **Per-user workspace directories now use HMAC-SHA256(odoo_url|db|login)
+  keyed by `MCP_TENANT_SECRET`** — replaces the legacy `${db}__${login}`
+  layout which let any tenant who knew a colleague's email guess that
+  colleague's `/data/users/...` path. New paths are 32-hex characters and
+  unguessable without the host-side secret.
+- **`/data/users` now owned `root:claude` with mode 711** in the Docker
+  image baseline. `ls /data/users` returns `Permission denied` to the
+  shared `claude` uid; only `cd` into a known-hash path is allowed.
+- **`chmod 700 $USER_DIR` enforced every session start** as defence in
+  depth, in case a previous process loosened permissions.
+- **One-time migration** of existing `${db}__${login}` workspaces to the
+  new hashed name — runs idempotently on first login under the new
+  scheme; `.claude/`, `workspace/` and conversation history preserved.
+- **Multi-tenant disclosure banner** printed before every Claude CLI
+  launch warning users not to run `gh`, `gcloud`, `aws`, `npm login` in
+  the shared terminal — the same `$HOME` exposure pattern reported to
+  Odoo.sh as `intigriti ODOO-4U82VQ7M`.
+
+### Files
+- `claude-terminal/Dockerfile` — chown/chmod baseline for `/data/users`.
+- `claude-terminal/start-session.sh` — HMAC hash, legacy migration,
+  workspace chmod, multi-tenant banner.
+
+### Operator action required
+- Set `MCP_TENANT_SECRET` in production `.env` (any high-entropy string).
+  Without it the script falls back to `/etc/machine-id` which is stable
+  per host but root-readable only — functional but not preferred.
+
+### What this DOES NOT close
+- Same-uid `/proc/<pid>/environ` reads still expose `USER_DIR` and
+  `API_KEY` to peer sessions running as the same `claude` uid. This is
+  the architectural limit of a shared container and requires kernel
+  namespace separation to close. Phase 2.2 (per-session ephemeral
+  container with bind-mounted `/home/claude` from
+  `/shared/users/${PROFILE}/`) is being built in parallel as
+  `claude-terminal-session` image (v3).
+
+## [2.25.2] — 2026-04-28 — `mcp_terminal_get_config` empty env != unset
+
+### Fixed
+- `_env_chain()` helper distinguishes "env var unset" (`None`) from "explicitly
+  empty" (`""`). Previously a `CLAUDE_TERMINAL_URL=` line in compose was
+  silently ignored — falsy empty string fell through `or` chain to the
+  `mcp-{slug}.mcpworks.net` auto-derive default. Now an explicit empty
+  override is respected as "no terminal", matching operator intent.
+- All env-var resolutions (`MCP_PUBLIC_URL`, `MCP_SECRET_TOKEN`, `MCP_ADMIN_TOKEN`,
+  `QDRANT_URL`, `OLLAMA_URL`, etc.) routed through the new helper for consistent
+  semantics.
+
+### Verified live
+- All 7 stacks (6 poligroup tenants + Konex VPN-internal) on v2.25.2,
+  including Konex with custom `konex-tiva.space` MCP_PUBLIC_URL override.
+
+## [2.25.1] — 2026-04-28 — `mcp_terminal_get_config` real env names + DNS auto-derive
+
+### Fixed
+- `mcp_terminal_get_config` previously read non-existent env vars
+  (`MCP_CLIENT_TOKEN`, `MCP_API_KEY`, `MCP_PUBLIC_URL`) and returned blank
+  ZIP keys for all tenants. Now reads the actual deployment env names set
+  by `provisioning_engine` / compose templates:
+  - `claude_mcp_token` ← `MCP_SECRET_TOKEN`
+  - `claude_mcp_api_key` ← `MCP_ADMIN_TOKEN`
+  - `claude_mcp_client_id` ← `MCP_OAUTH_CLIENT_ID`
+- Auto-derive `claude_mcp_url` and `claude_terminal_url` from Cloudflare DNS
+  pattern (`mcp-{slug}.mcpworks.net` / `terminal-{slug}.mcpworks.net`) when
+  no env override is set. Slug taken from `MCP_OAUTH_CLIENT_ID` (stripped
+  of the `odoo-rpc-mcp-` prefix), matching the deployed hostname pattern.
+
+### Changed
+- `include_anthropic` default flipped from `True` → `False`. Anthropic API
+  key is privacy-sensitive and per-user — onboarding ZIPs should not
+  auto-embed it. Callers who need it must opt in explicitly.
 
 ## [2.24.0] — 2026-04-24 — Final 2.x polish: admin managers, HTTP auth, metrics scaffold
 

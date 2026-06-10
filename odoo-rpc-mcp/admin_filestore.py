@@ -71,9 +71,13 @@ def _rel(p: Path) -> str:
 # ── Guards (auth + re-challenge + readonly) ───────────────
 
 def _rechallenge_ok(req: Request, sess: dict) -> bool:
+    """Accept either the user's admin password OR the MCP_ADMIN_TOKEN env secret."""
     pw = req.headers.get("x-admin-rechallenge") or ""
     if not pw:
         return False
+    admin_token = os.environ.get("MCP_ADMIN_TOKEN", "").strip()
+    if admin_token and pw == admin_token:
+        return True
     au = _load_user_auth(sess["login"])
     if not au or not au.get("password_hash"):
         return False
@@ -93,6 +97,39 @@ def _guard(req: Request) -> tuple[dict, Optional[Response]]:
     return sess, None
 
 
+def _scope_allows(p: Path, sess: dict) -> bool:
+    """Check that a sandbox path is in the session's allowed subtree.
+
+    Admins see the full sandbox. Regular users see:
+      - everything under `shared/`
+      - `users/<own_login>/**` (their own tree only)
+    Anything else (incl. `licensed/`, other users' trees) is hidden.
+    """
+    if sess.get("is_admin"):
+        return True
+    try:
+        rel = p.resolve().relative_to(SANDBOX_ROOT).as_posix()
+    except ValueError:
+        return False
+    if rel in ("", "."):
+        return True  # sandbox root — ls emits a filtered listing
+    segs = rel.split("/")
+    top = segs[0]
+    if top == "shared":
+        return True
+    if top == "users":
+        if len(segs) == 1:
+            return True  # the `users` dir itself (ls filters children)
+        return segs[1] == sess.get("login")
+    return False
+
+
+def _scope_forbidden(req: Request, sess: dict, p: Path) -> Optional[Response]:
+    if not _scope_allows(p, sess):
+        return _apply_sec_headers(JSONResponse({"error": "forbidden: outside your scope"}, status_code=403))
+    return None
+
+
 def _write_guard(req: Request, sess: dict) -> Optional[Response]:
     if READONLY:
         return _apply_sec_headers(JSONResponse({"error": "read-only mode"}, status_code=403))
@@ -104,15 +141,17 @@ def _write_guard(req: Request, sess: dict) -> Optional[Response]:
 # ── HTML page ───────────────────────────────────────────────
 
 PAGE_CSS = """
-.fs-split { display: grid; grid-template-columns: 320px 1fr; gap: 1rem; min-height: 60vh; }
-.fs-tree { background: #fff; border: 1px solid rgba(113,75,160,.12); border-radius: .5rem; padding: .5rem; overflow: auto; max-height: 75vh; }
+.fs-wrap { max-width: 100% !important; padding: 0.75rem 1rem !important; }
+.fs-split { display: grid; grid-template-columns: 320px 1fr; gap: 1rem; height: calc(100vh - 170px); min-height: 500px; }
+.fs-tree { background: #fff; border: 1px solid rgba(113,75,160,.12); border-radius: .5rem; padding: .5rem; overflow: auto; }
 .fs-tree li { list-style: none; padding: 0; }
 .fs-tree .entry { cursor: pointer; padding: .2rem .4rem; border-radius: .25rem; font-family: 'JetBrains Mono', monospace; font-size: .85rem; display:flex; align-items:center; gap:.35rem; }
 .fs-tree .entry:hover { background: rgba(113,75,160,.08); }
 .fs-tree .entry.active { background: rgba(113,75,160,.15); font-weight: 600; }
-.fs-detail { background: #fff; border: 1px solid rgba(113,75,160,.12); border-radius: .5rem; padding: 1rem; }
-.fs-editor { width: 100%; min-height: 55vh; font-family: 'JetBrains Mono', monospace; font-size: .85rem; }
-.fs-img-preview { max-width: 100%; max-height: 60vh; border: 1px solid rgba(0,0,0,.12); border-radius: .35rem; }
+.fs-detail { background: #fff; border: 1px solid rgba(113,75,160,.12); border-radius: .5rem; padding: 1rem; display: flex; flex-direction: column; overflow: hidden; }
+.fs-detail-body { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
+.fs-editor { flex: 1 1 auto; width: 100%; min-height: 0; font-family: 'JetBrains Mono', monospace; font-size: .85rem; resize: none; }
+.fs-img-preview { max-width: 100%; max-height: 100%; object-fit: contain; border: 1px solid rgba(0,0,0,.12); border-radius: .35rem; }
 .fs-crumb { font-family: 'JetBrains Mono', monospace; font-size: .85rem; }
 .fs-crumb a { text-decoration: none; }
 .fs-badge-ro { background: #6c757d; color: #fff; font-size: .7rem; padding: .1rem .4rem; border-radius: .25rem; }
@@ -133,7 +172,7 @@ async def _page_dashboard(req: Request):
     extra_head = f"<style>{PAGE_CSS}</style>"
     body = f"""
 {_nav(sess)}
-<main class="container-fluid" style="max-width: 1400px; margin: 0 auto; padding: 1rem 1.5rem;">
+<main class="container-fluid fs-wrap">
   <div class="d-flex align-items-center mb-3">
     <h3 class="mb-0">Filestore {ro_badge}</h3>
     <span class="ms-3 text-muted small">sandbox: <code>{SANDBOX_ROOT}</code></span>
@@ -222,8 +261,8 @@ async function fsClick(el) {{
 async function fsShowFile(path) {{
   const info = await fsFetch(P+'/filestore/api/info?path='+encodeURIComponent(path));
   const ext = (path.split('.').pop() || '').toLowerCase();
-  let html = `
-    <div class="d-flex align-items-center mb-2">
+  let header = `
+    <div class="d-flex align-items-center mb-2 flex-shrink-0">
       <code class="me-3">${{path}}</code>
       <span class="text-muted small">${{humanBytes(info.size)}} · ${{(info.mtime||'').slice(0,19).replace('T',' ')}}</span>
       <div class="ms-auto">
@@ -232,19 +271,20 @@ async function fsShowFile(path) {{
         <button class="btn btn-sm btn-outline-danger ms-1" onclick="fsDelete('${{path}}')" ${{RO?'disabled':''}}><i class="bi bi-trash"></i></button>
       </div>
     </div>`;
+  let body_html = '';
   if (['png','jpg','jpeg','webp','gif','svg','bmp'].includes(ext)) {{
-    html += `<img class="fs-img-preview" src="${{P}}/filestore/api/raw?path=${{encodeURIComponent(path)}}">`;
+    body_html = `<img class="fs-img-preview" src="${{P}}/filestore/api/raw?path=${{encodeURIComponent(path)}}">`;
   }} else if (info.editable) {{
     const body = await fsFetch(P+'/filestore/api/read?path='+encodeURIComponent(path));
-    html += `
+    body_html = `
       <textarea class="fs-editor form-control" id="fs-edit">${{(typeof body==='string'?body:JSON.stringify(body,null,2)).replace(/</g,'&lt;')}}</textarea>
-      <div class="mt-2 text-end">
+      <div class="mt-2 text-end flex-shrink-0">
         <button class="btn btn-primary btn-sm" onclick="fsSave('${{path}}')" ${{RO?'disabled':''}}><i class="bi bi-save"></i> Save</button>
       </div>`;
   }} else {{
-    html += '<div class="alert alert-secondary">Binary file — use Download.</div>';
+    body_html = '<div class="alert alert-secondary">Binary file — use Download.</div>';
   }}
-  document.getElementById('fs-detail').innerHTML = html;
+  document.getElementById('fs-detail').innerHTML = header + `<div class="fs-detail-body">${{body_html}}</div>`;
 }}
 async function fsSave(path) {{
   const pw = await fsRechall('Save "' + path + '"?');
@@ -317,6 +357,8 @@ async def _api_ls(req: Request):
         p = _safe_path(path)
     except ValueError as exc:
         return _apply_sec_headers(JSONResponse({"error": str(exc)}, status_code=400))
+    forbidden = _scope_forbidden(req, sess, p)
+    if forbidden: return forbidden
     if not p.is_dir():
         return _apply_sec_headers(JSONResponse({"error": "not a directory"}, status_code=400))
     entries = []
@@ -324,6 +366,8 @@ async def _api_ls(req: Request):
         try:
             st = child.stat()
         except OSError:
+            continue
+        if not _scope_allows(child, sess):
             continue
         entries.append({
             "name": child.name,
@@ -347,6 +391,8 @@ async def _api_info(req: Request):
         p = _safe_path(req.query_params.get("path", "/"))
     except ValueError as exc:
         return _apply_sec_headers(JSONResponse({"error": str(exc)}, status_code=400))
+    forbidden = _scope_forbidden(req, sess, p)
+    if forbidden: return forbidden
     if not p.exists():
         return _apply_sec_headers(JSONResponse({"error": "not found"}, status_code=404))
     st = p.stat()
@@ -368,6 +414,8 @@ async def _api_read(req: Request):
         p = _safe_path(req.query_params.get("path", ""))
     except ValueError as exc:
         return _apply_sec_headers(PlainTextResponse(str(exc), status_code=400))
+    if not _scope_allows(p, sess):
+        return _apply_sec_headers(PlainTextResponse("forbidden", status_code=403))
     if not p.is_file():
         return _apply_sec_headers(PlainTextResponse("not a file", status_code=400))
     if p.suffix.lower() not in EDITABLE_EXT:
@@ -386,6 +434,8 @@ async def _api_raw(req: Request):
         p = _safe_path(req.query_params.get("path", ""))
     except ValueError as exc:
         return _apply_sec_headers(PlainTextResponse(str(exc), status_code=400))
+    if not _scope_allows(p, sess):
+        return _apply_sec_headers(PlainTextResponse("forbidden", status_code=403))
     if not p.is_file():
         return _apply_sec_headers(PlainTextResponse("not found", status_code=404))
     return FileResponse(p, filename=p.name)
@@ -400,6 +450,8 @@ async def _api_write(req: Request):
         p = _safe_path(req.query_params.get("path", ""))
     except ValueError as exc:
         return _apply_sec_headers(JSONResponse({"error": str(exc)}, status_code=400))
+    forbidden = _scope_forbidden(req, sess, p)
+    if forbidden: return forbidden
     if p.suffix.lower() not in EDITABLE_EXT:
         return _apply_sec_headers(JSONResponse({"error": "extension not editable"}, status_code=415))
     body = await req.body()
@@ -424,6 +476,8 @@ async def _api_upload(req: Request):
         target_dir = _safe_path(req.query_params.get("path", "/"))
     except ValueError as exc:
         return _apply_sec_headers(JSONResponse({"error": str(exc)}, status_code=400))
+    forbidden = _scope_forbidden(req, sess, target_dir)
+    if forbidden: return forbidden
     if not target_dir.is_dir():
         return _apply_sec_headers(JSONResponse({"error": "target not a directory"}, status_code=400))
     form = await req.form()
@@ -459,6 +513,8 @@ async def _api_rm(req: Request):
         p = _safe_path(req.query_params.get("path", ""))
     except ValueError as exc:
         return _apply_sec_headers(JSONResponse({"error": str(exc)}, status_code=400))
+    forbidden = _scope_forbidden(req, sess, p)
+    if forbidden: return forbidden
     if p == SANDBOX_ROOT:
         return _apply_sec_headers(JSONResponse({"error": "refuse to delete sandbox root"}, status_code=400))
     if not p.exists():
@@ -484,6 +540,8 @@ async def _api_mkdir(req: Request):
         p = _safe_path(req.query_params.get("path", ""))
     except ValueError as exc:
         return _apply_sec_headers(JSONResponse({"error": str(exc)}, status_code=400))
+    forbidden = _scope_forbidden(req, sess, p)
+    if forbidden: return forbidden
     try:
         p.mkdir(parents=True, exist_ok=False)
     except FileExistsError:
@@ -506,6 +564,8 @@ async def _api_mv(req: Request):
         dst = _safe_path(body.get("dst", ""))
     except ValueError as exc:
         return _apply_sec_headers(JSONResponse({"error": str(exc)}, status_code=400))
+    if not _scope_allows(src, sess) or not _scope_allows(dst, sess):
+        return _apply_sec_headers(JSONResponse({"error": "forbidden: outside your scope"}, status_code=403))
     if not src.exists():
         return _apply_sec_headers(JSONResponse({"error": "src not found"}, status_code=404))
     if dst.exists():
