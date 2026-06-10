@@ -5,8 +5,13 @@ Filters the proxy tool catalogue so only `main__*` tools (always-on) plus the
 currently-active tenant's tools are exposed to the MCP client. Reduces token
 cost from ~1028 (122 main + 6×151 clients) to ~278 (122 main + 1×151 + 4 control).
 
-Persistence: /data/active_tenant.json (atomic replace + 0o600).
-Concurrency: threading.RLock around state mutation.
+Persistence: the ACTIVE-TENANT SELECTION is PER-SESSION — stored in the
+session_store `session_state` table (namespace 'tenant', key 'active') via
+callbacks wired from server.py. One session's tenant_use() therefore never
+changes any other session's active tenant (closes the cross-tenant takeover).
+The discovered tool snapshots (_cache/_health) stay process-global and
+tenant-keyed — shared discovery is correct and preserves the token-cost win.
+Concurrency: threading.RLock around _cache/_health mutation.
 Discovery: lazy — tenant tools are discovered on first `tenant_use(name)` and
 cached until `tenant_refresh(name)`.
 
@@ -37,43 +42,48 @@ _lock = threading.RLock()
 _cache: dict[str, list[Tool]] = {}            # tenant name -> Tool defs (snapshot)
 _health: dict[str, dict] = {}                 # tenant name -> {healthy, tool_count, last_refresh, error}
 
+_TENANT_NS, _TENANT_KEY = "tenant", "active"
+
 # Callbacks — wired by server.py at startup so we don't import circularly.
 _get_proxy_services: Callable[[], dict] | None = None
 _discover_one: Callable[[str], list[Tool]] | None = None
+# Per-session selection store callbacks: (session_key, ns, key) -> value / set.
+_get_session_state: Callable[[str, str, str], dict | None] | None = None
+_set_session_state: Callable[[str, str, str, object], None] | None = None
 
 
 # ─── Wiring ────────────────────────────────────────────────────────────────
 
 def wire(*, get_proxy_services: Callable[[], dict],
-         discover_one: Callable[[str], list[Tool]]) -> None:
+         discover_one: Callable[[str], list[Tool]],
+         get_session_state: Callable[[str, str, str], dict | None] | None = None,
+         set_session_state: Callable[[str, str, str, object], None] | None = None) -> None:
     """Inject server.py dependencies. Call once at startup."""
     global _get_proxy_services, _discover_one
+    global _get_session_state, _set_session_state
     _get_proxy_services = get_proxy_services
     _discover_one = discover_one
+    _get_session_state = get_session_state
+    _set_session_state = set_session_state
 
 
-# ─── Persistence (atomic, mirrors admin_ui.py pattern) ──────────────────
+# ─── Per-session selection (session_state table) ─────────────────────────
 
-def _read_active() -> str | None:
-    try:
-        with open(ACTIVE_TENANT_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data.get("name") or None
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+def _read_active(session_key: str | None) -> str | None:
+    """Active tenant for THIS session. None when no session ctx (fail-safe)."""
+    if session_key is None or _get_session_state is None:
         return None
-
-
-def _write_active(name: str | None) -> None:
-    ACTIVE_TENANT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = ACTIVE_TENANT_FILE.with_suffix(".json.tmp")
-    payload = {"name": name, "ts": int(time.time())}
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, sort_keys=True)
-    os.replace(tmp, ACTIVE_TENANT_FILE)
     try:
-        os.chmod(ACTIVE_TENANT_FILE, 0o600)
-    except OSError:
-        pass
+        val = _get_session_state(session_key, _TENANT_NS, _TENANT_KEY)
+    except Exception:
+        return None
+    return (val or {}).get("name") or None
+
+
+def _write_active(session_key: str, name: str | None) -> None:
+    if _set_session_state is None:
+        return
+    _set_session_state(session_key, _TENANT_NS, _TENANT_KEY, {"name": name})
 
 
 # ─── Public API ────────────────────────────────────────────────────────────
@@ -82,26 +92,25 @@ def always_on() -> set[str]:
     return set(ALWAYS_ON)
 
 
-def get_active_tenant() -> str | None:
-    with _lock:
-        return _read_active()
+def get_active_tenant(session_key: str | None = None) -> str | None:
+    return _read_active(session_key)
 
 
-def active_tools() -> list[Tool]:
-    """Return cached Tool defs of the active tenant, or []."""
+def active_tools(session_key: str | None = None) -> list[Tool]:
+    """Return cached Tool defs of THIS session's active tenant, or []."""
+    name = _read_active(session_key)
+    if not name or name in ALWAYS_ON:
+        return []
     with _lock:
-        name = _read_active()
-        if not name or name in ALWAYS_ON:
-            return []
         return list(_cache.get(name, []))
 
 
-def list_tenants_with_health() -> list[dict]:
+def list_tenants_with_health(session_key: str | None = None) -> list[dict]:
     """Snapshot of every configured tenant's status."""
     if _get_proxy_services is None:
         return []
     services = _get_proxy_services()
-    active = _read_active()
+    active = _read_active(session_key)
     out = []
     for name, cfg in services.items():
         h = _health.get(name, {})
@@ -149,10 +158,12 @@ def refresh_tenant_tools(name: str) -> dict:
         return {"name": name, "error": str(e), "healthy": False}
 
 
-async def set_active_tenant(name: str, mcp_server=None) -> dict:
-    """Validate, persist, warm cache, emit list_changed. async to allow notify."""
+async def set_active_tenant(name: str, session_key: str, mcp_server=None) -> dict:
+    """Validate, persist (per session), warm cache, emit list_changed."""
     if _get_proxy_services is None:
         return {"error": "tenant_router not wired"}
+    if not session_key:
+        return {"error": "no MCP session context; cannot set active tenant"}
     services = _get_proxy_services()
     if name not in services:
         return {
@@ -170,9 +181,10 @@ async def set_active_tenant(name: str, mcp_server=None) -> dict:
         if not result.get("healthy"):
             return {"error": f"discovery failed for '{name}'", "detail": result}
 
-    previous = _read_active()
-    _write_active(name)
-    logger.info("tenant_router: active tenant %s -> %s", previous, name)
+    previous = _read_active(session_key)
+    _write_active(session_key, name)
+    logger.info("tenant_router: session=%s active tenant %s -> %s",
+                session_key, previous, name)
 
     # Notify connected MCP client(s) so they re-fetch tools/list.
     notified = False
@@ -192,9 +204,11 @@ async def set_active_tenant(name: str, mcp_server=None) -> dict:
     }
 
 
-async def clear_active_tenant(mcp_server=None) -> dict:
-    previous = _read_active()
-    _write_active(None)
+async def clear_active_tenant(session_key: str, mcp_server=None) -> dict:
+    if not session_key:
+        return {"error": "no MCP session context"}
+    previous = _read_active(session_key)
+    _write_active(session_key, None)
     if mcp_server is not None:
         try:
             await mcp_server.request_context.session.send_tool_list_changed()
@@ -252,30 +266,32 @@ def get_control_tools() -> list[Tool]:
 CONTROL_TOOL_NAMES = {"tenant_list", "tenant_use", "tenant_current", "tenant_refresh"}
 
 
-async def handle(name: str, arguments: dict, mcp_server=None) -> dict:
-    """Central dispatcher for the 4 control plane tools."""
+async def handle(name: str, arguments: dict, session_key: str | None = None,
+                 mcp_server=None) -> dict:
+    """Central dispatcher for the 4 control plane tools (per-session selection)."""
     arguments = arguments or {}
     if name == "tenant_list":
-        return {"tenants": list_tenants_with_health(), "always_on": sorted(ALWAYS_ON)}
+        return {"tenants": list_tenants_with_health(session_key),
+                "always_on": sorted(ALWAYS_ON)}
     if name == "tenant_use":
         target = arguments.get("name") or ""
         if not target or target.lower() in ("null", "none", ""):
-            return await clear_active_tenant(mcp_server)
-        return await set_active_tenant(target, mcp_server)
+            return await clear_active_tenant(session_key, mcp_server)
+        return await set_active_tenant(target, session_key, mcp_server)
     if name == "tenant_current":
-        active = get_active_tenant()
+        active = get_active_tenant(session_key)
         return {
             "active": active,
             "tool_count": len(_cache.get(active, [])) if active else 0,
             "always_on": sorted(ALWAYS_ON),
         }
     if name == "tenant_refresh":
-        target = arguments.get("name") or get_active_tenant()
+        target = arguments.get("name") or get_active_tenant(session_key)
         if not target:
             return {"error": "no active tenant and no name provided"}
         result = refresh_tenant_tools(target)
         # If we refreshed the active tenant, notify clients.
-        if mcp_server is not None and target == get_active_tenant():
+        if mcp_server is not None and target == get_active_tenant(session_key):
             try:
                 await mcp_server.request_context.session.send_tool_list_changed()
                 result["notified"] = True

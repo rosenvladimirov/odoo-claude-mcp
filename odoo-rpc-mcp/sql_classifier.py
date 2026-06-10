@@ -90,6 +90,24 @@ def classify_sql(query: str) -> dict:
             "role_required": "admin", "parse_error": str(e),
         }
 
+    # Reject multi-statement up front. sqlglot and psycopg disagree on
+    # statement boundaries (e.g. `SELECT 1 -- ;\n DELETE ...` is one harmless
+    # SELECT to sqlglot but two live statements to PG), so the only safe
+    # stance is single-statement-only for the gated path. Fail-closed.
+    try:
+        _stmts = [s for s in sqlglot.parse(query, dialect="postgres") if s is not None]
+    except Exception as e:
+        return {
+            "op": "unknown", "tables": [], "protected_hits": [],
+            "role_required": "admin", "parse_error": f"multi-parse failed: {e}",
+        }
+    if len(_stmts) > 1:
+        return {
+            "op": "multi", "tables": [], "protected_hits": [],
+            "role_required": "admin",
+            "parse_error": "multiple statements not allowed",
+        }
+
     op_key = (parsed.key or "").lower() if hasattr(parsed, "key") else ""
 
     # Bucket by category — first by AST type (more reliable across sqlglot
@@ -130,13 +148,39 @@ def classify_sql(query: str) -> dict:
         for t in parsed.find_all(exp.Table):
             tables.add(t.name.lower())
 
+    # FULL-AST mutation scan — a top-level SELECT/WITH can still hide a
+    # data-modifying CTE (`WITH t AS (DELETE ... RETURNING id) SELECT ...`),
+    # which top-node bucketing classifies as a harmless read. Walk the WHOLE
+    # tree for any write/DDL node and reclassify. Also catch `SELECT ... INTO`
+    # (creates a table = DDL-equivalent).
+    _WRITE_NODES = (exp.Insert, exp.Update, exp.Delete, exp.Merge)
+    _DDL_NODES = (exp.Create, exp.Drop, exp.Alter, exp.TruncateTable)
+    _mutating = list(parsed.find_all(*_WRITE_NODES))
+    _ddl_any = list(parsed.find_all(*_DDL_NODES))
+    _select_into = bool(parsed.args.get("into")) if isinstance(parsed, exp.Select) else False
+
+    if _ddl_any or _select_into:
+        bucket = "ddl"
+    elif _mutating and bucket == "select":
+        # write smuggled inside a read — reclassify and collect its targets
+        bucket = "write_in_read"
+        for _node in _mutating:
+            _tgt = _node.find(exp.Table)
+            if _tgt is not None:
+                target_tables.add(_tgt.name.lower())
+
     protected_hits = sorted(target_tables & PROTECTED_TABLES) if target_tables \
         else sorted(tables & PROTECTED_TABLES) if bucket == "ddl" else []
 
     # Decide role.
     if bucket == "select":
         role = "user"
-    elif bucket == "ddl":
+    elif bucket in ("ddl", "multi"):
+        role = "admin"
+    elif bucket == "write_in_read":
+        # A write disguised as a read is, by construction, an evasion attempt:
+        # always require admin regardless of target table. A USER who legitimately
+        # needs to write should issue a plain INSERT/UPDATE/DELETE.
         role = "admin"
     elif bucket in ("insert", "update", "delete"):
         role = "admin" if protected_hits else "user"

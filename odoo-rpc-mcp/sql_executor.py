@@ -70,7 +70,7 @@ def _get_conn():
 
 def execute(query: str, params: list | None = None,
             fetch: bool = True, timeout: int = 30,
-            role: str = "admin") -> dict:
+            role: str = "user") -> dict:
     """Run a SQL query under savepoint protection + classifier check.
 
     Returns a dict — never raises. Every failure path returns
@@ -109,6 +109,15 @@ def execute(query: str, params: list | None = None,
                 if timeout and timeout > 0:
                     cur.execute("SET LOCAL statement_timeout = %s",
                                 (timeout * 1000,))
+                # Defense-in-depth: for a non-admin caller running a query the
+                # classifier judged a read, force the transaction read-only at
+                # the DB level. PostgreSQL then rejects ANY write the classifier
+                # may have missed (data-modifying function calls, sqlglot/psycopg
+                # comment-boundary divergence, etc.). Declared writes (op in
+                # insert/update/delete → user on non-protected tables) are NOT
+                # made read-only, so legitimate user writes still work.
+                if role != "admin" and info["op"] == "select":
+                    cur.execute("SET LOCAL transaction_read_only = on")
                 cur.execute(query, params or [])
                 rowcount = cur.rowcount
                 if fetch and cur.description:

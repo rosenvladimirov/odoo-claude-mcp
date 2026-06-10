@@ -71,13 +71,15 @@ def test_dangerous_method_exact_includes_module_lifecycle(ts):
 
 
 @pytest.mark.parametrize("model,method,want_blocked,want_reason", [
-    # T2-2 false-positive regression — these MUST pass for USER role
-    ("res.partner", "pre_install_hook", False, ""),
-    ("res.partner", "action_install_check", False, ""),
-    ("account.move", "_uninstall", False, ""),
-    ("product.template", "install_workflow", False, ""),
-    ("res.partner", "upgrade_metadata", False, ""),
-    # True positives — must STILL be blocked
+    # ALLOWLIST policy (B.0-2 fix): odoo_execute is read-only for USER role.
+    # Any method NOT in SAFE_EXECUTE_METHODS is refused — these legit-looking
+    # but non-readonly names are now blocked (they mutate or are unknown).
+    ("res.partner", "pre_install_hook", True, "method_not_in_readonly_allowlist"),
+    ("res.partner", "action_install_check", True, "method_not_in_readonly_allowlist"),
+    ("account.move", "_uninstall", True, "method_not_in_readonly_allowlist"),
+    ("product.template", "install_workflow", True, "method_not_in_readonly_allowlist"),
+    ("res.partner", "upgrade_metadata", True, "method_not_in_readonly_allowlist"),
+    # The specific blocks still fire first (precise reason preserved)
     ("ir.module.module", "button_install", True, "dangerous_method_exact"),
     ("ir.module.module", "button_immediate_upgrade", True, "dangerous_method_exact"),
     ("ir.module.module", "module_uninstall", True, "dangerous_method_exact"),
@@ -92,10 +94,19 @@ def test_dangerous_method_exact_includes_module_lifecycle(ts):
     ("ir.module.module", "unlink", True, "protected_unlink"),
     # config_settings.execute
     ("res.config.settings", "execute", True, "dangerous_method_exact"),
-    # Non-protected baseline
-    ("res.partner", "write", False, ""),
+    # Mutating/business/dispatch methods on non-protected models — now blocked
+    ("res.partner", "write", True, "method_not_in_readonly_allowlist"),
+    ("account.move", "action_post", True, "method_not_in_readonly_allowlist"),
+    ("sale.order", "action_confirm", True, "method_not_in_readonly_allowlist"),
+    ("res.partner", "_unlink", True, "method_not_in_readonly_allowlist"),
+    ("ir.actions.server", "run", True, "method_not_in_readonly_allowlist"),
+    ("res.partner", "name_create", True, "method_not_in_readonly_allowlist"),
+    # Read-only allowlist — still allowed for USER
     ("res.partner", "read", False, ""),
     ("res.partner", "search", False, ""),
+    ("res.partner", "search_read", False, ""),
+    ("account.move", "read_group", False, ""),
+    ("res.partner", "fields_get", False, ""),
 ])
 def test_is_protected_execute_matrix(ts, model, method, want_blocked, want_reason):
     blocked, _, _, reason = ts.is_protected_execute(

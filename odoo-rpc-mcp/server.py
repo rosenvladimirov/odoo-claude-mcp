@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.0.0-alpha.9"
+__version__ = "3.0.0-alpha.10"
 
 import asyncio
 import hmac
@@ -5014,6 +5014,18 @@ async def list_tools() -> list[Tool]:
     # Apply feature flags
     if DISABLED_FEATURES:
         base = [t for t in base if not _tool_disabled(t.name)]
+    # Resolve THIS session for per-session tenant + elevation. list_tools is
+    # not wrapped by the call_tool session gate, so resolve here; fail-closed
+    # (no session → no tenant tools, treated as not-elevated) on a session-less
+    # or orphaned tools/list probe.
+    _skey = None
+    _principal = None
+    try:
+        _lsc = await resolve_session_context()
+        _skey = _lsc.session_key
+        _principal = _lsc.principal
+    except Exception:
+        _skey = None
     # v3 tenant routing: always-on tenants (e.g. main__*) are exposed
     # unconditionally; the active tenant's tools are added via tenant_router;
     # other tenants stay hidden until promoted via tenant_use.
@@ -5023,14 +5035,17 @@ async def list_tools() -> list[Tool]:
             prefix = t.name.split("__", 1)[0] if "__" in t.name else None
             if prefix in always_on:
                 base.append(t)
-    base.extend(tenant_router.active_tools())
+    base.extend(tenant_router.active_tools(_skey))
     base.extend(tenant_router.get_control_tools())
     base.append(sql_executor.get_tool_def())
     # v3 provisioning admin tools (issue/revoke/list API keys).
     # These are tagged via tool_security so USER role hides them.
     base.extend(api_key_manager.get_admin_tools())
     # v3 security: filter destructive tools for USER role (admin/legacy keep all).
-    base = tool_security.filter_tools_for_role(base, elevated=elevation.is_elevated())
+    _role = tool_security.get_role(
+        principal=_principal, admin_principals=_admin_principals())
+    base = tool_security.filter_tools_for_role(
+        base, role=_role, elevated=elevation.is_elevated(_skey))
     # Always expose elevation control tools (so USER can request elevation).
     base.extend(elevation.get_control_tools())
     return base
@@ -5061,8 +5076,31 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         sc = await resolve_session_context()
         _ctx_token = _session_ctx.set(sc)
         try:
-            # ── v3 provisioning admin tools (admin/elevated only) ──
+            # ── v3 provisioning admin tools (ADMIN PRINCIPAL ONLY) ──
+            # SECURITY: these mint/revoke plaintext API keys (role=admin,
+            # scope=['*']). They must require a verified admin principal — NOT
+            # merely MCP_ROLE env, NOT merely elevation. This gate sits BEFORE
+            # api_key_manager.handle(), which has zero internal authz.
             if name in api_key_manager.ADMIN_TOOL_NAMES:
+                _prov_denied = None
+                if not sc.principal:
+                    _prov_denied = {"error": "denied", "reason": "no_identity",
+                                    "tool": name,
+                                    "hint": "Provisioning requires an authenticated "
+                                            "admin principal listed in MCP_ADMIN_PRINCIPALS."}
+                elif sc.principal not in _admin_principals():
+                    _prov_denied = {"error": "denied", "reason": "not_admin_principal",
+                                    "tool": name, "principal": sc.principal,
+                                    "hint": "Only admin principals may issue/revoke/"
+                                            "list provisioning API keys."}
+                if _prov_denied is not None:
+                    try:
+                        import metrics
+                        metrics.observe_tool_call(name, "denied")
+                    except Exception:
+                        pass
+                    return [TextContent(type="text", text=json.dumps(
+                        _prov_denied, ensure_ascii=False, indent=2))]
                 result = api_key_manager.handle(name, arguments)
                 text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
                 try:
@@ -5071,9 +5109,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 except Exception:
                     pass
                 return [TextContent(type="text", text=text)]
-            # ── v3 elevation control plane (always available, no role gate) ──
+            # ── v3 elevation control plane (per-session; reachable by USER) ──
             if name in elevation.CONTROL_TOOL_NAMES:
-                result = elevation.handle(name, arguments)
+                result = elevation.handle(name, arguments,
+                                          key=sc.session_key, principal=sc.principal)
                 text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
                 try:
                     import metrics
@@ -5082,8 +5121,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     pass
                 return [TextContent(type="text", text=text)]
             # ── v3 security gate (USER role: refuse destructive + protected unlink) ──
+            _role = tool_security.get_role(
+                principal=sc.principal, admin_principals=_admin_principals())
             allowed, sec_info = tool_security.check_call(
-                name, arguments, elevated=elevation.is_elevated()
+                name, arguments, role=_role,
+                elevated=elevation.is_elevated(sc.session_key)
             )
             if not allowed:
                 try:
@@ -5095,7 +5137,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     {"error": "denied", **sec_info}, ensure_ascii=False, indent=2))]
             # ── v3 tenant routing control plane ──
             if name in tenant_router.CONTROL_TOOL_NAMES:
-                result = await tenant_router.handle(name, arguments, mcp_server)
+                result = await tenant_router.handle(name, arguments,
+                                                    sc.session_key, mcp_server)
                 text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
                 try:
                     import metrics
@@ -5105,7 +5148,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 return [TextContent(type="text", text=text)]
             # ── v3 SQL executor (classifier-gated) ──
             if name == "odoo_sql_query":
-                role = os.environ.get("MCP_ROLE", "admin").strip().lower() or "admin"
+                role = "admin" if elevation.is_elevated(sc.session_key) else _role
                 result = await asyncio.to_thread(
                     sql_executor.execute,
                     arguments.get("query", ""),
@@ -11399,6 +11442,10 @@ if __name__ == "__main__":
     tenant_router.wire(
         get_proxy_services=_get_proxy_services,
         discover_one=_discover_one,
+        get_session_state=(lambda sk, ns, k: session_store_inst.get_state(sk, ns, k))
+            if session_store_inst is not None else None,
+        set_session_state=(lambda sk, ns, k, v: session_store_inst.set_state(sk, ns, k, v))
+            if session_store_inst is not None else None,
     )
 
     # ── Discover proxy tools — eager only for always-on tenants (main).
@@ -11424,14 +11471,22 @@ if __name__ == "__main__":
                     break
             except Exception as e:
                 logger.warning(f"Proxy attempt {attempt+1}: {e}")
-        # Restore active tenant from disk (warm its cache too)
-        active = tenant_router.get_active_tenant()
-        if active and active not in eager:
-            try:
-                tenant_router.refresh_tenant_tools(active)
-                logger.info(f"v3: restored active tenant '{active}' from disk")
-            except Exception as e:
-                logger.warning(f"v3: failed to restore active tenant '{active}': {e}")
+        # Migrate the legacy GLOBAL active-tenant file (pre per-session model):
+        # the active tenant is now per-session state, so we do NOT auto-activate
+        # any session. We only pre-warm the named tenant's shared cache (perf),
+        # then rename the file so it's never read again as a source of truth.
+        try:
+            _legacy = tenant_router.ACTIVE_TENANT_FILE
+            if _legacy.exists():
+                import json as _json
+                _name = (_json.loads(_legacy.read_text()) or {}).get("name")
+                if _name and _name not in eager:
+                    tenant_router.refresh_tenant_tools(_name)
+                    logger.info(f"v3: pre-warmed legacy tenant '{_name}' cache (no session auto-activated)")
+                _legacy.rename(_legacy.with_suffix(".json.migrated"))
+                logger.info("v3: migrated legacy active_tenant.json → .migrated (per-session model)")
+        except Exception as e:
+            logger.warning(f"v3: legacy active-tenant migration skipped: {e}")
         logger.info(f"Proxy startup done: {len(PROXY_TOOLS)} eager tools (always-on={sorted(eager)})")
 
     threading.Thread(target=_startup_discover, daemon=True).start()

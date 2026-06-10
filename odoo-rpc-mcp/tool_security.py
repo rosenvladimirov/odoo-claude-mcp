@@ -146,9 +146,21 @@ PROTECTED_FROM_WRITE = _csv(
 )
 
 
-def get_role() -> str:
-    """Returns 'admin' | 'user' | 'legacy'. Default depends on VERSION marker."""
-    return os.environ.get("MCP_ROLE", "admin").strip().lower() or "admin"
+def get_role(principal: str | None = None,
+             admin_principals: set | None = None) -> str:
+    """Returns 'admin' | 'user' | 'legacy'.
+
+    Fail-closed: default is 'user'. Admin is granted only when MCP_ROLE is
+    explicitly set, OR the bound (unified-auth) principal is a verified admin
+    principal (MCP_ADMIN_PRINCIPALS). Without either, an unset MCP_ROLE no
+    longer silently grants full admin (the old fail-open default).
+    """
+    env = os.environ.get("MCP_ROLE", "").strip().lower()
+    if env:
+        return env
+    if principal and admin_principals and principal in admin_principals:
+        return "admin"
+    return "user"
 
 
 def is_destructive(tool_name: str) -> bool:
@@ -176,15 +188,27 @@ def is_protected_unlink(tool_name: str, arguments: dict | None) -> tuple[bool, s
     return False, model
 
 
-def is_protected_execute(tool_name: str, arguments: dict | None) -> tuple[bool, str, str, str]:
-    """For odoo_execute, refuse dangerous method+model combinations.
+# Read-only method allowlist for USER role via odoo_execute. The generic
+# dispatcher can call ANY model method, so a denylist is inherently leaky
+# (action_post/button_*/_write/run/name_create/copy/message_post all mutate
+# without appearing in any denylist). USER already has dedicated, model-gated
+# odoo_create/write/unlink tools; the generic dispatcher is therefore limited
+# to non-mutating ORM methods. Everything else requires mcp_elevate.
+SAFE_EXECUTE_METHODS: set = _csv("MCP_SAFE_EXECUTE_METHODS", {
+    "search", "read", "search_read", "search_count",
+    "fields_get", "name_get", "name_search", "read_group",
+    "default_get", "get_field_translations", "fields_view_get",
+    "get_views", "check_access_rights", "exists",
+})
 
-    Block conditions (any of):
-      1. method=unlink on PROTECTED_FROM_UNLINK model
-      2. method in {write, create} on PROTECTED_FROM_WRITE model
-      3. method contains DANGEROUS_METHOD_SUBSTRINGS (upgrade/install/uninstall)
-      4. method in DANGEROUS_METHOD_EXACT (execute, execute_kw, module_*)
-      5. model=res.config.settings + method.startswith('execute')
+
+def is_protected_execute(tool_name: str, arguments: dict | None) -> tuple[bool, str, str, str]:
+    """For odoo_execute, allow only a read-only method allowlist for USER role.
+
+    The specific blocks below still fire first (so their precise reasons are
+    preserved for diagnostics); any method NOT in SAFE_EXECUTE_METHODS is then
+    refused (fail-closed). ADMIN / LEGACY / elevated callers bypass this entirely
+    in check_call() before is_protected_execute is consulted.
 
     Returns (is_blocked, model, method, reason)."""
     if tool_name != "odoo_execute":
@@ -204,6 +228,12 @@ def is_protected_execute(tool_name: str, arguments: dict | None) -> tuple[bool, 
 
     if model == "res.config.settings" and method.startswith("execute"):
         return True, model, method, "config_settings_execute"
+
+    # Allowlist gate (fail-closed): mutating/business/dispatch methods
+    # (action_*, button_*, _write, run, name_create, copy, message_post,
+    # get_param secret-reads, ...) all fall through to here and are denied.
+    if method not in SAFE_EXECUTE_METHODS:
+        return True, model, method, "method_not_in_readonly_allowlist"
 
     return False, model, method, ""
 
