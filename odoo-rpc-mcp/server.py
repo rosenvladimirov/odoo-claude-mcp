@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.0.0-alpha.12"
+__version__ = "3.0.0-alpha.13"
 
 import asyncio
 import hmac
@@ -52,6 +52,7 @@ import provisioning_api
 import fleet_manager
 import secrets_registry
 import module_deploy
+import client_onboard
 
 # ─── Feature flags ───────────────────────────────────────────
 # MCP_DISABLE_FEATURES=ssh,portainer,github,google,telegram,memory,ai,public,website,web,proxy
@@ -5048,6 +5049,7 @@ async def list_tools() -> list[Tool]:
     base.extend(fleet_manager.get_admin_tools())
     base.extend(secrets_registry.get_admin_tools())
     base.extend(module_deploy.get_admin_tools())
+    base.extend(client_onboard.get_admin_tools())
     # v3 security: filter destructive tools for USER role (admin/legacy keep all).
     _role = tool_security.get_role(
         principal=_principal, admin_principals=_admin_principals())
@@ -5098,6 +5100,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 _admin_group = secrets_registry
             elif name in module_deploy.ADMIN_TOOL_NAMES:
                 _admin_group = module_deploy
+            elif name in client_onboard.ADMIN_TOOL_NAMES:
+                _admin_group = client_onboard
             if _admin_group is not None:
                 _prov_denied = None
                 if not sc.principal:

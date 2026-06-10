@@ -113,6 +113,15 @@ def test_module_deploy_history_admin_allowed(monkeypatch):
     assert out.get("error") != "denied"
 
 
+def test_onboard_tools_user_denied(monkeypatch):
+    out = _run("client_onboard", {"slug_or_vat": "x", "email": "a@b.com"},
+               "lyubomir", monkeypatch)
+    assert out.get("error") == "denied"
+    out2 = _run("client_onboard_status", {"slug_or_vat": "x"},
+                "lyubomir", monkeypatch)
+    assert out2.get("error") == "denied"
+
+
 def test_user_can_request_elevation(monkeypatch):
     """The elevation control plane stays reachable by a plain USER."""
     out = _run("mcp_elevate", {"reason": "need to fix data", "ttl": 60},

@@ -66,6 +66,9 @@ DEFAULT_USER_BLOCKED_TOOLS: set[str] = {
     "module_deploy_status",
     "module_deploy_rollback",
     "module_deploy_history",
+    # v3 client onboarding wizard
+    "client_onboard",
+    "client_onboard_status",
 }
 
 DEFAULT_USER_BLOCKED_PROXY_PREFIXES: set[str] = {
