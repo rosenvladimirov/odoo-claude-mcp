@@ -77,6 +77,29 @@ def test_list_revoke_user_denied(monkeypatch):
     assert out2.get("error") == "denied"
 
 
+def test_fleet_tools_user_denied(monkeypatch):
+    out = _run("fleet_list", {}, "lyubomir", monkeypatch)
+    assert out.get("error") == "denied"
+    out2 = _run("fleet_upgrade", {"stack": "x", "target_tag": "y"},
+                "lyubomir", monkeypatch)
+    assert out2.get("error") == "denied"
+
+
+def test_secrets_tools_user_denied(monkeypatch):
+    out = _run("secrets_list", {}, "lyubomir", monkeypatch)
+    assert out.get("error") == "denied"
+    out2 = _run("secrets_rotate", {"target_stack": "x", "kind": "stack_token"},
+                "lyubomir", monkeypatch)
+    assert out2.get("error") == "denied"
+
+
+def test_fleet_list_admin_allowed(monkeypatch):
+    out = _run("fleet_list", {}, "rosen", monkeypatch)
+    # admin principal passes the gate; with no Portainer env it returns a
+    # structured result (not a 'denied' authz error).
+    assert out.get("error") != "denied"
+
+
 def test_user_can_request_elevation(monkeypatch):
     """The elevation control plane stays reachable by a plain USER."""
     out = _run("mcp_elevate", {"reason": "need to fix data", "ttl": 60},

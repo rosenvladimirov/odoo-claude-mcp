@@ -51,6 +51,16 @@ DEFAULT_USER_BLOCKED_TOOLS: set[str] = {
     "provision_issue_api_key",
     "provision_revoke_api_key",
     "provision_list_api_keys",
+    # v3 fleet management (mutates live stacks)
+    "fleet_list",
+    "fleet_status",
+    "fleet_upgrade",
+    "fleet_rollback",
+    # v3 secrets registry (rotates stack tokens)
+    "secrets_list",
+    "secrets_register",
+    "secrets_rotate",
+    "secrets_revoke",
 }
 
 DEFAULT_USER_BLOCKED_PROXY_PREFIXES: set[str] = {

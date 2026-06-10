@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.0.0-alpha.10"
+__version__ = "3.0.0-alpha.11"
 
 import asyncio
 import hmac
@@ -49,6 +49,8 @@ import tool_security
 import elevation
 import api_key_manager
 import provisioning_api
+import fleet_manager
+import secrets_registry
 
 # ─── Feature flags ───────────────────────────────────────────
 # MCP_DISABLE_FEATURES=ssh,portainer,github,google,telegram,memory,ai,public,website,web,proxy
@@ -5041,6 +5043,9 @@ async def list_tools() -> list[Tool]:
     # v3 provisioning admin tools (issue/revoke/list API keys).
     # These are tagged via tool_security so USER role hides them.
     base.extend(api_key_manager.get_admin_tools())
+    # v3 fleet management + secrets registry admin tools (admin-principal only).
+    base.extend(fleet_manager.get_admin_tools())
+    base.extend(secrets_registry.get_admin_tools())
     # v3 security: filter destructive tools for USER role (admin/legacy keep all).
     _role = tool_security.get_role(
         principal=_principal, admin_principals=_admin_principals())
@@ -5076,23 +5081,31 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         sc = await resolve_session_context()
         _ctx_token = _session_ctx.set(sc)
         try:
-            # ── v3 provisioning admin tools (ADMIN PRINCIPAL ONLY) ──
-            # SECURITY: these mint/revoke plaintext API keys (role=admin,
-            # scope=['*']). They must require a verified admin principal — NOT
-            # merely MCP_ROLE env, NOT merely elevation. This gate sits BEFORE
-            # api_key_manager.handle(), which has zero internal authz.
+            # ── v3 admin-principal-only tool groups (ADMIN PRINCIPAL ONLY) ──
+            # SECURITY: provisioning (mints admin API keys), fleet management
+            # (mutates live stacks), and secrets registry (rotates tokens) all
+            # require a VERIFIED admin principal — NOT merely MCP_ROLE env, NOT
+            # merely elevation. These gates sit BEFORE the modules' handle(),
+            # which have no internal authz.
+            _admin_group = None
             if name in api_key_manager.ADMIN_TOOL_NAMES:
+                _admin_group = api_key_manager
+            elif name in fleet_manager.ADMIN_TOOL_NAMES:
+                _admin_group = fleet_manager
+            elif name in secrets_registry.ADMIN_TOOL_NAMES:
+                _admin_group = secrets_registry
+            if _admin_group is not None:
                 _prov_denied = None
                 if not sc.principal:
                     _prov_denied = {"error": "denied", "reason": "no_identity",
                                     "tool": name,
-                                    "hint": "Provisioning requires an authenticated "
+                                    "hint": "This admin tool requires an authenticated "
                                             "admin principal listed in MCP_ADMIN_PRINCIPALS."}
                 elif sc.principal not in _admin_principals():
                     _prov_denied = {"error": "denied", "reason": "not_admin_principal",
                                     "tool": name, "principal": sc.principal,
-                                    "hint": "Only admin principals may issue/revoke/"
-                                            "list provisioning API keys."}
+                                    "hint": "Only admin principals may run provisioning / "
+                                            "fleet / secrets tools."}
                 if _prov_denied is not None:
                     try:
                         import metrics
@@ -5101,7 +5114,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         pass
                     return [TextContent(type="text", text=json.dumps(
                         _prov_denied, ensure_ascii=False, indent=2))]
-                result = api_key_manager.handle(name, arguments)
+                result = _admin_group.handle(name, arguments)
                 text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
                 try:
                     import metrics
@@ -11446,6 +11459,11 @@ if __name__ == "__main__":
             if session_store_inst is not None else None,
         set_session_state=(lambda sk, ns, k, v: session_store_inst.set_state(sk, ns, k, v))
             if session_store_inst is not None else None,
+    )
+    # v3 fleet manager: inventory + canary upgrade/rollback over deployed stacks.
+    fleet_manager.wire(
+        get_proxy_services=_get_proxy_services,
+        discover_one=_discover_one,
     )
 
     # ── Discover proxy tools — eager only for always-on tenants (main).
