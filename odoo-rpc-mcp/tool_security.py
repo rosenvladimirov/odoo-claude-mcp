@@ -61,6 +61,11 @@ DEFAULT_USER_BLOCKED_TOOLS: set[str] = {
     "secrets_register",
     "secrets_rotate",
     "secrets_revoke",
+    # v3 module deploy (rsync + ephemeral -u on live hosts)
+    "module_deploy",
+    "module_deploy_status",
+    "module_deploy_rollback",
+    "module_deploy_history",
 }
 
 DEFAULT_USER_BLOCKED_PROXY_PREFIXES: set[str] = {

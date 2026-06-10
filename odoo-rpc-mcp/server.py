@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.0.0-alpha.11"
+__version__ = "3.0.0-alpha.12"
 
 import asyncio
 import hmac
@@ -51,6 +51,7 @@ import api_key_manager
 import provisioning_api
 import fleet_manager
 import secrets_registry
+import module_deploy
 
 # ─── Feature flags ───────────────────────────────────────────
 # MCP_DISABLE_FEATURES=ssh,portainer,github,google,telegram,memory,ai,public,website,web,proxy
@@ -5046,6 +5047,7 @@ async def list_tools() -> list[Tool]:
     # v3 fleet management + secrets registry admin tools (admin-principal only).
     base.extend(fleet_manager.get_admin_tools())
     base.extend(secrets_registry.get_admin_tools())
+    base.extend(module_deploy.get_admin_tools())
     # v3 security: filter destructive tools for USER role (admin/legacy keep all).
     _role = tool_security.get_role(
         principal=_principal, admin_principals=_admin_principals())
@@ -5094,6 +5096,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 _admin_group = fleet_manager
             elif name in secrets_registry.ADMIN_TOOL_NAMES:
                 _admin_group = secrets_registry
+            elif name in module_deploy.ADMIN_TOOL_NAMES:
+                _admin_group = module_deploy
             if _admin_group is not None:
                 _prov_denied = None
                 if not sc.principal:
@@ -11464,6 +11468,12 @@ if __name__ == "__main__":
     fleet_manager.wire(
         get_proxy_services=_get_proxy_services,
         discover_one=_discover_one,
+    )
+    # v3 module deploy: rsync addon → ephemeral -u → restart → runtime gate.
+    module_deploy.wire(
+        ssh_execute=_ssh_execute,
+        ensure_ssh_master=_ensure_ssh_master,
+        get_conn=lambda alias: _mgr().get(alias),
     )
 
     # ── Discover proxy tools — eager only for always-on tenants (main).

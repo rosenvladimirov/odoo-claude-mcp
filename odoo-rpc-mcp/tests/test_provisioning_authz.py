@@ -100,6 +100,19 @@ def test_fleet_list_admin_allowed(monkeypatch):
     assert out.get("error") != "denied"
 
 
+def test_module_deploy_tools_user_denied(monkeypatch):
+    out = _run("module_deploy", {"target": "x", "module": "m"},
+               "lyubomir", monkeypatch)
+    assert out.get("error") == "denied"
+    out2 = _run("module_deploy_history", {}, "lyubomir", monkeypatch)
+    assert out2.get("error") == "denied"
+
+
+def test_module_deploy_history_admin_allowed(monkeypatch):
+    out = _run("module_deploy_history", {}, "rosen", monkeypatch)
+    assert out.get("error") != "denied"
+
+
 def test_user_can_request_elevation(monkeypatch):
     """The elevation control plane stays reachable by a plain USER."""
     out = _run("mcp_elevate", {"reason": "need to fix data", "ttl": 60},
