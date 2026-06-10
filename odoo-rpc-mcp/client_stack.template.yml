@@ -53,6 +53,11 @@ services:
       - MCP_OAUTH_CLIENT_ID={{MCP_OAUTH_CLIENT_ID}}
       - MCP_OAUTH_CLIENT_SECRET={{MCP_SECRET_TOKEN}}
       - MCP_ADMIN_TOKEN={{MCP_ADMIN_TOKEN}}
+      # v3 RBAC: client stacks run fail-closed as 'user' (NOT admin). Grant
+      # specific client logins admin via MCP_ADMIN_PRINCIPALS if/when needed;
+      # destructive tools otherwise require mcp_elevate.
+      - MCP_ROLE=user
+      - MCP_ADMIN_PRINCIPALS=
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8094
       - CONNECTIONS_FILE=/data/connections.json
