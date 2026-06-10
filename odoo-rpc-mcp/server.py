@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.0.0-alpha.17"
+__version__ = "3.0.0-alpha.18"
 
 import asyncio
 import hmac
@@ -57,6 +57,7 @@ import backup_manager
 import health_monitor
 import session_handoff
 import tenant_migrate
+import tg_listen_helper
 
 # ─── Feature flags ───────────────────────────────────────────
 # MCP_DISABLE_FEATURES=ssh,portainer,github,google,telegram,memory,ai,public,website,web,proxy
@@ -5066,6 +5067,8 @@ async def list_tools() -> list[Tool]:
     base.extend(elevation.get_control_tools())
     # Session handoff control plane (any authenticated principal).
     base.extend(session_handoff.get_control_tools())
+    # tg-listen runbook helper (any authenticated principal).
+    base.extend(tg_listen_helper.get_control_tools())
     return base
 
 
@@ -5161,6 +5164,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 result = session_handoff.handle(
                     name, arguments,
                     session_key=sc.session_key, principal=sc.principal)
+                text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+                try:
+                    import metrics
+                    metrics.observe_tool_call(name, _m_status)
+                except Exception:
+                    pass
+                return [TextContent(type="text", text=text)]
+            # ── v3 tg-listen helper (runbook generator; any principal) ──
+            if name in tg_listen_helper.CONTROL_TOOL_NAMES:
+                result = tg_listen_helper.handle(name, arguments)
                 text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
                 try:
                     import metrics
