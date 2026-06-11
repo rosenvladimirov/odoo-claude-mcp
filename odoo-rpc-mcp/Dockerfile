@@ -46,6 +46,17 @@ COPY --chmod=644 api_key_manager.py .
 COPY --chmod=644 provisioning_engine.py .
 COPY --chmod=644 provisioning_api.py .
 COPY --chmod=644 cloudflare_provisioning.py .
+# v3 implementator suite (B.0-B.8 + A + tg helper)
+COPY --chmod=644 fleet_manager.py .
+COPY --chmod=644 secrets_registry.py .
+COPY --chmod=644 module_deploy.py .
+COPY --chmod=644 client_onboard.py .
+COPY --chmod=644 backup_manager.py .
+COPY --chmod=644 health_monitor.py .
+COPY --chmod=644 session_handoff.py .
+COPY --chmod=644 tenant_migrate.py .
+COPY --chmod=644 tg_listen_helper.py .
+COPY --chmod=644 timesheet_engine.py .
 COPY --chmod=644 client_stack.template.yml .
 COPY --chmod=755 migrate_legacy_keys.py .
 
