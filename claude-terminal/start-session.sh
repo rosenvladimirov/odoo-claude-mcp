@@ -179,6 +179,31 @@ chmod 700 "$USER_DIR" 2>/dev/null || true
 # with unified-auth headers — do not copy a stale template over it.
 cp /home/claude/template/CLAUDE.md "$USER_DIR/CLAUDE.md" 2>/dev/null
 
+# ── Focus mode (ODOO_FOCUS=ask) ─────────────────────────────────
+# Когато терминалът е отворен от плочката „Ask me", фронтендът подава
+# ODOO_FOCUS=ask + ODOO_MODEL/ODOO_RES_ID. Дописваме CLAUDE.md с насока
+# асистентът да зареди knowledge skill-а „ask-about-record" (живее в
+# l10n_bg_ai_pipeline, не дублираме съдържанието тук) и да отговаря за
+# точно този запис.
+if [ "${ODOO_FOCUS:-}" = "ask" ] && [ -n "${ODOO_MODEL:-}" ]; then
+    cat >> "$USER_DIR/CLAUDE.md" << FOCUSEOF
+
+## Session focus: ASK MODE
+
+You were opened in **ask mode** from a specific Odoo record:
+\`${ODOO_MODEL}\` #\`${ODOO_RES_ID:-0}\`.
+
+Before answering anything:
+1. Load the knowledge skill: \`odoo_search_read\` on model \`ai.skill\`,
+   domain \`[["name", "=", "ask-about-record"]]\`, fields \`["content"]\`,
+   and follow its instructions.
+2. Read the record (\`odoo_read\` on \`${ODOO_MODEL}\` id \`${ODOO_RES_ID:-0}\`)
+   before responding.
+3. Answer the user's questions about THIS record only. Stay read-only unless
+   the user explicitly asks for a change.
+FOCUSEOF
+fi
+
 # ── Set per-user environment ────────────────────────────────────
 export HOME="$USER_DIR"
 export USER_EMAIL USER_NAME USER_LOGIN SAFE_USER
