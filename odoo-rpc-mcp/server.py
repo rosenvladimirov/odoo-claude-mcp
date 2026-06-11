@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.0.3"
+__version__ = "3.0.4"
 
 import asyncio
 import hmac
@@ -1942,6 +1942,54 @@ def _telegram_eager_init() -> None:
                         principal, tag)
         except Exception as e:  # noqa: BLE001
             logger.warning("telegram eager-init failed for %r: %s", pair, e)
+
+
+async def _telegram_send_asgi(scope, receive, send) -> None:
+    """POST /telegram/send {chat_id, text} → relay via the eager publisher.
+
+    Variant A reply path: Odoo posts here; we send through the single authorized
+    Telethon client (eager-init publisher) — no second client/login. Auth: shared
+    secret in TELEGRAM_SEND_SECRET (header X-Tg-Send-Secret). Fail-closed."""
+    async def _json(status: int, obj: dict):
+        body = json.dumps(obj).encode("utf-8")
+        await send({"type": "http.response.start", "status": status,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": body})
+
+    if scope.get("method") != "POST":
+        return await _json(405, {"error": "method_not_allowed"})
+    secret = os.environ.get("TELEGRAM_SEND_SECRET", "")
+    if not secret:
+        return await _json(503, {"error": "send_disabled",
+                                 "hint": "set TELEGRAM_SEND_SECRET"})
+    hdrs = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+    if not hmac.compare_digest(hdrs.get("x-tg-send-secret", ""), secret):
+        return await _json(401, {"error": "unauthorized"})
+    # read body
+    raw = b""
+    while True:
+        ev = await receive()
+        raw += ev.get("body", b"")
+        if not ev.get("more_body"):
+            break
+    try:
+        data = json.loads(raw or b"{}")
+    except Exception:
+        return await _json(400, {"error": "bad_json"})
+    chat = data.get("chat_id") or data.get("chat")
+    text = data.get("text") or ""
+    if chat in (None, "") or not text:
+        return await _json(400, {"error": "chat_id and text required"})
+    if not _eager_tg_refs:
+        return await _json(503, {"error": "no_publisher",
+                                 "hint": "TELEGRAM_EAGER_PRINCIPALS not active"})
+    try:
+        # send_message is sync (runs on the manager's own loop via _run).
+        res = await asyncio.to_thread(_eager_tg_refs[0].send_message, chat, text)
+        return await _json(200, {"ok": True, "result": res})
+    except Exception as e:  # noqa: BLE001
+        logger.warning("telegram /send failed for %s: %s", chat, e)
+        return await _json(502, {"error": "send_failed", "detail": str(e)})
 
 
 def _user_connections_file(user_name: str) -> str:
@@ -10413,6 +10461,15 @@ def create_app():
         # ── v3 self-service provisioning ───────────────────────
         if _provisioning_app and scope["type"] == "http" and path in ("/provision", "/destroy"):
             await _provisioning_app(scope, receive, send)
+            return
+
+        # ── v3 Telegram send (variant A: Odoo replies via the publisher) ──
+        # Odoo's telegram.account.send_endpoint POSTs {chat_id, text} here; we
+        # relay through the eager-init publisher client (the single authorized
+        # Telethon client) so no second client/login is needed. Guarded by a
+        # shared secret (TELEGRAM_SEND_SECRET); fail-closed if unset.
+        if scope["type"] == "http" and path == "/telegram/send":
+            await _telegram_send_asgi(scope, receive, send)
             return
 
         # ── Optional auth debug (OFF by default; secrets always redacted) ──
