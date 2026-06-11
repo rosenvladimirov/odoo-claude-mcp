@@ -41,6 +41,9 @@ def publish(channel: str, data: dict, timeout: int = 5) -> bool:
         headers={
             "Content-Type": "application/json",
             "X-API-Key": CENTRIFUGO_API_KEY,
+            # Cloudflare fronts the public hub and blocks the default
+            # 'Python-urllib/*' UA with a 403 challenge — set a real UA.
+            "User-Agent": "mcp-centrifugo-publish/1.0",
         },
     )
     try:
