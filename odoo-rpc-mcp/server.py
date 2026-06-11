@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.0.2"
+__version__ = "3.0.3"
 
 import asyncio
 import hmac
@@ -1644,13 +1644,23 @@ def _get_web_session(args: dict) -> OdooWebSession:
 
 
 def _tg_session_phone() -> str:
-    """Return the Telegram phone bound to THIS session (strict, fail-closed)."""
+    """Return the Telegram phone bound to THIS session (strict, fail-closed).
+
+    Publisher isolation: if the principal runs an eager-init publisher, an
+    unbound session AUTO-ADOPTS the publisher's phone — so interactive
+    send/read reuse the publisher's already-authorized client (same registry
+    key) without any re-auth. Combined with the re-auth block in telegram_auth,
+    a tenant Claude can use Telegram but can NEVER break the persistent listener.
+    """
     sc = _sctx()
     st = session_store_inst.get_state(sc.session_key, "telegram", "phone")
     phone = (st or {}).get("phone", "")
-    if not phone:
-        raise _sm_error("MCP_NO_TELEGRAM_PHONE")
-    return phone
+    if phone:
+        return phone
+    pub = _eager_tg_phones.get(sc.principal) if sc.principal else None
+    if pub:
+        return pub
+    raise _sm_error("MCP_NO_TELEGRAM_PHONE")
 
 
 def _tg() -> "TelegramServiceManager":
@@ -1888,6 +1898,11 @@ def _user_dir(user_name: str, create: bool = False) -> str:
 # server-side publishers → Centrifugo). Without holding the ref the manager
 # would be GC'd and its event loop torn down.
 _eager_tg_refs: list = []
+# principal -> bound phone for eager-init publishers. Interactive sessions for
+# such a principal AUTO-ADOPT this phone (reuse the publisher's authorized
+# client for send/read) and are BLOCKED from re-auth — so a tenant Claude can
+# never disrupt the persistent listener. This is the publisher-isolation guard.
+_eager_tg_phones: dict = {}
 
 
 def _telegram_eager_init() -> None:
@@ -1921,8 +1936,10 @@ def _telegram_eager_init() -> None:
                 config_file=os.path.join(base, "telegram_config.json"),
             )
             _eager_tg_refs.append(mgr)
+            _eager_tg_phones[principal] = phone
             logger.info("telegram eager-init: %s:%s (push listener will start "
-                        "if session authorized)", principal, tag)
+                        "if session authorized; principal re-auth now BLOCKED)",
+                        principal, tag)
         except Exception as e:  # noqa: BLE001
             logger.warning("telegram eager-init failed for %r: %s", pair, e)
 
@@ -4056,6 +4073,7 @@ TOOLS = [
                 "phone": {"type": "string", "description": "Phone number with country code (e.g. +359886100204)"},
                 "code": {"type": "string", "description": "Verification code from Telegram (step 2)", "default": ""},
                 "password": {"type": "string", "description": "2FA password if enabled", "default": ""},
+                "force": {"type": "boolean", "description": "OPERATOR ONLY: override the eager-publisher re-auth block (use only after stopping the publisher).", "default": False},
             },
             "required": ["phone"],
         },
@@ -10070,7 +10088,23 @@ def _execute_tool(name: str, args: dict) -> Any:
         if not phone:
             return {"error": "phone is required (e.g. telegram_auth(phone='+359...'))."}
         sc = _sctx()
-        _require_principal()
+        _principal = _require_principal()
+        # Publisher isolation: a principal running an eager-init publisher is
+        # managed server-side. Re-auth from ANY session re-logs-in the account
+        # and revokes the publisher's auth key (AUTH_KEY_UNREGISTERED) — the
+        # repeated outage cause. Block it (escape hatch: force=True, operator).
+        if _principal in _eager_tg_phones and not args.get("force"):
+            return {
+                "status": "managed",
+                "message": (
+                    "This principal's Telegram is managed by the server-side "
+                    "eager publisher — re-auth is BLOCKED to protect the "
+                    "persistent listener. Your session auto-adopts the "
+                    "publisher's authorized client: use telegram_send_message / "
+                    "telegram_get_messages directly. (Operator only: force=True "
+                    "after stopping the publisher.)"),
+                "principal": _principal,
+            }
         session_store_inst.set_state(sc.session_key, "telegram", "phone",
                                      {"phone": phone})
         code = args.get("code", "")
