@@ -216,6 +216,8 @@ async function spawnSession(args, profile, sessionId) {
         `ODOO_MODEL=${args.ODOO_MODEL || ""}`,
         `ODOO_RES_ID=${args.ODOO_RES_ID || "0"}`,
         `ODOO_VIEW_TYPE=${args.ODOO_VIEW_TYPE || "form"}`,
+        // focus hint (e.g. "ask") — primes the session for record Q&A.
+        `ODOO_FOCUS=${args.ODOO_FOCUS || ""}`,
         `TERMINAL_URL=${args.TERMINAL_URL || ""}`,
         `SESSION_ID=${sessionId}`,
         `MCP_PROFILE=${profile}`,
