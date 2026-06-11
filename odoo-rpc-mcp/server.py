@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.0.0"
+__version__ = "3.0.1"
 
 import asyncio
 import hmac
@@ -1882,6 +1882,49 @@ def _user_dir(user_name: str, create: bool = False) -> str:
     if create:
         os.makedirs(d, exist_ok=True)
     return d
+
+
+# Keep-alive references for eager-initialised Telegram clients (persistent
+# server-side publishers → Centrifugo). Without holding the ref the manager
+# would be GC'd and its event loop torn down.
+_eager_tg_refs: list = []
+
+
+def _telegram_eager_init() -> None:
+    """Boot-time persistent Telegram publisher (variant A).
+
+    The strict-session model creates Telegram clients lazily per session, so
+    incoming-message → Centrifugo push only runs while a session holds a client.
+    For a 24/7 server-side publisher, eagerly construct the client(s) for the
+    principals listed in TELEGRAM_EAGER_PRINCIPALS (CSV of '<principal>:<phone>',
+    e.g. 'rosen:+359886100204'), replicating _tg()'s path derivation WITHOUT a
+    session context. If the session is authorized this starts the NewMessage →
+    `telegram:<principal>:<phone_tag>` push listener and keeps it alive.
+    """
+    spec = os.environ.get("TELEGRAM_EAGER_PRINCIPALS", "").strip()
+    if not spec or telegram_registry is None:
+        return
+    for pair in spec.split(","):
+        pair = pair.strip()
+        if not pair or ":" not in pair:
+            continue
+        principal, phone = pair.split(":", 1)
+        principal, phone = principal.strip(), phone.strip()
+        if not principal or not phone:
+            continue
+        tag = _sanitize_name(phone)
+        base = _user_dir(principal, create=True)
+        try:
+            mgr = telegram_registry.for_user(
+                f"{principal}:{tag}",
+                session_path=os.path.join(base, f"telegram_{tag}"),
+                config_file=os.path.join(base, "telegram_config.json"),
+            )
+            _eager_tg_refs.append(mgr)
+            logger.info("telegram eager-init: %s:%s (push listener will start "
+                        "if session authorized)", principal, tag)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("telegram eager-init failed for %r: %s", pair, e)
 
 
 def _user_connections_file(user_name: str) -> str:
@@ -11579,6 +11622,16 @@ if __name__ == "__main__":
         logger.info(f"Proxy startup done: {len(PROXY_TOOLS)} eager tools (always-on={sorted(eager)})")
 
     threading.Thread(target=_startup_discover, daemon=True).start()
+
+    # v3 variant A: eager persistent Telegram publisher(s) → Centrifugo.
+    def _eager_tg():
+        import time
+        time.sleep(8)  # let telegram_registry + Centrifugo env settle
+        try:
+            _telegram_eager_init()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("telegram eager-init thread error: %s", e)
+    threading.Thread(target=_eager_tg, daemon=True).start()
 
     # Initialise Prometheus metrics scaffold (2.x baseline; full integration
     # is 3.x — scraping config not included here).
