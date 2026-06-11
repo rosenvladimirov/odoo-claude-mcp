@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "2.30.1"
+__version__ = "2.30.2"
 
 import asyncio
 import json
@@ -10613,6 +10613,11 @@ def create_app():
                     _t0 = _tm.monotonic()
                     _pages = _vis.count_pdf_pages(_file_bytes) if _mimetype == "application/pdf" else 1
                     _model = _vis.choose_model(pages=_pages, size_bytes=len(_file_bytes))
+                    # Model override from the caller (Odoo: company.ai_invoice_model_id
+                    # → Settings → MCP Server → AI Invoice Model). Empty = auto-route.
+                    _model_ovr = (_body.get("model") or "").strip()
+                    if _model_ovr:
+                        _model = _model_ovr
                     _sys, _msgs = _vis.build_messages(
                         file_b64=_b64h.b64encode(_file_bytes).decode(), mimetype=_mimetype)
                     _hint_u = {"role": "user", "content": [{"type": "text", "text":
