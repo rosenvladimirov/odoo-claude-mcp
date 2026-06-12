@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.6] — 2026-06-12 — SINGLE_CONNECTION activation guard
+
+Fixes the silent wrong-target incident (2026-06-12): on a stack with
+`SINGLE_CONNECTION=true`, `user_connection_activate` returned "activated"
+while `_conn()` kept routing every `odoo_*` call to the global `default`
+connection — writes could land on a different client's production.
+
+- `user_connection_activate` now refuses with `MCP_SINGLE_CONNECTION` on
+  single-connection deployments instead of lying "activated".
+- `identify` skips the (meaningless) session auto-activate under
+  `SINGLE_CONNECTION`, and an auto-activate failure is now reported to the
+  caller (`activation_failed` + hint) instead of only a server-side WARNING.
+
+Ops note (master, 2026-06-12): removed `SINGLE_CONNECTION=true` and
+`MCP_ALLOW_NAME_IDENTIFY=1` from the multi-user master compose; archived the
+stale global `/data/connections.json` (default → twbulgaria).
+
 ## [3.0.0] — 2026-06-10 — integrator platform GA
 
 Promotes the v3 integrator track to GA. Security GA-gate (B.0: 6 catastrophic

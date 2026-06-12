@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.0.5"
+__version__ = "3.0.6"
 
 import asyncio
 import hmac
@@ -5885,7 +5885,10 @@ def _execute_tool(name: str, args: dict) -> Any:
         conns = _load_user_connections(user_name)
         active = _load_user_active(user_name)
         alias_to_activate = preferred_alias or active.get("alias")
-        if alias_to_activate and alias_to_activate in conns:
+        activation_error = None
+        # При SINGLE_CONNECTION _conn() ползва само глобалния default —
+        # сесийна активация тук би била подвеждаща (никой не я чете).
+        if not SINGLE_CONNECTION and alias_to_activate and alias_to_activate in conns:
             c = conns[alias_to_activate]
             try:
                 # Session-scoped: bind to THIS session, never the global manager.
@@ -5905,6 +5908,9 @@ def _execute_tool(name: str, args: dict) -> Any:
                 })
                 logger.info(f"User {user_name}: auto-activated connection '{alias_to_activate}'")
             except Exception as e:
+                # Провалът се връща на клиента (не само WARNING в лога) —
+                # иначе сесията остава без връзка, а викащият не разбира.
+                activation_error = str(e)
                 logger.warning(f"User {user_name}: auto-activate '{alias_to_activate}' failed: {e}")
 
         result = {
@@ -5919,6 +5925,17 @@ def _execute_tool(name: str, args: dict) -> Any:
             result["hint"] = (
                 f"Profile '{safe_name}' is new. "
                 f"Data will be saved on first write."
+            )
+        if activation_error:
+            result["activation_failed"] = {
+                "alias": alias_to_activate,
+                "error": activation_error[:300],
+            }
+            result["hint"] = (
+                f"Auto-activate of '{alias_to_activate}' FAILED — this session has "
+                "NO active connection and odoo_* tools will refuse "
+                "(MCP_NO_CONNECTION). Activate a working connection with "
+                "user_connection_activate(alias=...)."
             )
         return result
 
@@ -6040,6 +6057,17 @@ def _execute_tool(name: str, args: dict) -> Any:
         return {"user": user, "connections": result}
 
     elif name == "user_connection_activate":
+        # SINGLE_CONNECTION прескача сесийната активация в _conn() — без този
+        # guard tool-ът връщаше "activated", а odoo_* удряха глобалния default
+        # (инцидентът tri-wall/ussmed 2026-06-12).
+        if SINGLE_CONNECTION:
+            return {
+                "error": "Single-connection deployment: per-user connection "
+                         "activation is disabled — all tools use the global "
+                         "'default' connection. Remove SINGLE_CONNECTION=true "
+                         "to enable per-session connections.",
+                "error_code": "MCP_SINGLE_CONNECTION",
+            }
         user = _require_principal()
         alias = args["alias"]
         conns = _load_user_connections(user)
