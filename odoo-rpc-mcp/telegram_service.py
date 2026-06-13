@@ -349,6 +349,51 @@ class TelegramServiceManager:
             "date": sent.date.isoformat() if sent.date else "",
         }
 
+    def send_file(self, chat: str | int, file_path: str,
+                  caption: str = "", reply_to: int = 0) -> dict:
+        """Send a file/document to a chat. Path confinement is the caller's job."""
+        if not self.is_authenticated:
+            raise Exception("Not authenticated.")
+
+        entity = self._resolve_entity(chat)
+        kwargs: dict[str, Any] = {}
+        if caption:
+            kwargs["caption"] = caption
+        if reply_to:
+            kwargs["reply_to"] = reply_to
+
+        sent = self._run(self._client.send_file(entity, file_path, **kwargs))
+        return {
+            "status": "sent",
+            "id": sent.id,
+            "chat": str(chat),
+            "file": file_path,
+            "date": sent.date.isoformat() if sent.date else "",
+        }
+
+    def download_media(self, chat: str | int, message_id: int,
+                       dest_path: str) -> dict:
+        """Download media from a specific message to dest_path (caller-confined)."""
+        if not self.is_authenticated:
+            raise Exception("Not authenticated.")
+
+        entity = self._resolve_entity(chat)
+        msgs = self._run(self._client.get_messages(entity, ids=message_id))
+        msg = msgs[0] if isinstance(msgs, list) else msgs
+        if msg is None:
+            return {"error": "message_not_found", "message_id": message_id}
+        if not msg.media:
+            return {"error": "no_media", "message_id": message_id}
+
+        saved = self._run(self._client.download_media(msg, file=dest_path))
+        return {
+            "status": "downloaded",
+            "message_id": message_id,
+            "path": saved,
+            "size_bytes": (os.path.getsize(saved)
+                           if saved and os.path.exists(saved) else 0),
+        }
+
     def _resolve_entity(self, chat: str | int):
         """Resolve a chat by username, phone, or ID."""
         if isinstance(chat, int) or (isinstance(chat, str) and chat.lstrip("-").isdigit()):

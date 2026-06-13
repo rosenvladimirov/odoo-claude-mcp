@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.30.3] — 2026-06-13 — Telegram file transfer (v2/v3 lockstep)
+
+Backport of the v3 3.0.7 feature: the Telegram MCP could only send/read text.
+
+- `telegram_send_file(chat, path, caption?, reply_to?)` — send a file/document;
+  source path confined to the download root via `_safe_save_path`.
+- `telegram_download_media(chat, message_id, filename)` — download a message's
+  media into the confined download root.
+- Service layer: `TelegramService.send_file` / `download_media` (Telethon).
+
 ## [2.30.1] — 2026-06-10 — Security hardening (audit fixes P0/P1/P2)
 
 Closes findings from the 2026-06-10 security audit
