@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.0.6"
+__version__ = "3.0.7"
 
 import asyncio
 import hmac
@@ -4176,6 +4176,40 @@ TOOLS = [
                 "reply_to": {"type": "integer", "description": "Message ID to reply to", "default": 0},
             },
             "required": ["chat", "message"],
+        },
+    ),
+    Tool(
+        name="telegram_send_file",
+        description=(
+            "Send a file/document to a Telegram chat. The file must live under the "
+            "MCP download root (MCP_DOWNLOAD_ROOT, default /data/downloads) — pass a "
+            "relative path or an absolute path inside it. Chat can be @username, phone, or numeric ID."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "chat": {"type": "string", "description": "Chat identifier (@username, +phone, or numeric ID)"},
+                "path": {"type": "string", "description": "File path relative to the MCP download root (or absolute within it)"},
+                "caption": {"type": "string", "description": "Optional caption", "default": ""},
+                "reply_to": {"type": "integer", "description": "Message ID to reply to", "default": 0},
+            },
+            "required": ["chat", "path"],
+        },
+    ),
+    Tool(
+        name="telegram_download_media",
+        description=(
+            "Download media/document from a Telegram message into the MCP download root "
+            "(MCP_DOWNLOAD_ROOT, default /data/downloads). Returns the saved path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "chat": {"type": "string", "description": "Chat identifier (@username, +phone, or numeric ID)"},
+                "message_id": {"type": "integer", "description": "Message id holding the media"},
+                "filename": {"type": "string", "description": "Destination filename relative to the MCP download root"},
+            },
+            "required": ["chat", "message_id", "filename"],
         },
     ),
     Tool(
@@ -10218,6 +10252,31 @@ def _execute_tool(name: str, args: dict) -> Any:
         return _tg().send_message(
             chat=chat, message=args["message"],
             reply_to=args.get("reply_to", 0),
+        )
+
+    elif name == "telegram_send_file":
+        chat = args["chat"]
+        if chat.lstrip("-").isdigit():
+            chat = int(chat)
+        # Confine the readable file to the download root — never send arbitrary host files.
+        path = _safe_save_path(args["path"])
+        if not os.path.isfile(path):
+            return {"error": "file_not_found", "path": path,
+                    "hint": "Place the file under MCP_DOWNLOAD_ROOT first."}
+        return _tg().send_file(
+            chat=chat, file_path=path,
+            caption=args.get("caption", ""),
+            reply_to=args.get("reply_to", 0),
+        )
+
+    elif name == "telegram_download_media":
+        chat = args["chat"]
+        if chat.lstrip("-").isdigit():
+            chat = int(chat)
+        # Confine the write to the download root (TOCTOU-safe helper).
+        dest = _safe_save_path(args["filename"])
+        return _tg().download_media(
+            chat=chat, message_id=int(args["message_id"]), dest_path=dest,
         )
 
     elif name == "telegram_sub_add":

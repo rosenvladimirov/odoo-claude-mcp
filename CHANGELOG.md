@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.7] — 2026-06-13 — Telegram file transfer
+
+Closes the gap that the Telegram MCP could only send/read text — no way to
+deliver a config ZIP or document, forcing out-of-band workarounds.
+
+- `telegram_send_file(chat, path, caption?, reply_to?)` — send a file/document.
+  The source path is confined to `MCP_DOWNLOAD_ROOT` (default /data/downloads)
+  via `_safe_save_path`, so arbitrary host files can't be exfiltrated.
+- `telegram_download_media(chat, message_id, filename)` — download a message's
+  media into `MCP_DOWNLOAD_ROOT` (same TOCTOU-safe confinement as other
+  file-writing tools).
+- Service layer: `TelegramService.send_file` / `download_media` (Telethon
+  `send_file` / `download_media`).
+
 ## [3.0.6] — 2026-06-12 — SINGLE_CONNECTION activation guard
 
 Fixes the silent wrong-target incident (2026-06-12): on a stack with
