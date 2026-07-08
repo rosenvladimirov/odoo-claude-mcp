@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.1.0"
+__version__ = "3.2.0"
 
 import asyncio
 import hmac
@@ -2669,6 +2669,18 @@ def _session_link_tool_defs() -> list:
              inputSchema={"type": "object",
                           "properties": {"id": {"type": "string"}},
                           "required": ["id"]}),
+        Tool(name="identify_with_token",
+             description=("Bind THIS MCP session to the principal behind a session-link "
+                          "token — for headless clients (e.g. scheduled Cowork) that "
+                          "cannot send unified-auth headers or change their connector "
+                          "URL. Pass the SAME token as in a /l/<token>/mcp link. Binds "
+                          "the principal (so Telegram/Google resolve to it) and activates "
+                          "the bound connection (so odoo_* target its Odoo). The api_key "
+                          "stays server-side. Call ONCE at session start, before Telegram."),
+             inputSchema={"type": "object",
+                          "properties": {"token": {"type": "string",
+                                         "description": "Session-link token (from provision/rotate)"}},
+                          "required": ["token"]}),
     ]
 
 
@@ -2677,6 +2689,75 @@ def _session_link_find_by_id(links: dict, link_id: str):
         if e.get("id") == link_id:
             return th, e
     return None, None
+
+
+def _identify_with_token_handle(arguments: dict | None) -> dict:
+    """Bind THIS session to a session-link token's principal, WITHOUT changing
+    the connector URL or sending unified-auth headers.
+
+    For headless clients (e.g. Cowork) whose connector authenticates via the
+    shared OAuth/secret_token (→ no principal → not_identified): the client
+    calls this once at session start with the SAME token used in a
+    /l/<token>/mcp link. We resolve token → {principal, connection}, bind the
+    principal to the session row (persists like identify), and activate the
+    bound connection so odoo_* tools target its Odoo. Telegram/Google resolve
+    by principal, so they light up immediately. The api_key never leaves the
+    server. Only a session already authenticated at the HTTP layer can reach
+    this tool (unauthenticated requests are 401'd before dispatch).
+    """
+    arguments = arguments or {}
+    token = (arguments.get("token") or "").strip()
+    if not token:
+        return {"status": "error", "error": "token is required (the session-link token)."}
+    sc = _sctx()
+    bind = _session_link_resolve(token)
+    if not bind:
+        return {"status": "forbidden",
+                "error": "Invalid or expired token.",
+                "hint": "Provision/rotate a link (session_link_provision / _rotate) and use its token."}
+    principal = bind["principal"]
+    connection = bind["connection"]
+    # A session already bound to a DIFFERENT principal must not be rebound.
+    if sc.principal and sc.principal != principal:
+        return {"status": "mismatch",
+                "error": f"Session already bound to '{sc.principal}'; cannot rebind to '{principal}'.",
+                "hint": "Start a fresh MCP session, then call identify_with_token first."}
+    if sc.principal != principal:
+        session_store_inst.bind_principal(sc.session_key, principal, "session_link_token")
+        sc = SessionContext(
+            session_key=sc.session_key, transport=sc.transport,
+            principal=principal, principal_src="session_link_token", caller=None,
+        )
+        _session_ctx.set(sc)
+    # Activate the bound connection for THIS session (best-effort; Telegram works
+    # regardless of the active connection, so auth failure here is non-fatal).
+    activation = None
+    conns = _load_user_connections(principal)
+    c = (conns or {}).get(connection)
+    if c and not SINGLE_CONNECTION and all(c.get(k) for k in ("url", "db", "user")):
+        try:
+            conn = OdooConnection(
+                alias="default", url=c["url"], db=c["db"], username=c["user"],
+                api_key=c.get("api_key", ""), password=c.get("password", ""),
+                protocol=c.get("protocol", "xmlrpc"),
+            )
+            uid = conn.authenticate()
+            session_runtime.set_conn(sc.session_key, conn)
+            session_store_inst.set_state(sc.session_key, "connection", "active", {
+                "source": "session_link_token", "user": principal, "alias": connection,
+            })
+            _save_user_active(principal, {"alias": connection, **c})
+            activation = {"alias": connection, "uid": uid, "url": c["url"]}
+        except Exception as e:  # noqa: BLE001
+            activation = {"alias": connection, "error": str(e),
+                          "hint": "Principal bound (Telegram works); Odoo activation failed — "
+                                  "refresh the connection's api_key."}
+    _session_link_audit("identify", bind["id"], principal,
+                        {"via": "identify_with_token", "connection": connection})
+    return {"status": "identified", "principal": principal,
+            "principal_src": "session_link_token", "connection": connection,
+            "activation": activation,
+            "note": "Session bound to this principal. Telegram + Odoo now resolve to it."}
 
 
 def _session_link_handle(name: str, arguments: dict | None,
@@ -5568,6 +5649,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # ── Pre-authenticated session links (any authenticated principal) ──
             if name in SESSION_LINK_TOOL_NAMES:
                 result = _session_link_handle(name, arguments, principal=sc.principal)
+                text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+                try:
+                    import metrics
+                    metrics.observe_tool_call(name, _m_status)
+                except Exception:
+                    pass
+                return [TextContent(type="text", text=text)]
+            # ── Token-based identify (headless clients, no header/URL change) ──
+            # Reachable by a not_identified session (HTTP-authed via OAuth/secret
+            # token) — this is the whole point: it BINDS the principal. Dispatched
+            # before the security gate for the same reason.
+            if name == "identify_with_token":
+                result = _identify_with_token_handle(arguments)
                 text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
                 try:
                     import metrics

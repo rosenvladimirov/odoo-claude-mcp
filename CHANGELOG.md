@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.0] — 2026-07-08 — Token-based identify (no URL/header change)
+
+Follow-up to 3.1.0: some headless clients (claude.ai Cowork connectors) connect
+via the shared OAuth/secret_token and land `not_identified` — and their connector
+URL cannot be changed to a `/l/<token>/mcp` link (OAuth discovery normalizes to
+the origin). This adds a second delivery channel for the SAME session-link token
+that keeps the existing connector untouched.
+
+- New tool `identify_with_token(token)` — binds THIS session to the token's
+  principal (persisted on the session row, like `identify`) and activates the
+  bound connection (like `user_connection_activate`), so Telegram/Google resolve
+  to the principal and `odoo_*` target its Odoo. The api_key never leaves the
+  server. Reuses the 3.1.0 token store, so one token works both as a `/l/<token>`
+  URL and via this tool. Exposed to `not_identified` sessions and dispatched
+  before the role gate (it must be, to bootstrap identity); still only reachable
+  by a session already authenticated at the HTTP layer (unauth → 401 upstream).
+  Refuses to rebind a session already bound to a different principal. Audited to
+  `session_links.audit.log` as an `identify` event (never the raw token).
+- Usage (Cowork): keep the existing connector; add one line at task start —
+  `identify_with_token("<token>")` — then proceed with Telegram/Odoo.
+
 ## [3.1.0] — 2026-07-08 — Pre-authenticated session links
 
 Enables headless MCP clients that cannot attach custom request headers —
