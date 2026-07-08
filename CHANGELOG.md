@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0] — 2026-07-08 — Pre-authenticated session links
+
+Enables headless MCP clients that cannot attach custom request headers —
+notably scheduled/cloud "Cowork" sessions on claude.ai — to authenticate as a
+chosen principal. Such clients previously landed unauthenticated, so the
+Telegram morning-brief delivery (bound to principal `rosen`) never fired.
+
+- New URL scheme `https://<host>/l/<token>/mcp`: the ASGI layer resolves the
+  token server-side to a stored binding `{principal, connection}` and injects
+  that connection's unified-auth headers (`Authorization: Bearer <api_key>` +
+  `X-Odoo-Url/Db/Login`), then rewrites the path to `/mcp` and proceeds through
+  the normal auth path. The client never holds the Odoo api_key — it stays in
+  the principal's server-side `connections.json`; only the URL travels.
+- New tools (any authenticated principal; owner-scoped, admins may target
+  others): `session_link_provision(connection, label?, ttl_days?, principal?)`,
+  `session_link_list`, `session_link_revoke(id)`, `session_link_rotate(id)`.
+- Security: token is 256-bit (`secrets.token_urlsafe(32)`), stored only as a
+  sha256 hash in `/data/session_links.json` (0600) and shown ONCE at provision.
+  Every use is audited to `/data/session_links.audit.log` (0600) by link id +
+  resolved principal + source ip — the raw token is never written to any log.
+  Only `/mcp`, `/sse`, `/messages*` suffixes are honoured (no path smuggling);
+  invalid/expired tokens return an opaque 404. Rotate invalidates the old URL.
+
 ## [3.0.7] — 2026-06-13 — Telegram file transfer
 
 Closes the gap that the Telegram MCP could only send/read text — no way to

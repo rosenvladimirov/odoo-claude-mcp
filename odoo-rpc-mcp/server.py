@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.0.7"
+__version__ = "3.1.0"
 
 import asyncio
 import hmac
@@ -2532,6 +2532,255 @@ def get_caller_odoo_user(headers: dict) -> dict | None:
         "mcp_user": mcp_user, "alias": alias,
         "url": url, "db": db, "login": login, "uid": uid,
     }
+
+
+# ─── Pre-authenticated session links (headless callers, e.g. Cowork) ──────
+#
+# A *session link* is a high-entropy URL — https://<host>/l/<token>/mcp — that
+# the ASGI layer resolves server-side to a stored binding {principal,
+# connection}. A request arriving on that path is treated exactly as if it had
+# carried the unified-auth headers (Authorization: Bearer <api_key> +
+# X-Odoo-Url/Db/Login) of that principal's saved connection.
+#
+# Rationale: some MCP clients (scheduled/headless Cowork sessions on claude.ai)
+# cannot attach custom request headers, so they land unauthenticated. A link
+# lets such a caller authenticate as a chosen principal WITHOUT the client ever
+# holding the Odoo api_key — the key stays in the principal's server-side
+# connections.json; the URL is the only thing the client carries.
+#
+# Security posture:
+#   • Token is 256-bit (secrets.token_urlsafe(32)); guessing is infeasible.
+#   • It is a CREDENTIAL: returned ONCE at provision time, stored only as a
+#     sha256 hash, and NEVER written to logs. Use is audited by link id +
+#     resolved principal + source ip (never the raw token).
+#   • A link grants the bound principal's access → provisioning is owner-scoped
+#     (admins may target others); revoke/rotate any time (rotate invalidates the
+#     old URL immediately).
+#   • Only /mcp, /sse and /messages* suffixes are honoured (no path smuggling).
+
+SESSION_LINKS_FILE = os.path.join(DATA_DIR, "session_links.json")
+SESSION_LINK_AUDIT_FILE = os.path.join(DATA_DIR, "session_links.audit.log")
+SESSION_LINK_TOOL_NAMES = {
+    "session_link_provision", "session_link_list",
+    "session_link_revoke", "session_link_rotate",
+}
+_session_links_lock = _auth_threading.Lock()
+
+
+def _session_link_public_base() -> str:
+    return os.environ.get("MCP_PUBLIC_URL", "https://mcp.odoo-shell.space").rstrip("/")
+
+
+def _session_link_token_hash(token: str) -> str:
+    return _auth_hashlib.sha256(token.encode()).hexdigest()
+
+
+def _load_session_links() -> dict:
+    if os.path.exists(SESSION_LINKS_FILE):
+        try:
+            with open(SESSION_LINKS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _save_session_links(data: dict) -> None:
+    tmp = SESSION_LINKS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, SESSION_LINKS_FILE)
+
+
+def _session_link_audit(event: str, link_id: str, principal: str | None,
+                        extra: dict | None = None) -> None:
+    """Append one JSON audit line. Records the link id + principal, NEVER the
+    raw token — the token is a credential and must not reach any log."""
+    try:
+        rec = {"ts": datetime.now(timezone.utc).isoformat(),
+               "event": event, "link_id": link_id, "principal": principal}
+        if extra:
+            rec.update(extra)
+        with open(SESSION_LINK_AUDIT_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        try:
+            os.chmod(SESSION_LINK_AUDIT_FILE, 0o600)
+        except OSError:
+            pass
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("session_link audit write failed: %s", _e)
+
+
+def _session_link_resolve(token: str) -> dict | None:
+    """Resolve a raw token → {id, principal, connection} or None. Bumps use
+    stats. O(1) lookup by token hash (the raw token is never stored)."""
+    if not token:
+        return None
+    th = _session_link_token_hash(token)
+    with _session_links_lock:
+        links = _load_session_links()
+        entry = links.get(th)
+        if not entry:
+            return None
+        exp = entry.get("expires_at")
+        if exp and _auth_time.time() > float(exp):
+            return None
+        entry["use_count"] = int(entry.get("use_count", 0)) + 1
+        entry["last_used"] = _auth_time.time()
+        _save_session_links(links)
+        return {"id": entry.get("id"), "principal": entry.get("principal"),
+                "connection": entry.get("connection")}
+
+
+def _session_link_tool_defs() -> list:
+    return [
+        Tool(name="session_link_provision",
+             description=("Mint a pre-authenticated session link (URL) for a headless "
+                          "caller (e.g. a scheduled Cowork session) that cannot send "
+                          "custom headers. The link authenticates as YOUR principal via "
+                          "one of your saved connections — the api_key stays server-side; "
+                          "the caller only holds the URL, and the token is shown ONCE. "
+                          "Args: connection (alias, required), label?, ttl_days?. "
+                          "Admins may pass principal to target another."),
+             inputSchema={"type": "object", "properties": {
+                 "connection": {"type": "string",
+                                "description": "Saved connection alias to bind the link to"},
+                 "label": {"type": "string", "description": "Free-text label"},
+                 "ttl_days": {"type": "number", "description": "Optional expiry in days"},
+                 "principal": {"type": "string",
+                               "description": "Admin-only: target principal (default: you)"}},
+                 "required": ["connection"]}),
+        Tool(name="session_link_list",
+             description=("List your active session links (id, connection, label, created, "
+                          "expiry, use_count, last_used). Never returns the token."),
+             inputSchema={"type": "object", "properties": {}}),
+        Tool(name="session_link_revoke",
+             description="Revoke a session link by id (owner or admin).",
+             inputSchema={"type": "object",
+                          "properties": {"id": {"type": "string"}},
+                          "required": ["id"]}),
+        Tool(name="session_link_rotate",
+             description=("Rotate a session link's token by id: issues a new URL and "
+                          "immediately invalidates the old one. Shown once."),
+             inputSchema={"type": "object",
+                          "properties": {"id": {"type": "string"}},
+                          "required": ["id"]}),
+    ]
+
+
+def _session_link_find_by_id(links: dict, link_id: str):
+    for th, e in links.items():
+        if e.get("id") == link_id:
+            return th, e
+    return None, None
+
+
+def _session_link_handle(name: str, arguments: dict | None,
+                         principal: str | None) -> dict:
+    arguments = arguments or {}
+    if not principal:
+        return {"error": "no_identity",
+                "hint": "Authenticate (unified-auth) before managing session links."}
+    is_admin = principal in _admin_principals()
+
+    if name == "session_link_provision":
+        conn = (arguments.get("connection") or "").strip()
+        req_principal = (arguments.get("principal") or "").strip()
+        if req_principal and req_principal != principal and not is_admin:
+            return {"error": "denied", "reason": "not_admin_principal",
+                    "hint": "Only admins may provision links for another principal."}
+        target = req_principal or principal
+        if not conn:
+            return {"error": "connection_required"}
+        conns = _load_user_connections(target)
+        if conn not in (conns or {}):
+            return {"error": "unknown_connection", "connection": conn,
+                    "available": sorted((conns or {}).keys())}
+        c = conns[conn]
+        if not all(c.get(k) for k in ("url", "db", "user", "api_key")):
+            return {"error": "connection_incomplete", "connection": conn,
+                    "hint": "The bound connection needs url, db, user and api_key."}
+        ttl_days = arguments.get("ttl_days")
+        expires_at = None
+        if ttl_days:
+            try:
+                expires_at = _auth_time.time() + float(ttl_days) * 86400.0
+            except (TypeError, ValueError):
+                return {"error": "bad_ttl_days"}
+        token = _secrets_mod.token_urlsafe(32)
+        th = _session_link_token_hash(token)
+        link_id = "lnk_" + _secrets_mod.token_hex(4)
+        with _session_links_lock:
+            links = _load_session_links()
+            links[th] = {"id": link_id, "principal": target, "connection": conn,
+                         "label": (arguments.get("label") or ""),
+                         "created_at": _auth_time.time(), "created_by": principal,
+                         "expires_at": expires_at, "use_count": 0, "last_used": None}
+            _save_session_links(links)
+        _session_link_audit("provision", link_id, target,
+                            {"by": principal, "connection": conn})
+        return {"ok": True, "id": link_id, "principal": target, "connection": conn,
+                "url": f"{_session_link_public_base()}/l/{token}/mcp",
+                "expires_at": expires_at,
+                "note": ("Store this URL now — the token is shown ONCE and cannot be "
+                         "recovered. It grants this principal's access; treat it as a "
+                         "secret. Revoke or rotate with session_link_revoke / "
+                         "session_link_rotate.")}
+
+    if name == "session_link_list":
+        with _session_links_lock:
+            links = _load_session_links()
+        out = []
+        for _th, e in links.items():
+            if not is_admin and e.get("principal") != principal:
+                continue
+            out.append({k: e.get(k) for k in (
+                "id", "principal", "connection", "label", "created_at",
+                "created_by", "expires_at", "use_count", "last_used")})
+        out.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+        return {"count": len(out), "links": out}
+
+    if name == "session_link_revoke":
+        link_id = (arguments.get("id") or "").strip()
+        with _session_links_lock:
+            links = _load_session_links()
+            th, e = _session_link_find_by_id(links, link_id)
+            if not e:
+                return {"error": "not_found", "id": link_id}
+            if not is_admin and e.get("principal") != principal:
+                return {"error": "denied", "reason": "not_owner"}
+            del links[th]
+            _save_session_links(links)
+        _session_link_audit("revoke", link_id, e.get("principal"), {"by": principal})
+        return {"ok": True, "revoked": link_id}
+
+    if name == "session_link_rotate":
+        link_id = (arguments.get("id") or "").strip()
+        with _session_links_lock:
+            links = _load_session_links()
+            th, e = _session_link_find_by_id(links, link_id)
+            if not e:
+                return {"error": "not_found", "id": link_id}
+            if not is_admin and e.get("principal") != principal:
+                return {"error": "denied", "reason": "not_owner"}
+            token = _secrets_mod.token_urlsafe(32)
+            new_th = _session_link_token_hash(token)
+            del links[th]
+            e["use_count"] = 0
+            e["last_used"] = None
+            e["rotated_at"] = _auth_time.time()
+            links[new_th] = e
+            _save_session_links(links)
+        _session_link_audit("rotate", link_id, e.get("principal"), {"by": principal})
+        return {"ok": True, "id": link_id,
+                "url": f"{_session_link_public_base()}/l/{token}/mcp",
+                "note": "New URL — the previous one is now invalid. Shown once."}
+
+    return {"error": "unknown_tool", "tool": name}
 
 
 # ─── Memory storage helpers ─────────────────────────────────
@@ -5212,6 +5461,8 @@ async def list_tools() -> list[Tool]:
     base.extend(session_handoff.get_control_tools())
     # tg-listen runbook helper (any authenticated principal).
     base.extend(tg_listen_helper.get_control_tools())
+    # Pre-authenticated session links (any authenticated principal).
+    base.extend(_session_link_tool_defs())
     return base
 
 
@@ -5307,6 +5558,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 result = session_handoff.handle(
                     name, arguments,
                     session_key=sc.session_key, principal=sc.principal)
+                text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+                try:
+                    import metrics
+                    metrics.observe_tool_call(name, _m_status)
+                except Exception:
+                    pass
+                return [TextContent(type="text", text=text)]
+            # ── Pre-authenticated session links (any authenticated principal) ──
+            if name in SESSION_LINK_TOOL_NAMES:
+                result = _session_link_handle(name, arguments, principal=sc.principal)
                 text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
                 try:
                     import metrics
@@ -10539,6 +10800,48 @@ def create_app():
                         return
 
         path = scope.get("path", "")
+
+        # ── Pre-authenticated session link ( /l/<token>[/suffix] ) ──
+        # Resolve a stored link → inject the bound principal's unified-auth
+        # headers and rewrite the path, so headless callers (e.g. scheduled
+        # Cowork sessions) that cannot set custom headers still authenticate as
+        # the bound principal. The remaining dispatch (auth check + /mcp handler)
+        # then runs exactly as for a normal unified-auth request. An invalid or
+        # expired token yields an opaque 404. The raw token is never logged.
+        if scope["type"] == "http" and (path == "/l" or path.startswith("/l/")):
+            _l_ok = False
+            _l_parts = path.split("/", 3)
+            _l_tok = _l_parts[2] if len(_l_parts) > 2 else ""
+            _l_suf = ("/" + _l_parts[3]) if (len(_l_parts) > 3 and _l_parts[3]) else "/mcp"
+            if _l_suf != "/mcp" and _l_suf != "/sse" and not _l_suf.startswith("/messages"):
+                _l_suf = "/mcp"
+            if len(_l_tok) >= 16:
+                _l_bind = _session_link_resolve(_l_tok)
+                if _l_bind:
+                    _l_conns = _load_user_connections(_l_bind["principal"])
+                    _l_c = (_l_conns or {}).get(_l_bind["connection"])
+                    if _l_c and all(_l_c.get(_k) for _k in ("url", "db", "user", "api_key")):
+                        _l_hdrs = [(k, v) for (k, v) in scope.get("headers", [])
+                                   if k.lower() not in (b"authorization", b"x-odoo-url",
+                                                        b"x-odoo-db", b"x-odoo-login")]
+                        _l_hdrs.append((b"authorization",
+                                        ("Bearer " + _l_c["api_key"]).encode()))
+                        _l_hdrs.append((b"x-odoo-url", _l_c["url"].encode()))
+                        _l_hdrs.append((b"x-odoo-db", _l_c["db"].encode()))
+                        _l_hdrs.append((b"x-odoo-login", _l_c["user"].encode()))
+                        scope["headers"] = _l_hdrs
+                        scope["path"] = _l_suf
+                        if "raw_path" in scope:
+                            scope["raw_path"] = _l_suf.encode()
+                        path = _l_suf
+                        _l_ip = (scope.get("client") or ("?", 0))[0]
+                        _session_link_audit("use", _l_bind["id"], _l_bind["principal"],
+                                            {"ip": _l_ip, "suffix": _l_suf})
+                        _l_ok = True
+            if not _l_ok:
+                from starlette.responses import Response
+                await Response("Not Found", status_code=404)(scope, receive, send)
+                return
 
         # ── Admin portal dispatch (hidden) ─────────────────────
         if _admin_app and scope["type"] == "http" and admin_ui.path_matches(path):
