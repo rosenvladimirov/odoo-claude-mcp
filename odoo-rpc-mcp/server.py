@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.2.0"
+__version__ = "3.2.1"
 
 import asyncio
 import hmac
@@ -2723,10 +2723,12 @@ def _identify_with_token_handle(arguments: dict | None) -> dict:
                 "error": f"Session already bound to '{sc.principal}'; cannot rebind to '{principal}'.",
                 "hint": "Start a fresh MCP session, then call identify_with_token first."}
     if sc.principal != principal:
-        session_store_inst.bind_principal(sc.session_key, principal, "session_link_token")
+        # principal_src must satisfy the session-store CHECK constraint
+        # (only 'unified_auth' | 'identify'); token-identify is an identify variant.
+        session_store_inst.bind_principal(sc.session_key, principal, "identify")
         sc = SessionContext(
             session_key=sc.session_key, transport=sc.transport,
-            principal=principal, principal_src="session_link_token", caller=None,
+            principal=principal, principal_src="identify", caller=None,
         )
         _session_ctx.set(sc)
     # Activate the bound connection for THIS session (best-effort; Telegram works
@@ -2755,8 +2757,8 @@ def _identify_with_token_handle(arguments: dict | None) -> dict:
     _session_link_audit("identify", bind["id"], principal,
                         {"via": "identify_with_token", "connection": connection})
     return {"status": "identified", "principal": principal,
-            "principal_src": "session_link_token", "connection": connection,
-            "activation": activation,
+            "principal_src": "identify", "bound_via": "session_link_token",
+            "connection": connection, "activation": activation,
             "note": "Session bound to this principal. Telegram + Odoo now resolve to it."}
 
 

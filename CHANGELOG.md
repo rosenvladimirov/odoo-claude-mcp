@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.1] — 2026-07-08 — Fix: identify_with_token session-store constraint
+
+`identify_with_token` (3.2.0) bound the session with `principal_src="session_link_token"`,
+which violates the session-store CHECK constraint (`principal_src IN ('unified_auth',
+'identify')`) → the bind raised and the session stayed `not_identified`. Caught by an
+end-to-end OAuth simulation (the offline unit test used a stub store without the
+constraint). Fix: bind as `principal_src="identify"` (token-identify is an identify
+variant); the token channel is still recorded via `bound_via` in the result and as the
+audit `via` field.
+
 ## [3.2.0] — 2026-07-08 — Token-based identify (no URL/header change)
 
 Follow-up to 3.1.0: some headless clients (claude.ai Cowork connectors) connect
