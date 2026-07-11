@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.1] — 2026-07-11 — TOTP enrol returns a QR code
+
+`identify_totp_enroll` now renders the `otpauth://` URI as a scannable QR so any
+client can display it — no manual QR generation. Two new result fields (best-effort):
+- `qr_ascii` — plain-text unicode half-block QR (terminal / text chat; scans best on
+  a light background).
+- `qr_svg` — `data:image/svg+xml;base64,…` for web clients to render inline/in an artifact.
+
+`otpauth_uri` + `secret` remain for manual entry. Uses `segno` (pure-Python, no system
+deps, now pinned in requirements); if segno is ever missing the QR fields are simply
+omitted and enrol still works. No change to verification, storage, replay/rate-limit,
+or the identify flow.
+
 ## [3.3.0] — 2026-07-11 — TOTP two-factor for name-identify
 
 Makes `identify(name=...)` safe for a profile that holds real credentials by

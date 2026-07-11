@@ -96,6 +96,18 @@ def test_enroll_status_verify_replay_disable(srv):
     assert srv._totp_enrolled(p) is False
 
 
+def test_enroll_returns_qr(srv):
+    out = srv._totp_enroll("qruser")
+    assert out["status"] == "enrolled"
+    # QR fields present (segno pinned in requirements)
+    assert out["qr_svg"].startswith("data:image/svg+xml")
+    assert "█" in out["qr_ascii"] or "▀" in out["qr_ascii"]
+    # ASCII QR is multi-line and reasonably sized
+    assert out["qr_ascii"].count("\n") > 10
+    # QR encodes the otpauth URI (the secret is inside it, shown once anyway)
+    assert out["otpauth_uri"].startswith("otpauth://totp/")
+
+
 def test_reenroll_requires_force(srv):
     p = "ivan"
     srv._totp_enroll(p)

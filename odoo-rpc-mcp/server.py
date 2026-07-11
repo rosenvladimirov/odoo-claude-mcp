@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.3.0"
+__version__ = "3.3.1"
 
 import asyncio
 import hmac
@@ -2868,6 +2868,53 @@ def _totp_provisioning_uri(principal: str, secret_b32: str) -> str:
             f"&algorithm=SHA1&digits={_TOTP_DIGITS}&period={_TOTP_STEP}")
 
 
+def _totp_qr_unicode(qr) -> str:
+    """Render a segno QR matrix as a plain-text unicode half-block QR (2 modules
+    per character row) with a quiet border. Portable text (terminal + chat);
+    scans best on a light background."""
+    rows = [list(r) for r in qr.matrix]
+    b = 2  # quiet-zone border in modules
+    width = len(rows[0]) + 2 * b
+    blank = [0] * width
+    grid = ([blank[:] for _ in range(b)]
+            + [[0] * b + list(r) + [0] * b for r in rows]
+            + [blank[:] for _ in range(b)])
+    if len(grid) % 2:
+        grid.append(blank[:])
+    lines = []
+    for y in range(0, len(grid), 2):
+        top, bot = grid[y], grid[y + 1]
+        line = []
+        for x in range(width):
+            t, d = top[x], bot[x]
+            line.append("█" if (t and d) else "▀" if t else "▄" if d else " ")
+        lines.append("".join(line))
+    return "\n".join(lines)
+
+
+def _totp_qr(uri: str) -> dict:
+    """Render the otpauth URI as QR: ASCII (terminal/chat) + SVG data-URI (web).
+    Returns {} when segno is unavailable — enrol still works via secret/otpauth_uri."""
+    try:
+        import segno
+    except Exception:  # noqa: BLE001
+        return {}
+    try:
+        qr = segno.make(uri, error="m")
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    try:
+        out["qr_ascii"] = _totp_qr_unicode(qr)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        out["qr_svg"] = qr.svg_data_uri(scale=6, border=4)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def _totp_audit(event: str, principal: str | None, extra: dict | None = None) -> None:
     """Append one JSON audit line. NEVER records the secret or the code."""
     try:
@@ -2946,12 +2993,16 @@ def _totp_enroll(principal: str, force: bool = False) -> dict:
     })
     _totp_attempts.pop(principal, None)
     _totp_audit("enroll", principal, {"force": bool(force)})
-    return {"status": "enrolled", "principal": principal,
-            "otpauth_uri": _totp_provisioning_uri(principal, secret),
-            "secret": secret,
-            "note": ("Add this to your authenticator app NOW — the secret is shown "
-                     "ONCE. Afterwards a fresh session identifies with "
-                     "identify(name) then identify_verify_totp(code).")}
+    uri = _totp_provisioning_uri(principal, secret)
+    result = {"status": "enrolled", "principal": principal,
+              "otpauth_uri": uri,
+              "secret": secret,
+              "note": ("Scan the QR (qr_svg in a web view, or qr_ascii in a terminal) "
+                       "with any authenticator app, or enter the secret manually. Shown "
+                       "ONCE. Afterwards a fresh session identifies with identify(name) "
+                       "then identify_verify_totp(code).")}
+    result.update(_totp_qr(uri))   # qr_ascii + qr_svg (best-effort; absent if segno missing)
+    return result
 
 
 def _totp_tool_handle(name: str, arguments: dict | None, principal: str | None) -> dict:

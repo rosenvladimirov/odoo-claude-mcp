@@ -41,3 +41,8 @@ psycopg[binary]>=3.1.0
 # (identify_totp_*), keyed off MCP_KEY_PEPPER (same crypto as secrets_registry).
 # Was previously an optional/unpinned import; TOTP makes it required.
 cryptography>=42.0.0
+# 3.3.1: segno — pure-Python QR generator (no system deps). identify_totp_enroll
+# renders the otpauth:// URI as a QR (ASCII for terminals, SVG data-URI for web),
+# so any client can display a scannable code. Optional-soft: enrol still works
+# (secret + otpauth_uri) if segno is somehow missing.
+segno>=1.6.0
