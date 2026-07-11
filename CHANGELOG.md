@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.0] — 2026-07-11 — TOTP two-factor for name-identify
+
+Makes `identify(name=...)` safe for a profile that holds real credentials by
+gating it behind an authenticator-app second factor (TOTP, RFC 6238). Previously
+a name-only identify on a profile with saved connections was refused outright
+(unless `MCP_ALLOW_NAME_IDENTIFY=1`); now a principal can opt in per-profile and
+name-identify becomes: `identify(name)` → `totp_required` → `identify_verify_totp(code)`.
+
+- New tool `identify_verify_totp(code, name?)` — second step of name-identify.
+  Verifies the 6-digit code and binds THIS session to the principal
+  (`principal_src="identify"`, satisfying the session-store CHECK constraint).
+  Reachable by a `not_identified` session and dispatched **before** the security
+  gate, like `identify_with_token` (it must be, to bootstrap identity). The target
+  name is remembered from the prior `identify(name)` via a `session_state` pending
+  intent (namespace `web`, key `totp_pending`); pass `name` explicitly to override.
+- New tools `identify_totp_enroll(force?)`, `identify_totp_status`,
+  `identify_totp_disable` — manage the factor for YOUR already-identified profile
+  (enrolment requires an already-authenticated session, so nobody can arm a factor
+  on a profile they don't control). Enrol returns an `otpauth://` provisioning URI
+  + base32 secret shown ONCE.
+- `identify(name)` change: when the named profile is TOTP-enrolled, a name-only
+  identify no longer binds — it returns `status:"totp_required"` and stashes the
+  pending intent. Non-enrolled profiles are unchanged (impersonation guard /
+  `MCP_ALLOW_NAME_IDENTIFY` behave exactly as before). Unified-auth identify is
+  unaffected (identity comes from the Bearer key, not the name).
+- Security: TOTP secrets stored per-principal at `/data/users/<principal>/totp.json`
+  (0600, atomic write), **Fernet-encrypted** off `MCP_KEY_PEPPER` (reuses
+  `secrets_registry` crypto) — **fail-closed** when the pepper is unset/weak.
+  Verification accepts ±1 step (±30s) clock skew, guards against replay
+  (a used step can't be reused) and rate-limits (5 consecutive fails → 5-min
+  lockout). Codes/secrets are never logged; enrol/verify/disable audited to
+  `/data/totp.audit.log`. Gated by `MCP_DISABLE_FEATURES=totp`.
+- Deps: `cryptography` is now pinned in requirements (was optional/unpinned).
+
 ## [3.2.1] — 2026-07-08 — Fix: identify_with_token session-store constraint
 
 `identify_with_token` (3.2.0) bound the session with `principal_src="session_link_token"`,

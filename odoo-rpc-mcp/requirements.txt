@@ -37,3 +37,7 @@ sqlglot>=25.0.0
 # v2 USER deployments SHOULD configure a read-only PG user as defense-in-depth
 # (the classifier blocks writes on protected tables, but a RO user is structural).
 psycopg[binary]>=3.1.0
+# 3.3.0: cryptography — Fernet encryption at rest for TOTP two-factor secrets
+# (identify_totp_*), keyed off MCP_KEY_PEPPER (same crypto as secrets_registry).
+# Was previously an optional/unpinned import; TOTP makes it required.
+cryptography>=42.0.0

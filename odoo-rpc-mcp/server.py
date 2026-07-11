@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.2.1"
+__version__ = "3.3.0"
 
 import asyncio
 import hmac
@@ -77,6 +77,7 @@ _FEATURE_PREFIXES: dict[str, tuple] = {
     "public":    ("public_access_",),
     "website":   ("odoo_website_",),
     "web":       ("odoo_web_",),
+    "totp":      ("identify_totp_", "identify_verify_totp"),
 }
 
 def _tool_disabled(tool_name: str) -> bool:
@@ -2762,6 +2763,298 @@ def _identify_with_token_handle(arguments: dict | None) -> dict:
             "note": "Session bound to this principal. Telegram + Odoo now resolve to it."}
 
 
+# ─────────────────────────────────────────────────────────────
+# TOTP two-factor for name-identify (v3.3.0)
+# ─────────────────────────────────────────────────────────────
+# A principal may enrol an authenticator-app TOTP secret. Once enrolled, a
+# name-only identify(name=...) no longer binds directly — it returns
+# 'totp_required' and stashes a pending intent in session_state; the caller then
+# proves the second factor via identify_verify_totp(code=...). Enrolment itself
+# requires an already-identified session, so nobody can arm a factor on a profile
+# they don't already control. Secrets are stored per-principal, Fernet-encrypted
+# off MCP_KEY_PEPPER (reusing secrets_registry's crypto) — fail-closed when the
+# pepper is unset/weak. TOTP maths is RFC 6238, stdlib only.
+
+TOTP_AUDIT_FILE = os.path.join(DATA_DIR, "totp.audit.log")
+TOTP_TOOL_NAMES = {"identify_totp_enroll", "identify_totp_status",
+                   "identify_totp_disable"}
+TOTP_PENDING_NS = "web"            # session_state namespace for the pending intent
+TOTP_PENDING_KEY = "totp_pending"
+_TOTP_STEP = 30                    # seconds per RFC 6238 step
+_TOTP_DIGITS = 6
+_TOTP_WINDOW = 1                   # accept ±1 step for clock skew
+_TOTP_MAX_FAILS = 5               # consecutive fails per principal before lockout
+_TOTP_LOCKOUT_S = 300
+_totp_attempts: dict = {}          # principal -> {"fails": int, "until": float}
+_totp_lock = _auth_threading.Lock()
+
+
+def _totp_path(principal: str, create: bool = False) -> str:
+    return os.path.join(_user_dir(principal, create=create), "totp.json")
+
+
+def _totp_load(principal: str) -> dict | None:
+    fp = _totp_path(principal)
+    if not os.path.exists(fp):
+        return None
+    try:
+        with open(fp, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _totp_save(principal: str, data: dict) -> None:
+    fp = _totp_path(principal, create=True)
+    tmp = fp + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, fp)
+
+
+def _totp_enrolled(principal: str) -> bool:
+    d = _totp_load(principal)
+    return bool(d and d.get("secret_enc"))
+
+
+def _totp_pepper_ok() -> bool:
+    """True when MCP_KEY_PEPPER is set & strong enough for at-rest encryption."""
+    return bool(secrets_registry._pepper())
+
+
+def _totp_secret_new() -> str:
+    import base64
+    import secrets as _s
+    return base64.b32encode(_s.token_bytes(20)).decode("ascii").rstrip("=")
+
+
+def _totp_code(secret_b32: str, step: int) -> str:
+    """RFC 6238 TOTP code for a given 30s step (SHA1, 6 digits)."""
+    import base64
+    import hashlib
+    import struct
+    pad = "=" * (-len(secret_b32) % 8)
+    key = base64.b32decode(secret_b32.upper() + pad)
+    msg = struct.pack(">Q", int(step))
+    dig = hmac.new(key, msg, hashlib.sha1).digest()
+    off = dig[-1] & 0x0F
+    truncated = struct.unpack(">I", dig[off:off + 4])[0] & 0x7FFFFFFF
+    return str(truncated % (10 ** _TOTP_DIGITS)).zfill(_TOTP_DIGITS)
+
+
+def _totp_verify_secret(secret_b32: str, code: str, at: float | None = None):
+    """Return (ok, matched_step). Accepts ±_TOTP_WINDOW steps for clock skew."""
+    import time as _t
+    code = (code or "").strip().replace(" ", "")
+    if not code.isdigit() or len(code) != _TOTP_DIGITS:
+        return False, None
+    now = _t.time() if at is None else at
+    now_step = int(now) // _TOTP_STEP
+    for w in range(-_TOTP_WINDOW, _TOTP_WINDOW + 1):
+        st = now_step + w
+        if hmac.compare_digest(_totp_code(secret_b32, st), code):
+            return True, st
+    return False, None
+
+
+def _totp_provisioning_uri(principal: str, secret_b32: str) -> str:
+    from urllib.parse import quote
+    label = quote(f"OdooMCP:{principal}")
+    return (f"otpauth://totp/{label}?secret={secret_b32}&issuer=OdooMCP"
+            f"&algorithm=SHA1&digits={_TOTP_DIGITS}&period={_TOTP_STEP}")
+
+
+def _totp_audit(event: str, principal: str | None, extra: dict | None = None) -> None:
+    """Append one JSON audit line. NEVER records the secret or the code."""
+    try:
+        rec = {"ts": datetime.now(timezone.utc).isoformat(),
+               "event": event, "principal": principal}
+        if extra:
+            rec.update(extra)
+        with open(TOTP_AUDIT_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        try:
+            os.chmod(TOTP_AUDIT_FILE, 0o600)
+        except OSError:
+            pass
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("totp audit write failed: %s", _e)
+
+
+def _totp_check(principal: str, code: str) -> dict:
+    """Verify a code against the principal's stored secret, with rate-limit and
+    replay protection. Returns {"ok": bool, "reason"?: str, "retry_after"?: int}."""
+    import time as _t
+    with _totp_lock:
+        st = _totp_attempts.get(principal)
+        if st and st.get("until", 0) > _t.time():
+            return {"ok": False, "reason": "locked",
+                    "retry_after": int(st["until"] - _t.time())}
+    d = _totp_load(principal)
+    if not d or not d.get("secret_enc"):
+        return {"ok": False, "reason": "not_enrolled"}
+    if not _totp_pepper_ok():
+        return {"ok": False, "reason": "weak_or_missing_pepper"}
+    secret = secrets_registry._decrypt(d["secret_enc"])
+    if not secret:
+        return {"ok": False, "reason": "decrypt_failed"}
+    ok, step = _totp_verify_secret(secret, code)
+    # Replay guard: a step already used to authenticate can't be reused.
+    replay = False
+    if ok and d.get("last_step") is not None and step is not None \
+            and int(step) <= int(d["last_step"]):
+        ok, replay = False, True
+    with _totp_lock:
+        if ok:
+            _totp_attempts.pop(principal, None)
+        else:
+            a = _totp_attempts.get(principal, {"fails": 0, "until": 0})
+            a["fails"] = a.get("fails", 0) + 1
+            if a["fails"] >= _TOTP_MAX_FAILS:
+                a["until"] = _t.time() + _TOTP_LOCKOUT_S
+                a["fails"] = 0
+            _totp_attempts[principal] = a
+    if ok:
+        d["last_step"] = int(step)
+        d["last_used"] = datetime.now(timezone.utc).isoformat()
+        _totp_save(principal, d)
+        return {"ok": True, "step": int(step)}
+    return {"ok": False, "reason": "replay" if replay else "invalid_code"}
+
+
+def _totp_enroll(principal: str, force: bool = False) -> dict:
+    if not _totp_pepper_ok():
+        return {"status": "error", "error": "weak_or_missing_pepper",
+                "hint": "Set MCP_KEY_PEPPER (≥32 chars) on the gateway before enrolling TOTP."}
+    if _totp_enrolled(principal) and not force:
+        return {"status": "already_enrolled", "principal": principal,
+                "hint": "Pass force=true to re-enroll (invalidates the current secret)."}
+    secret = _totp_secret_new()
+    enc = secrets_registry._encrypt(secret)
+    if not enc:
+        return {"status": "error", "error": "encrypt_failed",
+                "hint": "cryptography/Fernet unavailable or pepper weak."}
+    _totp_save(principal, {
+        "secret_enc": enc,
+        "enrolled_at": datetime.now(timezone.utc).isoformat(),
+        "algo": "SHA1", "digits": _TOTP_DIGITS, "step": _TOTP_STEP,
+        "last_step": None,
+    })
+    _totp_attempts.pop(principal, None)
+    _totp_audit("enroll", principal, {"force": bool(force)})
+    return {"status": "enrolled", "principal": principal,
+            "otpauth_uri": _totp_provisioning_uri(principal, secret),
+            "secret": secret,
+            "note": ("Add this to your authenticator app NOW — the secret is shown "
+                     "ONCE. Afterwards a fresh session identifies with "
+                     "identify(name) then identify_verify_totp(code).")}
+
+
+def _totp_tool_handle(name: str, arguments: dict | None, principal: str | None) -> dict:
+    """Enrol/status/disable — require an already-identified session (the caller
+    can only manage TOTP for the principal it is already bound to)."""
+    arguments = arguments or {}
+    if not principal:
+        return {"status": "error", "error": "no_identity",
+                "hint": "Identify first (unified-auth) before managing TOTP."}
+    if name == "identify_totp_status":
+        return {"status": "ok", "principal": principal,
+                "enrolled": _totp_enrolled(principal),
+                "pepper_ready": _totp_pepper_ok()}
+    if name == "identify_totp_enroll":
+        return _totp_enroll(principal, force=bool(arguments.get("force")))
+    if name == "identify_totp_disable":
+        if not _totp_enrolled(principal):
+            return {"status": "not_enrolled", "principal": principal}
+        try:
+            os.remove(_totp_path(principal))
+        except OSError:
+            pass
+        _totp_attempts.pop(principal, None)
+        _totp_audit("disable", principal)
+        return {"status": "disabled", "principal": principal}
+    return {"status": "error", "error": f"unknown totp tool {name}"}
+
+
+def _identify_verify_totp_handle(arguments: dict | None) -> dict:
+    """Second-factor step of name-identify: verify a TOTP code and bind THIS
+    session to the principal. Reachable by a not_identified session (like
+    identify_with_token) — dispatched before the security gate."""
+    arguments = arguments or {}
+    code = (arguments.get("code") or "").strip()
+    sc = _sctx()
+    # Resolve the target name: explicit arg, else the pending intent stashed by
+    # identify(name=...) on this session row.
+    name = (arguments.get("name") or "").strip()
+    if not name:
+        pend = session_store_inst.get_state(sc.session_key, TOTP_PENDING_NS, TOTP_PENDING_KEY)
+        name = (pend or {}).get("name") or ""
+    if not name:
+        return {"status": "error",
+                "error": "No pending identify. Call identify(name=...) first, or pass name."}
+    safe_name = _sanitize_name(name)
+    if not code:
+        return {"status": "error", "error": "code is required (6-digit TOTP)."}
+    if not _totp_enrolled(safe_name):
+        return {"status": "error",
+                "error": f"Profile '{safe_name}' has no TOTP enrolled.",
+                "hint": "Enroll from an authenticated session (identify_totp_enroll)."}
+    if sc.principal and sc.principal != safe_name:
+        return {"status": "mismatch",
+                "error": f"Session already bound to '{sc.principal}'; cannot rebind to '{safe_name}'.",
+                "hint": "Start a fresh MCP session, then identify + verify."}
+    res = _totp_check(safe_name, code)
+    if not res.get("ok"):
+        _totp_audit("verify_fail", safe_name, {"reason": res.get("reason")})
+        out = {"status": "totp_invalid", "error": res.get("reason")}
+        if res.get("reason") == "locked":
+            out["retry_after"] = res.get("retry_after")
+        return out
+    if sc.principal != safe_name:
+        session_store_inst.bind_principal(sc.session_key, safe_name, "identify")
+        sc = SessionContext(
+            session_key=sc.session_key, transport=sc.transport,
+            principal=safe_name, principal_src="identify", caller=None,
+        )
+        _session_ctx.set(sc)
+    try:
+        session_store_inst.delete_state(sc.session_key, TOTP_PENDING_NS, TOTP_PENDING_KEY)
+    except Exception:  # noqa: BLE001
+        pass
+    _totp_audit("verify_ok", safe_name, {"via": "identify_verify_totp"})
+    # Activate the saved active connection (best-effort), mirroring identify_with_token.
+    activation = None
+    conns = _load_user_connections(safe_name)
+    active = _load_user_active(safe_name)
+    alias = (active or {}).get("alias")
+    c = (conns or {}).get(alias) if alias else None
+    if c and not SINGLE_CONNECTION and all(c.get(k) for k in ("url", "db", "user")):
+        try:
+            conn = OdooConnection(
+                alias="default", url=c["url"], db=c["db"], username=c["user"],
+                api_key=c.get("api_key", ""), password=c.get("password", ""),
+                protocol=c.get("protocol", "xmlrpc"),
+            )
+            uid = conn.authenticate()
+            session_runtime.set_conn(sc.session_key, conn)
+            session_store_inst.set_state(sc.session_key, "connection", "active", {
+                "source": "totp_identify", "user": safe_name, "alias": alias,
+            })
+            _save_user_active(safe_name, {"alias": alias, **c})
+            activation = {"alias": alias, "uid": uid, "url": c["url"]}
+        except Exception as e:  # noqa: BLE001
+            activation = {"alias": alias, "error": str(e),
+                          "hint": "Principal bound; Odoo activation failed — refresh the api_key."}
+    return {"status": "identified", "principal": safe_name,
+            "principal_src": "identify", "bound_via": "totp",
+            "connection": alias, "activation": activation,
+            "note": "Second factor verified. Session bound; Telegram + Odoo now resolve to it."}
+
+
 def _session_link_handle(name: str, arguments: dict | None,
                          principal: str | None) -> dict:
     arguments = arguments or {}
@@ -4683,6 +4976,53 @@ TOOLS = [
         description="Show current user identity and active connection.",
         inputSchema={"type": "object", "properties": {}},
     ),
+    # ── TOTP two-factor for name-identify ──
+    Tool(
+        name="identify_verify_totp",
+        description=(
+            "Second step of name-identify for a TOTP-protected profile. After "
+            "identify(name=...) returns status 'totp_required', call this with the "
+            "6-digit code from your authenticator app to prove the second factor and "
+            "bind THIS session to the principal (Telegram/Google/Odoo then resolve to "
+            "it). The 'name' is remembered from the prior identify call; pass it "
+            "explicitly only if identifying a different profile."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "6-digit TOTP code from your authenticator app"},
+                "name": {"type": "string", "description": "Profile name (optional; defaults to the pending identify)"},
+            },
+            "required": ["code"],
+        },
+    ),
+    Tool(
+        name="identify_totp_enroll",
+        description=(
+            "Arm authenticator-app two-factor (TOTP) for YOUR current identified "
+            "profile. Requires an already-authenticated session. Returns an "
+            "otpauth:// provisioning URI + the base32 secret, shown ONCE — add it to "
+            "your authenticator app immediately. Afterwards, name-identify for this "
+            "profile requires identify_verify_totp. Needs MCP_KEY_PEPPER set on the "
+            "gateway (secret is encrypted at rest)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "force": {"type": "boolean", "description": "Re-enroll even if already enrolled (invalidates the old secret)", "default": False},
+            },
+        },
+    ),
+    Tool(
+        name="identify_totp_status",
+        description="Report whether YOUR current profile has TOTP two-factor enrolled.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="identify_totp_disable",
+        description="Disable TOTP two-factor for YOUR current identified profile (removes the stored secret).",
+        inputSchema={"type": "object", "properties": {}},
+    ),
     Tool(
         name="session_list",
         description=(
@@ -5671,6 +6011,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 except Exception:
                     pass
                 return [TextContent(type="text", text=text)]
+            # ── TOTP second-factor identify (name-identify step 2) ──
+            # Reachable by a not_identified session for the same reason as
+            # identify_with_token: it BINDS the principal after verifying the
+            # authenticator code. Dispatched before the security gate.
+            if name == "identify_verify_totp":
+                result = _identify_verify_totp_handle(arguments)
+                text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+                try:
+                    import metrics
+                    metrics.observe_tool_call(name, _m_status)
+                except Exception:
+                    pass
+                return [TextContent(type="text", text=text)]
             # ── v3 tg-listen helper (runbook generator; any principal) ──
             if name in tg_listen_helper.CONTROL_TOOL_NAMES:
                 result = tg_listen_helper.handle(name, arguments)
@@ -6243,6 +6596,21 @@ def _execute_tool(name: str, args: dict) -> Any:
                 }
             safe_name = _sanitize_name(user_name)
             preferred_alias = None
+            # TOTP second factor: if this profile enrolled an authenticator, a
+            # name-only identify does NOT bind — it stashes a pending intent and
+            # demands identify_verify_totp(code=...). This is what makes name
+            # identify safe for a profile that holds real credentials.
+            if not caller and _totp_enrolled(safe_name):
+                session_store_inst.set_state(
+                    sc.session_key, TOTP_PENDING_NS, TOTP_PENDING_KEY,
+                    {"name": safe_name})
+                return {
+                    "status": "totp_required",
+                    "profile": safe_name,
+                    "hint": ("This profile is protected by two-factor auth. Call "
+                             "identify_verify_totp(code=\"<6 digits from your "
+                             "authenticator>\") to finish signing in."),
+                }
             # SECURITY (impersonation guard): a name-only identify (no unified-auth
             # headers — claude.ai OAuth / shared token) must NOT grant access to an
             # EXISTING profile that holds saved connections (real Odoo credentials).
@@ -6329,6 +6697,10 @@ def _execute_tool(name: str, args: dict) -> Any:
                 "user_connection_activate(alias=...)."
             )
         return result
+
+    elif name in TOTP_TOOL_NAMES:
+        # Enrol / status / disable — require an already-identified session.
+        return _totp_tool_handle(name, args, _sctx().principal)
 
     elif name == "who_am_i":
         # Diagnostic: never refuses — reports session + identity state with
