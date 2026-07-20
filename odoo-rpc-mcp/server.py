@@ -1907,7 +1907,9 @@ async def resolve_session_context() -> "SessionContext":
     if row is None:
         # The transport-level session is alive (the SDK already validated the
         # session id), so a missing row means "first tool call" — create it.
-        # create() returns None when an orphaned/revoked row holds this key.
+        # create() self-heals an orphaned/expired row (server_restart, ttl_expired,
+        # prior principal_mismatch) by reviving it; it returns None only when the
+        # key is held by a *revoked* (admin-killed) row, which must stay dead.
         ci = {}
         try:
             ci = {"user_agent": req.headers.get("user-agent", ""),

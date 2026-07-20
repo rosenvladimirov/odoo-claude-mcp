@@ -210,9 +210,59 @@ class SessionStore:
                     ),
                 )
         except sqlite3.IntegrityError:
-            # Race: the row already exists — defer to resolve() (None when
-            # the key is held by an orphaned/revoked row)
-            return self.resolve(session_key)
+            # The session_key already has a row. Distinguish three cases:
+            #   • active & unexpired → genuine concurrent-create race → return the
+            #     live row (unchanged behaviour).
+            #   • revoked → an admin deliberately killed it → stays dead (None);
+            #     the client must start a genuinely new session id.
+            #   • orphaned or active-but-expired → accidental death (server_restart,
+            #     ttl_expired, or an earlier principal_mismatch). The transport-level
+            #     session id was already validated by the SDK, so this is a legitimate
+            #     reconnect — SELF-HEAL by reviving the row in place instead of
+            #     wedging the client on MCP_SESSION_ORPHANED forever.
+            with self._connect() as conn:
+                existing = conn.execute(
+                    "SELECT status, expires_at FROM sessions WHERE session_key = ?",
+                    (session_key,),
+                ).fetchone()
+                if existing is None:
+                    # Row vanished between INSERT and this read — retry once.
+                    return self.create(
+                        session_key, transport, principal=principal,
+                        principal_src=principal_src, auth_fp=auth_fp,
+                        client_info=client_info,
+                    )
+                status = existing["status"]
+                if status == "active" and existing["expires_at"] >= now_s:
+                    return self.resolve(session_key)  # live row — concurrent race
+                if status == "revoked":
+                    return None  # admin revoke is sticky; never auto-revive
+                # Revive: drop connection/web state so the fresh session can never
+                # inherit a previous principal's Odoo/web session (telegram state is
+                # left intact — its live client was already torn down at orphan time
+                # and phone refcounts are shared across sessions; it re-binds on the
+                # next identify/auth).
+                conn.execute(
+                    "DELETE FROM session_state WHERE session_key = ? "
+                    "AND namespace IN ('connection', 'web')",
+                    (session_key,),
+                )
+                conn.execute(
+                    "UPDATE sessions SET transport = ?, principal = ?, "
+                    "principal_src = ?, auth_fp = ?, status = 'active', "
+                    "created_at = ?, last_seen = ?, expires_at = ?, "
+                    "orphaned_at = NULL, orphan_reason = NULL, client_info = ? "
+                    "WHERE session_key = ?",
+                    (
+                        transport, principal, principal_src, auth_fp,
+                        now_s, now_s, exp_s,
+                        json.dumps(client_info) if client_info is not None else None,
+                        session_key,
+                    ),
+                )
+            logger.info(
+                "session_store: revived %s session %s", status, session_key
+            )
         return SessionRow(
             session_key=session_key, transport=transport,
             principal=principal, principal_src=principal_src,

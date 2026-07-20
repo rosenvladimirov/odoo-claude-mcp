@@ -73,12 +73,47 @@ def test_create_race_returns_existing(tmp_path):
     assert again.principal == "rosen"  # the existing row won
 
 
-def test_create_over_orphaned_key_returns_none(tmp_path):
+def test_create_over_orphaned_key_revives(tmp_path):
+    # A dead-but-not-revoked key must SELF-HEAL on reconnect: the transport
+    # session id was already validated by the SDK, so create() revives it
+    # instead of wedging the client on MCP_SESSION_ORPHANED.
     store = make_store(tmp_path)
-    store.create("mcp:dead", "streamable_http")
+    store.create("mcp:dead", "streamable_http", principal="rosen",
+                 principal_src="identify")
     store.mark_orphaned("mcp:dead", "server_restart")
-    # The key is poisoned by a non-active row — create() must fail closed
-    assert store.create("mcp:dead", "streamable_http") is None
+    revived = store.create("mcp:dead", "streamable_http", principal="rosen",
+                           principal_src="identify")
+    assert isinstance(revived, SessionRow)
+    assert revived.status == "active"
+    assert store.resolve("mcp:dead") is not None
+    raw = row_of(store, "mcp:dead")
+    assert raw["status"] == "active"
+    assert raw["orphaned_at"] is None
+    assert raw["orphan_reason"] is None
+
+
+def test_revive_drops_connection_and_web_state(tmp_path):
+    # Reviving must not let the fresh session inherit a prior principal's
+    # Odoo/web session; telegram state is intentionally preserved (its live
+    # client was already torn down at orphan time and phone refcounts are shared).
+    store = make_store(tmp_path)
+    store.create("mcp:reuse", "streamable_http", principal="a")
+    store.set_state("mcp:reuse", "connection", "active", {"alias": "x"})
+    store.set_state("mcp:reuse", "web", "default", {"sid": "y"})
+    store.set_state("mcp:reuse", "telegram", "phone", {"phone": "+359"})
+    store.mark_orphaned("mcp:reuse", "ttl_expired")
+    store.create("mcp:reuse", "streamable_http", principal="b")
+    assert store.get_state("mcp:reuse", "connection", "active") is None
+    assert store.get_state("mcp:reuse", "web", "default") is None
+    assert store.get_state("mcp:reuse", "telegram", "phone") is not None
+
+
+def test_create_over_revoked_key_returns_none(tmp_path):
+    # An admin revoke is sticky — a reconnect must NEVER auto-revive it.
+    store = make_store(tmp_path)
+    store.create("mcp:killed", "streamable_http")
+    store.revoke("mcp:killed", "admin_revoke")
+    assert store.create("mcp:killed", "streamable_http") is None
 
 
 def test_touch_extends_expiry(tmp_path):
