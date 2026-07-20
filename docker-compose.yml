@@ -46,6 +46,12 @@ services:
       - ODOO_API_KEY=${ODOO_API_KEY:-}
       - ODOO_PROTOCOL=${ODOO_PROTOCOL:-xmlrpc}
       - MCP_SECRET_TOKEN=${MCP_SECRET_TOKEN:-}
+      # v3 RBAC: this is the operator's own stack → run in ADMIN mode (full
+      # rights). Without this the fail-closed default is 'user', which would
+      # block admin/destructive tools. Client stacks must NOT set this to admin.
+      - MCP_ROLE=${MCP_ROLE:-admin}
+      # Principals (unified-auth logins) granted admin regardless of MCP_ROLE.
+      - MCP_ADMIN_PRINCIPALS=${MCP_ADMIN_PRINCIPALS:-}
       - AUTH_CACHE_TTL=${AUTH_CACHE_TTL:-300}
       - ALLOWED_ODOO_URLS=${ALLOWED_ODOO_URLS:-}
       - GOOGLE_CREDENTIALS_FILE=/data/google_credentials.json

@@ -100,7 +100,9 @@ def generate_secret_token(nbytes: int = 32) -> str:
 
 def render_compose(client_id: str, secret_token: str,
                    admin_token: str, anthropic_key: str = "",
-                   mcp_port: int = 8094) -> str:
+                   mcp_port: int = 8094,
+                   centrifugo_hmac: str = "",
+                   centrifugo_api_key: str = "") -> str:
     if not TEMPLATE_FILE.is_file():
         raise FileNotFoundError(f"template not found: {TEMPLATE_FILE}")
     raw = TEMPLATE_FILE.read_text(encoding="utf-8")
@@ -112,7 +114,18 @@ def render_compose(client_id: str, secret_token: str,
         .replace("{{MCP_ADMIN_TOKEN}}", admin_token)
         .replace("{{ANTHROPIC_API_KEY}}", anthropic_key)
         .replace("{{MCP_PORT}}", str(mcp_port))
+        .replace("{{CENTRIFUGO_HMAC}}", centrifugo_hmac)
+        .replace("{{CENTRIFUGO_API_KEY}}", centrifugo_api_key)
     )
+
+
+def generate_centrifugo_secret() -> str:
+    """64-char hex secret for the per-stack Centrifugo hub (HMAC / API key).
+
+    Hex (not url-safe) keeps the value free of characters that could need
+    escaping when it lands in a compose env line or the JSON namespace blob.
+    """
+    return secrets.token_hex(32)
 
 
 # ─── State persistence (idempotent retry) ─────────────────────────────────
@@ -354,10 +367,18 @@ def provision(slug_hint: str, password: str, email: str,
     client_id = generate_client_id(vat=vat)
     secret_token = generate_secret_token()
     admin_token = generate_secret_token()
+    # Per-stack Centrifugo secrets — unique per client (isolation), generated
+    # here so they're persisted in state (single durable source) and injected
+    # into the compose. Subscribers reach the hub at centrifugo-<id>.<domain>.
+    centrifugo_hmac = generate_centrifugo_secret()
+    centrifugo_api_key = generate_centrifugo_secret()
     mcp_url = f"https://mcp-{client_id}.{DOMAIN_BASE}"
+    centrifugo_url = f"https://centrifugo-{client_id}.{DOMAIN_BASE}"
 
     compose = render_compose(client_id, secret_token, admin_token,
-                             anthropic_key=anthropic_key)
+                             anthropic_key=anthropic_key,
+                             centrifugo_hmac=centrifugo_hmac,
+                             centrifugo_api_key=centrifugo_api_key)
 
     if DRY_RUN:
         # Save preview to /tmp for inspection.
@@ -392,7 +413,16 @@ def provision(slug_hint: str, password: str, email: str,
                 ingress = cf.add_tunnel_ingress(
                     hostname, f"http://odoo-rpc-mcp-{client_id}:8094")
                 cf_info["ingress"] = ingress
-                if not (dns.get("ok") and ingress.get("ok")):
+                # Centrifugo realtime hub — own subdomain so external
+                # subscribers (cf_subscriber) can open SSE to the per-stack hub.
+                cf_host = f"centrifugo-{client_id}.{DOMAIN_BASE}"
+                cf_dns = cf.create_dns_record(cf_host)
+                cf_info["centrifugo_dns"] = cf_dns
+                cf_ingress = cf.add_tunnel_ingress(
+                    cf_host, f"http://centrifugo-{client_id}:8000")
+                cf_info["centrifugo_ingress"] = cf_ingress
+                if not (dns.get("ok") and ingress.get("ok")
+                        and cf_dns.get("ok") and cf_ingress.get("ok")):
                     _state_append({
                         "slug": slug, "client_id": client_id, "status": "failed",
                         "stage": "cloudflare", "cloudflare": cf_info,
@@ -441,6 +471,11 @@ def provision(slug_hint: str, password: str, email: str,
         "mcp_url": mcp_url,
         "secret_token": secret_token,    # stored для idempotent re-encryption
         "admin_token": admin_token,
+        # Per-stack Centrifugo — state is the single durable home for these
+        # (no host .env). Carry to secrets_registry / subscriber config as needed.
+        "centrifugo_url": centrifugo_url,
+        "centrifugo_hmac": centrifugo_hmac,
+        "centrifugo_api_key": centrifugo_api_key,
         "email": email,
         "ts": int(time.time()),
         "elapsed_s": int(time.time() - started),
@@ -455,6 +490,7 @@ def provision(slug_hint: str, password: str, email: str,
         "slug": slug,
         "client_id": client_id,
         "mcp_url": mcp_url,
+        "centrifugo_url": centrifugo_url,
         "elapsed_s": int(time.time() - started),
         "dry_run": DRY_RUN,
         "portainer": portainer_info,
@@ -504,6 +540,7 @@ def destroy(slug_hint: str = "", vat: str = "",
 
     target_client_id = state.get("client_id") or client_id
     hostname = f"mcp-{target_client_id}.{DOMAIN_BASE}" if target_client_id else None
+    cf_hostname = f"centrifugo-{target_client_id}.{DOMAIN_BASE}" if target_client_id else None
     stack_name = f"mcp-client-{target_client_id}" if target_client_id else None
 
     if DRY_RUN:
@@ -545,6 +582,16 @@ def destroy(slug_hint: str = "", vat: str = "",
             else:
                 cf_info["dns"] = {"skipped": True,
                                   "reason": "no record_id in state"}
+            # Centrifugo subdomain — same teardown order (ingress then DNS).
+            if cf_hostname:
+                cf_info["centrifugo_ingress"] = cf.remove_tunnel_ingress(cf_hostname)
+                cf_rec = (state.get("cloudflare") or {}).get("centrifugo_dns") or {}
+                cf_rec_id = cf_rec.get("record_id")
+                if cf_rec_id:
+                    cf_info["centrifugo_dns"] = cf.delete_dns_record(cf_rec_id)
+                else:
+                    cf_info["centrifugo_dns"] = {"skipped": True,
+                                                 "reason": "no record_id in state"}
         else:
             cf_info = {"skipped": True,
                        "reason": "cloudflare_not_configured" if hostname else "no hostname"}

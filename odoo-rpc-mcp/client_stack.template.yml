@@ -7,6 +7,10 @@
 ##   {{MCP_ADMIN_TOKEN}}      — generated 32-byte url-safe token (admin scope)
 ##   {{ANTHROPIC_API_KEY}}    — optional; passed through if available
 ##   {{MCP_PORT}}             — host port chosen from free pool (8100+)
+##   {{CENTRIFUGO_HMAC}}      — generated 32-byte hex; client-token HMAC for
+##                              the per-stack Centrifugo realtime hub
+##   {{CENTRIFUGO_API_KEY}}   — generated 32-byte hex; Centrifugo HTTP API key
+##                              (publish auth used by odoo-rpc-mcp + Odoo proxy)
 
 networks:
   cloudflare-net:
@@ -53,6 +57,11 @@ services:
       - MCP_OAUTH_CLIENT_ID={{MCP_OAUTH_CLIENT_ID}}
       - MCP_OAUTH_CLIENT_SECRET={{MCP_SECRET_TOKEN}}
       - MCP_ADMIN_TOKEN={{MCP_ADMIN_TOKEN}}
+      # v3 RBAC: client stacks run fail-closed as 'user' (NOT admin). Grant
+      # specific client logins admin via MCP_ADMIN_PRINCIPALS if/when needed;
+      # destructive tools otherwise require mcp_elevate.
+      - MCP_ROLE=user
+      - MCP_ADMIN_PRINCIPALS=
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8094
       - CONNECTIONS_FILE=/data/connections.json
@@ -60,6 +69,12 @@ services:
       - DATA_DIR=/data
       - ANTHROPIC_API_KEY={{ANTHROPIC_API_KEY}}
       - MCP_DISABLE_FEATURES=ssh,portainer,github
+      # Per-stack Centrifugo realtime hub (Telegram + Discuss push). Publish
+      # target is the sidecar on the internal backend network; subscribers
+      # reach it externally via centrifugo-{{CLIENT_ID}}.<domain> (CF tunnel).
+      - CENTRIFUGO_API_URL=http://centrifugo-{{CLIENT_ID}}:8000/api/publish
+      - CENTRIFUGO_API_KEY={{CENTRIFUGO_API_KEY}}
+      - CENTRIFUGO_TOKEN_HMAC_SECRET={{CENTRIFUGO_HMAC}}
     volumes:
       - odoo-rpc-mcp-{{CLIENT_ID}}_mcp-data-{{CLIENT_ID}}:/data
       - mcp-backup-{{CLIENT_ID}}:/backups:rw
@@ -93,6 +108,35 @@ services:
       - MCP_PORT=8092
     volumes:
       - mcp-backup-{{CLIENT_ID}}:/backups
+
+  # Per-stack Centrifugo realtime hub (per-client isolation — NOT the shared
+  # v2 hub). Configured ENTIRELY via env (no host-mounted config.json), so the
+  # Portainer-create flow needs no per-client disk files. Namespaces telegram
+  # + discuss mirror the proven 208609891 config.json 1:1 (verified: env build
+  # parses both namespaces + sse/uni_sse). Subscribers (cf_subscriber) reach it
+  # at centrifugo-{{CLIENT_ID}}.<domain> over the CF tunnel.
+  centrifugo-{{CLIENT_ID}}:
+    container_name: centrifugo-{{CLIENT_ID}}
+    image: centrifugo/centrifugo:v6
+    command: ["centrifugo"]
+    restart: unless-stopped
+    networks:
+      - cloudflare-net
+      - odoo-claude-mcp_backend
+      - odoo-claude-mcp_default
+    environment:
+      - CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY={{CENTRIFUGO_HMAC}}
+      - CENTRIFUGO_HTTP_API_KEY={{CENTRIFUGO_API_KEY}}
+      - CENTRIFUGO_CLIENT_ALLOWED_ORIGINS=*
+      - 'CENTRIFUGO_CHANNEL_NAMESPACES=[{"name":"telegram","history_size":20,"history_ttl":"300s","force_recovery":true},{"name":"discuss","history_size":20,"history_ttl":"300s","force_recovery":true}]'
+      - CENTRIFUGO_SSE_ENABLED=true
+      - CENTRIFUGO_UNI_SSE_ENABLED=true
+      - CENTRIFUGO_HTTP_STREAM_ENABLED=true
+      - CENTRIFUGO_ADMIN_ENABLED=false
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
 
 volumes:
   odoo-rpc-mcp-{{CLIENT_ID}}_mcp-data-{{CLIENT_ID}}:

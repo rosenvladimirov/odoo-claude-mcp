@@ -30,6 +30,7 @@ ODOO_UID="${ODOO_UID:-0}"
 ODOO_MODEL="${ODOO_MODEL:-}"
 ODOO_RES_ID="${ODOO_RES_ID:-0}"
 ODOO_VIEW_TYPE="${ODOO_VIEW_TYPE:-form}"
+ODOO_FOCUS="${ODOO_FOCUS:-}"
 TERMINAL_URL="${TERMINAL_URL:-}"
 SESSION_ID="${SESSION_ID:-}"
 CLAUDE_THEME="${CLAUDE_THEME:-github}"
@@ -83,6 +84,7 @@ cat > /home/claude/.odoo_session.json <<EOF
   "model": "${ODOO_MODEL}",
   "res_id": "${ODOO_RES_ID}",
   "view_type": "${ODOO_VIEW_TYPE}",
+  "focus": "${ODOO_FOCUS}",
   "mcp_profile": "${MCP_PROFILE}"
 }
 EOF
@@ -90,7 +92,7 @@ chmod 600 /home/claude/.odoo_session.json
 
 # Export the env so session-shell.sh inherits it (ttyd preserves env).
 export API_KEY ODOO_URL ODOO_DB USER_LOGIN USER_NAME USER_EMAIL
-export ODOO_USER ODOO_UID ODOO_MODEL ODOO_RES_ID ODOO_VIEW_TYPE
+export ODOO_USER ODOO_UID ODOO_MODEL ODOO_RES_ID ODOO_VIEW_TYPE ODOO_FOCUS
 export TERMINAL_URL SESSION_ID MCP_PROFILE MCP_URL CLAUDE_THEME
 
 # ── Start ttyd, listen for the single WebSocket connection ──────

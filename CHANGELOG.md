@@ -7,6 +7,209 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.4] — 2026-07-20 — supervisor sidecar transport (Cloudflare-fronted hosts)
+
+Adds a second transport to `supervisor_deploy` that `exec`s into an **already
+running** toolbox container instead of creating a one-shot one. Needed for hosts
+whose Portainer sits behind a Cloudflare tunnel: the bodyless
+`POST /containers/{id}/start` gets re-chunked in transit, so Docker >= 29 reads
+`ContentLength=-1` as a non-empty body and rejects it with HTTP 400
+(`non-empty request body removed in v1.24`). Every bodied request — create, exec,
+archive — passes cleanly. See ADR-0002. The 400 was diagnosed live on
+`mozu`/ic-intracom.bg (Docker 29.6.2 in Proxmox LXC CT20010); the sidecar path
+itself is not yet exercised against that host.
+
+- `supervisor.transport` on the alias: `auto` (default) | `sidecar` | `oneshot`.
+  Under `auto`, the presence of `supervisor.sidecar` selects the sidecar path, so
+  existing aliases (e.g. `odoo-dev-server`) keep the proven one-shot behaviour.
+- `supervisor_sidecar_status(target)` — read-only liveness check for the alias's
+  sidecar; returns the one-time `docker run` bootstrap line when it is missing or
+  stopped. The sidecar is deliberately **not** started from the MCP: starting a
+  container is the very operation the tunnel blocks, so it stays a one-off manual
+  step by the operator.
+- One-shot path now pins `LogConfig: json-file`; on hosts using another log driver
+  `GET /containers/{id}/logs` returned 0 bytes and runs looked silent.
+- Op ledger records now carry `transport`.
+
+The one-shot transport is retained for this release and will be removed once the
+sidecar path has proven itself in production.
+
+## [3.3.3] — 2026-07-18 — supervisor_deploy reads per-user connections
+
+`supervisor_deploy._load_entry` now also scans the per-user connection store
+(`/data/users/*/connections.json`) after the static global candidates, matching
+how the deployed gateway actually stores connections (there is no global
+`/data/connections.json` in the multi-tenant deployment). Admin-gated, so scanning
+all users for the alias is acceptable. Also tolerates both flat `{alias:{}}` and
+wrapped `{connections:{alias:{}}}` shapes. Unblocks `supervisor_status(target)` for
+aliases that live only in a per-user store (e.g. `mozu`).
+
+## [3.3.2] — 2026-07-17 — Supervisor remote control (Portainer one-shot)
+
+New admin tool group `supervisor_deploy` (`supervisor_status`, `supervisor_run`,
+`supervisor_history`) for remotely driving the Odoo addons orchestrator
+(`supervisor.py`) via the **Portainer Docker API** — for hosts reachable only
+through Portainer (no outbound SSH). Runs the `supervisor-19.0-slim` toolbox image
+as a one-shot container (pull → create → start → wait → logs → remove).
+
+- `supervisor_status(target)` — read-only git drift report (`--github-status`;
+  supervisor returns before any symlink/pip/chown, verified).
+- `supervisor_run(target, mode, dry_run)` — modes status|github_update|github_sync|
+  oca|ee|force|init; destructive modes are **DRY-RUN by default** (plan only) unless
+  `dry_run=false` + `MCP_SUPERVISOR_DRY_RUN=0`.
+- Admin-principal gated (server.py) + USER-blocked (tool_security). Per-alias config
+  via a `supervisor` block (image, conf_path, binds, endpoint_id) in connections.json,
+  Portainer creds from the alias `portainer` block. Audit ledger
+  `supervisor_deploy_ops.jsonl`.
+- Note: no per-action TOTP exists in the codebase; DRY-RUN-default + admin gate +
+  the alias `read_only` flag are the guard for destructive modes.
+
+## [3.3.1] — 2026-07-11 — TOTP enrol returns a QR code
+
+`identify_totp_enroll` now renders the `otpauth://` URI as a scannable QR so any
+client can display it — no manual QR generation. Two new result fields (best-effort):
+- `qr_ascii` — plain-text unicode half-block QR (terminal / text chat; scans best on
+  a light background).
+- `qr_svg` — `data:image/svg+xml;base64,…` for web clients to render inline/in an artifact.
+
+`otpauth_uri` + `secret` remain for manual entry. Uses `segno` (pure-Python, no system
+deps, now pinned in requirements); if segno is ever missing the QR fields are simply
+omitted and enrol still works. No change to verification, storage, replay/rate-limit,
+or the identify flow.
+
+## [3.3.0] — 2026-07-11 — TOTP two-factor for name-identify
+
+Makes `identify(name=...)` safe for a profile that holds real credentials by
+gating it behind an authenticator-app second factor (TOTP, RFC 6238). Previously
+a name-only identify on a profile with saved connections was refused outright
+(unless `MCP_ALLOW_NAME_IDENTIFY=1`); now a principal can opt in per-profile and
+name-identify becomes: `identify(name)` → `totp_required` → `identify_verify_totp(code)`.
+
+- New tool `identify_verify_totp(code, name?)` — second step of name-identify.
+  Verifies the 6-digit code and binds THIS session to the principal
+  (`principal_src="identify"`, satisfying the session-store CHECK constraint).
+  Reachable by a `not_identified` session and dispatched **before** the security
+  gate, like `identify_with_token` (it must be, to bootstrap identity). The target
+  name is remembered from the prior `identify(name)` via a `session_state` pending
+  intent (namespace `web`, key `totp_pending`); pass `name` explicitly to override.
+- New tools `identify_totp_enroll(force?)`, `identify_totp_status`,
+  `identify_totp_disable` — manage the factor for YOUR already-identified profile
+  (enrolment requires an already-authenticated session, so nobody can arm a factor
+  on a profile they don't control). Enrol returns an `otpauth://` provisioning URI
+  + base32 secret shown ONCE.
+- `identify(name)` change: when the named profile is TOTP-enrolled, a name-only
+  identify no longer binds — it returns `status:"totp_required"` and stashes the
+  pending intent. Non-enrolled profiles are unchanged (impersonation guard /
+  `MCP_ALLOW_NAME_IDENTIFY` behave exactly as before). Unified-auth identify is
+  unaffected (identity comes from the Bearer key, not the name).
+- Security: TOTP secrets stored per-principal at `/data/users/<principal>/totp.json`
+  (0600, atomic write), **Fernet-encrypted** off `MCP_KEY_PEPPER` (reuses
+  `secrets_registry` crypto) — **fail-closed** when the pepper is unset/weak.
+  Verification accepts ±1 step (±30s) clock skew, guards against replay
+  (a used step can't be reused) and rate-limits (5 consecutive fails → 5-min
+  lockout). Codes/secrets are never logged; enrol/verify/disable audited to
+  `/data/totp.audit.log`. Gated by `MCP_DISABLE_FEATURES=totp`.
+- Deps: `cryptography` is now pinned in requirements (was optional/unpinned).
+
+## [3.2.1] — 2026-07-08 — Fix: identify_with_token session-store constraint
+
+`identify_with_token` (3.2.0) bound the session with `principal_src="session_link_token"`,
+which violates the session-store CHECK constraint (`principal_src IN ('unified_auth',
+'identify')`) → the bind raised and the session stayed `not_identified`. Caught by an
+end-to-end OAuth simulation (the offline unit test used a stub store without the
+constraint). Fix: bind as `principal_src="identify"` (token-identify is an identify
+variant); the token channel is still recorded via `bound_via` in the result and as the
+audit `via` field.
+
+## [3.2.0] — 2026-07-08 — Token-based identify (no URL/header change)
+
+Follow-up to 3.1.0: some headless clients (claude.ai Cowork connectors) connect
+via the shared OAuth/secret_token and land `not_identified` — and their connector
+URL cannot be changed to a `/l/<token>/mcp` link (OAuth discovery normalizes to
+the origin). This adds a second delivery channel for the SAME session-link token
+that keeps the existing connector untouched.
+
+- New tool `identify_with_token(token)` — binds THIS session to the token's
+  principal (persisted on the session row, like `identify`) and activates the
+  bound connection (like `user_connection_activate`), so Telegram/Google resolve
+  to the principal and `odoo_*` target its Odoo. The api_key never leaves the
+  server. Reuses the 3.1.0 token store, so one token works both as a `/l/<token>`
+  URL and via this tool. Exposed to `not_identified` sessions and dispatched
+  before the role gate (it must be, to bootstrap identity); still only reachable
+  by a session already authenticated at the HTTP layer (unauth → 401 upstream).
+  Refuses to rebind a session already bound to a different principal. Audited to
+  `session_links.audit.log` as an `identify` event (never the raw token).
+- Usage (Cowork): keep the existing connector; add one line at task start —
+  `identify_with_token("<token>")` — then proceed with Telegram/Odoo.
+
+## [3.1.0] — 2026-07-08 — Pre-authenticated session links
+
+Enables headless MCP clients that cannot attach custom request headers —
+notably scheduled/cloud "Cowork" sessions on claude.ai — to authenticate as a
+chosen principal. Such clients previously landed unauthenticated, so the
+Telegram morning-brief delivery (bound to principal `rosen`) never fired.
+
+- New URL scheme `https://<host>/l/<token>/mcp`: the ASGI layer resolves the
+  token server-side to a stored binding `{principal, connection}` and injects
+  that connection's unified-auth headers (`Authorization: Bearer <api_key>` +
+  `X-Odoo-Url/Db/Login`), then rewrites the path to `/mcp` and proceeds through
+  the normal auth path. The client never holds the Odoo api_key — it stays in
+  the principal's server-side `connections.json`; only the URL travels.
+- New tools (any authenticated principal; owner-scoped, admins may target
+  others): `session_link_provision(connection, label?, ttl_days?, principal?)`,
+  `session_link_list`, `session_link_revoke(id)`, `session_link_rotate(id)`.
+- Security: token is 256-bit (`secrets.token_urlsafe(32)`), stored only as a
+  sha256 hash in `/data/session_links.json` (0600) and shown ONCE at provision.
+  Every use is audited to `/data/session_links.audit.log` (0600) by link id +
+  resolved principal + source ip — the raw token is never written to any log.
+  Only `/mcp`, `/sse`, `/messages*` suffixes are honoured (no path smuggling);
+  invalid/expired tokens return an opaque 404. Rotate invalidates the old URL.
+
+## [3.0.7] — 2026-06-13 — Telegram file transfer
+
+Closes the gap that the Telegram MCP could only send/read text — no way to
+deliver a config ZIP or document, forcing out-of-band workarounds.
+
+- `telegram_send_file(chat, path, caption?, reply_to?)` — send a file/document.
+  The source path is confined to `MCP_DOWNLOAD_ROOT` (default /data/downloads)
+  via `_safe_save_path`, so arbitrary host files can't be exfiltrated.
+- `telegram_download_media(chat, message_id, filename)` — download a message's
+  media into `MCP_DOWNLOAD_ROOT` (same TOCTOU-safe confinement as other
+  file-writing tools).
+- Service layer: `TelegramService.send_file` / `download_media` (Telethon
+  `send_file` / `download_media`).
+
+## [3.0.6] — 2026-06-12 — SINGLE_CONNECTION activation guard
+
+Fixes the silent wrong-target incident (2026-06-12): on a stack with
+`SINGLE_CONNECTION=true`, `user_connection_activate` returned "activated"
+while `_conn()` kept routing every `odoo_*` call to the global `default`
+connection — writes could land on a different client's production.
+
+- `user_connection_activate` now refuses with `MCP_SINGLE_CONNECTION` on
+  single-connection deployments instead of lying "activated".
+- `identify` skips the (meaningless) session auto-activate under
+  `SINGLE_CONNECTION`, and an auto-activate failure is now reported to the
+  caller (`activation_failed` + hint) instead of only a server-side WARNING.
+
+Ops note (master, 2026-06-12): removed `SINGLE_CONNECTION=true` and
+`MCP_ALLOW_NAME_IDENTIFY=1` from the multi-user master compose; archived the
+stale global `/data/connections.json` (default → twbulgaria).
+
+## [3.0.0] — 2026-06-10 — integrator platform GA
+
+Promotes the v3 integrator track to GA. Security GA-gate (B.0: 6 catastrophic
+multi-tenant holes closed — fail-closed role default, odoo_execute read-only
+allowlist, SQL data-modifying-CTE full-AST scan, per-session tenant + elevation,
+provision_* admin-principal gate, credential-read tier) plus the full
+implementator suite: fleet manager (B.1), secrets registry (B.4), module deploy
+pipeline (B.2), client onboarding wizard (B.3), backup/DR (B.5), health monitor
+(B.6), session handoff (A/B.8), tenant migration assess (B.7), and the
+tg_listen runbook helper. All admin-mutating tools DRY-RUN by default +
+admin-principal gated. Merged with the parallel Centrifugo + claude-terminal
+2.26.0a security line. 449 tests passing. Caveat: live-infra paths
+(Portainer/ssh/S3/Centrifugo) unit-mocked, not yet validated in production.
+
 ## [3.0.0-alpha.6] — 2026-05-04 — QA T3 batch + T4-4 leak tightening
 
 Closes the T3 set surfaced by the alpha.3+alpha.4 QA review,
@@ -384,6 +587,85 @@ client install/lifecycle tools и skills bundle.
   `mcp_terminal_get_config`.
 - Validated на 2026-04-28: 7 remote endpoints (122 + 6×151 = 1028 prefixed
   tools). Active tenant routing предстои за token cost reduction.
+## [2.26.0a] — 2026-05-06 — claude-terminal Phase 2.0a/b: hashed dirs + multi-tenant disclosure
+
+Stop-the-bleeding hardening of `claude-terminal` against cross-tenant
+filesystem enumeration, while the proper per-session container model
+(Phase 2.2) is being built.
+
+### Security
+- **Per-user workspace directories now use HMAC-SHA256(odoo_url|db|login)
+  keyed by `MCP_TENANT_SECRET`** — replaces the legacy `${db}__${login}`
+  layout which let any tenant who knew a colleague's email guess that
+  colleague's `/data/users/...` path. New paths are 32-hex characters and
+  unguessable without the host-side secret.
+- **`/data/users` now owned `root:claude` with mode 711** in the Docker
+  image baseline. `ls /data/users` returns `Permission denied` to the
+  shared `claude` uid; only `cd` into a known-hash path is allowed.
+- **`chmod 700 $USER_DIR` enforced every session start** as defence in
+  depth, in case a previous process loosened permissions.
+- **One-time migration** of existing `${db}__${login}` workspaces to the
+  new hashed name — runs idempotently on first login under the new
+  scheme; `.claude/`, `workspace/` and conversation history preserved.
+- **Multi-tenant disclosure banner** printed before every Claude CLI
+  launch warning users not to run `gh`, `gcloud`, `aws`, `npm login` in
+  the shared terminal — the same `$HOME` exposure pattern reported to
+  Odoo.sh as `intigriti ODOO-4U82VQ7M`.
+
+### Files
+- `claude-terminal/Dockerfile` — chown/chmod baseline for `/data/users`.
+- `claude-terminal/start-session.sh` — HMAC hash, legacy migration,
+  workspace chmod, multi-tenant banner.
+
+### Operator action required
+- Set `MCP_TENANT_SECRET` in production `.env` (any high-entropy string).
+  Without it the script falls back to `/etc/machine-id` which is stable
+  per host but root-readable only — functional but not preferred.
+
+### What this DOES NOT close
+- Same-uid `/proc/<pid>/environ` reads still expose `USER_DIR` and
+  `API_KEY` to peer sessions running as the same `claude` uid. This is
+  the architectural limit of a shared container and requires kernel
+  namespace separation to close. Phase 2.2 (per-session ephemeral
+  container with bind-mounted `/home/claude` from
+  `/shared/users/${PROFILE}/`) is being built in parallel as
+  `claude-terminal-session` image (v3).
+
+## [2.25.2] — 2026-04-28 — `mcp_terminal_get_config` empty env != unset
+
+### Fixed
+- `_env_chain()` helper distinguishes "env var unset" (`None`) from "explicitly
+  empty" (`""`). Previously a `CLAUDE_TERMINAL_URL=` line in compose was
+  silently ignored — falsy empty string fell through `or` chain to the
+  `mcp-{slug}.mcpworks.net` auto-derive default. Now an explicit empty
+  override is respected as "no terminal", matching operator intent.
+- All env-var resolutions (`MCP_PUBLIC_URL`, `MCP_SECRET_TOKEN`, `MCP_ADMIN_TOKEN`,
+  `QDRANT_URL`, `OLLAMA_URL`, etc.) routed through the new helper for consistent
+  semantics.
+
+### Verified live
+- All 7 stacks (6 poligroup tenants + Konex VPN-internal) on v2.25.2,
+  including Konex with custom `konex-tiva.space` MCP_PUBLIC_URL override.
+
+## [2.25.1] — 2026-04-28 — `mcp_terminal_get_config` real env names + DNS auto-derive
+
+### Fixed
+- `mcp_terminal_get_config` previously read non-existent env vars
+  (`MCP_CLIENT_TOKEN`, `MCP_API_KEY`, `MCP_PUBLIC_URL`) and returned blank
+  ZIP keys for all tenants. Now reads the actual deployment env names set
+  by `provisioning_engine` / compose templates:
+  - `claude_mcp_token` ← `MCP_SECRET_TOKEN`
+  - `claude_mcp_api_key` ← `MCP_ADMIN_TOKEN`
+  - `claude_mcp_client_id` ← `MCP_OAUTH_CLIENT_ID`
+- Auto-derive `claude_mcp_url` and `claude_terminal_url` from Cloudflare DNS
+  pattern (`mcp-{slug}.mcpworks.net` / `terminal-{slug}.mcpworks.net`) when
+  no env override is set. Slug taken from `MCP_OAUTH_CLIENT_ID` (stripped
+  of the `odoo-rpc-mcp-` prefix), matching the deployed hostname pattern.
+
+### Changed
+- `include_anthropic` default flipped from `True` → `False`. Anthropic API
+  key is privacy-sensitive and per-user — onboarding ZIPs should not
+  auto-embed it. Callers who need it must opt in explicitly.
 
 ## [2.24.0] — 2026-04-24 — Final 2.x polish: admin managers, HTTP auth, metrics scaffold
 

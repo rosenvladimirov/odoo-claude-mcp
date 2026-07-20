@@ -51,6 +51,40 @@ DEFAULT_USER_BLOCKED_TOOLS: set[str] = {
     "provision_issue_api_key",
     "provision_revoke_api_key",
     "provision_list_api_keys",
+    # v3 fleet management (mutates live stacks)
+    "fleet_list",
+    "fleet_status",
+    "fleet_upgrade",
+    "fleet_rollback",
+    # v3 secrets registry (rotates stack tokens)
+    "secrets_list",
+    "secrets_register",
+    "secrets_rotate",
+    "secrets_revoke",
+    # v3 module deploy (rsync + ephemeral -u on live hosts)
+    "module_deploy",
+    "module_deploy_status",
+    "module_deploy_rollback",
+    "module_deploy_history",
+    # v3 supervisor remote control (Portainer sidecar exec / one-shot supervisor.py)
+    "supervisor_status",
+    "supervisor_run",
+    "supervisor_history",
+    "supervisor_sidecar_status",
+    # v3 client onboarding wizard
+    "client_onboard",
+    "client_onboard_status",
+    # v3 backup / DR
+    "tenant_backup",
+    "tenant_restore",
+    "backup_list",
+    "backup_history",
+    # v3 health monitor
+    "health_scan",
+    "stack_health",
+    # v3 tenant migration
+    "migrate_assess",
+    "migrate_history",
 }
 
 DEFAULT_USER_BLOCKED_PROXY_PREFIXES: set[str] = {
@@ -146,9 +180,21 @@ PROTECTED_FROM_WRITE = _csv(
 )
 
 
-def get_role() -> str:
-    """Returns 'admin' | 'user' | 'legacy'. Default depends on VERSION marker."""
-    return os.environ.get("MCP_ROLE", "admin").strip().lower() or "admin"
+def get_role(principal: str | None = None,
+             admin_principals: set | None = None) -> str:
+    """Returns 'admin' | 'user' | 'legacy'.
+
+    Fail-closed: default is 'user'. Admin is granted only when MCP_ROLE is
+    explicitly set, OR the bound (unified-auth) principal is a verified admin
+    principal (MCP_ADMIN_PRINCIPALS). Without either, an unset MCP_ROLE no
+    longer silently grants full admin (the old fail-open default).
+    """
+    env = os.environ.get("MCP_ROLE", "").strip().lower()
+    if env:
+        return env
+    if principal and admin_principals and principal in admin_principals:
+        return "admin"
+    return "user"
 
 
 def is_destructive(tool_name: str) -> bool:
@@ -176,15 +222,27 @@ def is_protected_unlink(tool_name: str, arguments: dict | None) -> tuple[bool, s
     return False, model
 
 
-def is_protected_execute(tool_name: str, arguments: dict | None) -> tuple[bool, str, str, str]:
-    """For odoo_execute, refuse dangerous method+model combinations.
+# Read-only method allowlist for USER role via odoo_execute. The generic
+# dispatcher can call ANY model method, so a denylist is inherently leaky
+# (action_post/button_*/_write/run/name_create/copy/message_post all mutate
+# without appearing in any denylist). USER already has dedicated, model-gated
+# odoo_create/write/unlink tools; the generic dispatcher is therefore limited
+# to non-mutating ORM methods. Everything else requires mcp_elevate.
+SAFE_EXECUTE_METHODS: set = _csv("MCP_SAFE_EXECUTE_METHODS", {
+    "search", "read", "search_read", "search_count",
+    "fields_get", "name_get", "name_search", "read_group",
+    "default_get", "get_field_translations", "fields_view_get",
+    "get_views", "check_access_rights", "exists",
+})
 
-    Block conditions (any of):
-      1. method=unlink on PROTECTED_FROM_UNLINK model
-      2. method in {write, create} on PROTECTED_FROM_WRITE model
-      3. method contains DANGEROUS_METHOD_SUBSTRINGS (upgrade/install/uninstall)
-      4. method in DANGEROUS_METHOD_EXACT (execute, execute_kw, module_*)
-      5. model=res.config.settings + method.startswith('execute')
+
+def is_protected_execute(tool_name: str, arguments: dict | None) -> tuple[bool, str, str, str]:
+    """For odoo_execute, allow only a read-only method allowlist for USER role.
+
+    The specific blocks below still fire first (so their precise reasons are
+    preserved for diagnostics); any method NOT in SAFE_EXECUTE_METHODS is then
+    refused (fail-closed). ADMIN / LEGACY / elevated callers bypass this entirely
+    in check_call() before is_protected_execute is consulted.
 
     Returns (is_blocked, model, method, reason)."""
     if tool_name != "odoo_execute":
@@ -205,7 +263,54 @@ def is_protected_execute(tool_name: str, arguments: dict | None) -> tuple[bool, 
     if model == "res.config.settings" and method.startswith("execute"):
         return True, model, method, "config_settings_execute"
 
+    # Allowlist gate (fail-closed): mutating/business/dispatch methods
+    # (action_*, button_*, _write, run, name_create, copy, message_post,
+    # get_param secret-reads, ...) all fall through to here and are denied.
+    if method not in SAFE_EXECUTE_METHODS:
+        return True, model, method, "method_not_in_readonly_allowlist"
+
     return False, model, method, ""
+
+
+# Credential-bearing models with NO safe per-user "own record" concept — these
+# are shared secret stores (database.secret, SMTP/IMAP passwords, license keys,
+# API keys, TOTP secrets). A USER reading them = reading everyone's secrets, so
+# read/search is refused for USER role (requires elevation). A USER may still
+# read their OWN data on ordinary models (res.partner, their own res.users via
+# Odoo's record rules) — those are not in this set.
+DEFAULT_CREDENTIAL_READ_MODELS: set = {
+    "ir.config_parameter",
+    "ir.mail_server",
+    "fetchmail.server",
+    "res.users.apikeys",
+    "auth.totp.user",
+    "auth.totp.device",
+}
+CREDENTIAL_READ_MODELS = _csv("MCP_CREDENTIAL_READ_MODELS",
+                              DEFAULT_CREDENTIAL_READ_MODELS)
+# Read tools + read methods the gate inspects for credential models.
+_READ_TOOLS: set = {"odoo_read", "odoo_search", "odoo_search_read",
+                    "odoo_search_count", "odoo_fields_get", "odoo_read_group"}
+_READ_METHODS: set = {"read", "search", "search_read", "search_count",
+                      "read_group", "name_get", "name_search", "fields_get"}
+
+
+def is_protected_credential_read(tool_name: str, arguments: dict | None) -> tuple[bool, str]:
+    """Refuse USER reads of shared credential stores (own data stays allowed).
+
+    Covers both the direct read tools (odoo_read/search/search_read/...) and
+    odoo_execute with a read method. Returns (is_blocked, model)."""
+    args = arguments or {}
+    model = (args.get("model") or "").strip().lower()
+    if not model or model not in CREDENTIAL_READ_MODELS:
+        return False, model
+    if tool_name in _READ_TOOLS:
+        return True, model
+    if tool_name == "odoo_execute":
+        method = (args.get("method") or "").strip().lower()
+        if method in _READ_METHODS:
+            return True, model
+    return False, model
 
 
 def is_protected_write_create(tool_name: str, arguments: dict | None) -> tuple[bool, str, str]:
@@ -292,6 +397,21 @@ def check_call(tool_name: str, arguments: dict | None,
             "hint": (
                 f"Cannot {op} on protected model '{model}'. Use mcp_elevate "
                 f"first or scope changes to non-protected models."
+            ),
+        }
+
+    # Credential-read tier: USER may not read shared secret stores.
+    blocked, model = is_protected_credential_read(tool_name, arguments)
+    if blocked:
+        return False, {
+            "reason": "protected_credential_read",
+            "tool": tool_name,
+            "model": model,
+            "role": role,
+            "hint": (
+                f"Reading shared credential store '{model}' requires admin. "
+                f"Use mcp_elevate(reason='...', ttl=300). Your own records on "
+                f"ordinary models remain readable."
             ),
         }
 

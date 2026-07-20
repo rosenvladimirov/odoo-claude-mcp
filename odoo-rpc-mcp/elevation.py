@@ -1,16 +1,15 @@
 """
 v3 elevation — temporary admin window for USER role.
 
-Single-process global state (singleton) with auto-expire and audit log.
+PER-SESSION scope: each elevation record is keyed by session_key, so an
+mcp_elevate() in one session does NOT elevate any other concurrent session.
+Records are ephemeral (in-memory) and cleared on restart — by design.
 Two control tools (mcp_elevate / mcp_drop_elevation) wired into server.py.
 
-Per-session scope is a follow-up; current scope is per-server. For
-multi-developer deployments document this explicitly.
-
 Audit format (jsonl, /data/elevation_audit.log):
-  {"ts":"...","action":"GRANTED","ttl":300,"reason":"...","by":"<host/user if available>"}
-  {"ts":"...","action":"DROPPED","ts_granted":"..."}
-  {"ts":"...","action":"EXPIRED","ts_granted":"...","ttl":300}
+  {"ts":"...","action":"GRANTED","session":"mcp:..","principal":"..","ttl":300,"reason":"..."}
+  {"ts":"...","action":"DROPPED","session":"mcp:..","principal":"..","ts_granted":"..."}
+  {"ts":"...","action":"EXPIRED","session":"mcp:..","ts_granted":"..","ttl":300}
 """
 
 from __future__ import annotations
@@ -31,12 +30,8 @@ DEFAULT_TTL = int(os.environ.get("MCP_ELEVATION_TTL", "300"))
 MAX_TTL = int(os.environ.get("MCP_ELEVATION_MAX_TTL", "3600"))
 
 _lock = threading.RLock()
-_state = {
-    "granted_at": 0.0,
-    "expires_at": 0.0,
-    "ttl": 0,
-    "reason": "",
-}
+# Per-session elevation records, keyed by session_key ('mcp:<sid>'|'sse:<sid>').
+_sessions: dict[str, dict] = {}
 
 
 def _audit(action: str, **extra) -> None:
@@ -53,24 +48,30 @@ def _audit(action: str, **extra) -> None:
         logger.warning("elevation audit write failed: %s", e)
 
 
-def is_elevated() -> bool:
+def is_elevated(key: str | None) -> bool:
+    """True if THIS session currently holds a live elevation window.
+
+    Fail-closed: a missing session key (e.g. list_tools without a resolvable
+    session) is treated as not-elevated.
+    """
+    if not key:
+        return False
     with _lock:
-        if _state["expires_at"] <= 0:
+        st = _sessions.get(key)
+        if not st or st["expires_at"] <= 0:
             return False
-        if time.time() >= _state["expires_at"]:
-            # Auto-expire.
-            _audit("EXPIRED",
-                   ts_granted=_state.get("granted_at"),
-                   ttl=_state.get("ttl"))
-            _state["granted_at"] = 0.0
-            _state["expires_at"] = 0.0
-            _state["ttl"] = 0
-            _state["reason"] = ""
+        if time.time() >= st["expires_at"]:
+            _audit("EXPIRED", session=key, principal=st.get("principal"),
+                   ts_granted=st.get("granted_at"), ttl=st.get("ttl"))
+            _sessions.pop(key, None)
             return False
         return True
 
 
-def grant(reason: str, ttl: int | None = None) -> dict:
+def grant(key: str | None, reason: str, ttl: int | None = None,
+          principal: str | None = None) -> dict:
+    if not key:
+        return {"error": "no MCP session context; cannot elevate"}
     if ttl is None:
         ttl = DEFAULT_TTL
     ttl = max(1, min(int(ttl), MAX_TTL))
@@ -79,12 +80,13 @@ def grant(reason: str, ttl: int | None = None) -> dict:
         return {"error": "reason is required"}
     now = time.time()
     with _lock:
-        _state["granted_at"] = now
-        _state["expires_at"] = now + ttl
-        _state["ttl"] = ttl
-        _state["reason"] = reason
-    _audit("GRANTED", ttl=ttl, reason=reason)
-    logger.info("elevation: granted ttl=%ds reason=%r", ttl, reason)
+        _sessions[key] = {
+            "granted_at": now, "expires_at": now + ttl,
+            "ttl": ttl, "reason": reason, "principal": principal,
+        }
+    _audit("GRANTED", session=key, principal=principal, ttl=ttl, reason=reason)
+    logger.info("elevation: granted session=%s principal=%s ttl=%ds reason=%r",
+                key, principal, ttl, reason)
     return {
         "elevated": True,
         "ttl": ttl,
@@ -93,30 +95,31 @@ def grant(reason: str, ttl: int | None = None) -> dict:
     }
 
 
-def drop() -> dict:
+def drop(key: str | None) -> dict:
+    if not key:
+        return {"elevated": False, "msg": "no MCP session context"}
     with _lock:
-        if _state["expires_at"] <= 0:
+        st = _sessions.get(key)
+        if not st or st["expires_at"] <= 0:
             return {"elevated": False, "msg": "not currently elevated"}
-        ts_granted = _state["granted_at"]
-        _state["granted_at"] = 0.0
-        _state["expires_at"] = 0.0
-        _state["ttl"] = 0
-        _state["reason"] = ""
-    _audit("DROPPED", ts_granted=ts_granted)
-    logger.info("elevation: dropped")
+        ts_granted = st["granted_at"]
+        principal = st.get("principal")
+        _sessions.pop(key, None)
+    _audit("DROPPED", session=key, principal=principal, ts_granted=ts_granted)
+    logger.info("elevation: dropped session=%s", key)
     return {"elevated": False}
 
 
-def status() -> dict:
+def status(key: str | None) -> dict:
+    if not is_elevated(key):  # also triggers lazy expiry/cleanup
+        return {"elevated": False}
     with _lock:
-        if _state["expires_at"] <= 0 or time.time() >= _state["expires_at"]:
-            is_elevated()  # trigger expiry
-            return {"elevated": False}
+        st = _sessions[key]
         return {
             "elevated": True,
-            "ttl": _state["ttl"],
-            "expires_in": int(_state["expires_at"] - time.time()),
-            "reason": _state["reason"],
+            "ttl": st["ttl"],
+            "expires_in": int(st["expires_at"] - time.time()),
+            "reason": st["reason"],
         }
 
 
@@ -126,9 +129,10 @@ def get_control_tools():
         Tool(
             name="mcp_elevate",
             description=(
-                "Grant the current MCP server temporary admin rights. While "
-                "elevated, USER-role gates (destructive tools, protected "
-                "unlink, protected SQL writes) are bypassed. Auto-expires "
+                "Grant YOUR CURRENT SESSION temporary admin rights (does not "
+                "affect other sessions). While elevated, USER-role gates "
+                "(destructive tools, protected unlink, protected SQL writes) "
+                "are bypassed. Auto-expires "
                 f"after `ttl` seconds (default {DEFAULT_TTL}, max {MAX_TTL}). "
                 "Logged to /data/elevation_audit.log. `reason` is required "
                 "for audit traceability."
@@ -162,12 +166,14 @@ def get_control_tools():
 CONTROL_TOOL_NAMES = {"mcp_elevate", "mcp_drop_elevation", "mcp_elevation_status"}
 
 
-def handle(name: str, arguments: dict | None) -> dict:
+def handle(name: str, arguments: dict | None,
+           key: str | None = None, principal: str | None = None) -> dict:
     arguments = arguments or {}
     if name == "mcp_elevate":
-        return grant(arguments.get("reason", ""), arguments.get("ttl"))
+        return grant(key, arguments.get("reason", ""), arguments.get("ttl"),
+                     principal=principal)
     if name == "mcp_drop_elevation":
-        return drop()
+        return drop(key)
     if name == "mcp_elevation_status":
-        return status()
+        return status(key)
     return {"error": f"unknown elevation tool: {name}"}

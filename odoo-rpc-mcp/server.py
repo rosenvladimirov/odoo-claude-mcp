@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "2.25.0"
+__version__ = "3.3.4"
 
 import asyncio
 import hmac
@@ -37,7 +37,7 @@ from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.types import TextContent, Tool
 
-from google_service import GoogleServiceManager
+from google_service import GoogleServiceManager, GoogleRegistry
 from telegram_service import TelegramServiceManager, TelegramRegistry
 import telegram_agent
 
@@ -50,6 +50,16 @@ import tool_security
 import elevation
 import api_key_manager
 import provisioning_api
+import fleet_manager
+import secrets_registry
+import module_deploy
+import supervisor_deploy
+import client_onboard
+import backup_manager
+import health_monitor
+import session_handoff
+import tenant_migrate
+import tg_listen_helper
 
 # ─── Feature flags ───────────────────────────────────────────
 # MCP_DISABLE_FEATURES=ssh,portainer,github,google,telegram,memory,ai,public,website,web,proxy
@@ -69,6 +79,7 @@ _FEATURE_PREFIXES: dict[str, tuple] = {
     "public":    ("public_access_",),
     "website":   ("odoo_website_",),
     "web":       ("odoo_web_",),
+    "totp":      ("identify_totp_", "identify_verify_totp"),
 }
 
 def _tool_disabled(tool_name: str) -> bool:
@@ -1185,9 +1196,9 @@ class ConnectionManager:
         return False
 
     def get(self, alias: str = "default") -> OdooConnection:
+        # Strict: explicit alias miss is always an error (no silent
+        # single-connection fallback — that masked cross-session bleed).
         if alias not in self.connections:
-            if len(self.connections) == 1:
-                return next(iter(self.connections.values()))
             raise Exception(
                 f"Connection '{alias}' not found. "
                 f"Available: {list(self.connections.keys())}"
@@ -1201,7 +1212,7 @@ class ConnectionManager:
 # ─── MCP Server ─────────────────────────────────────────────
 manager: ConnectionManager | None = None
 session_mgr: SessionManager | None = None
-google_mgr: GoogleServiceManager | None = None
+google_registry: GoogleRegistry | None = None
 telegram_registry: TelegramRegistry | None = None
 mcp_server = Server("odoo-rpc-mcp")
 
@@ -1267,24 +1278,67 @@ def _md_to_html(text: str) -> str:
         )
 
 
-def _conn(args: dict) -> OdooConnection:
-    """Resolve the connection for a tool call.
+def _rehydrate_session_conn(sc: "SessionContext", desc: dict) -> "OdooConnection | None":
+    """Rebuild a live OdooConnection from the session-store descriptor.
 
-    Resolution order:
+    Descriptors carry NO secrets. 'user_profile' descriptors re-read the
+    credentials from the principal's connections.json; 'inline' descriptors
+    cannot be rehydrated (secrets were never persisted) — caller must
+    odoo_connect again.
+    """
+    src = desc.get("source")
+    if src == "user_profile":
+        user, alias = desc.get("user"), desc.get("alias")
+        if not user or not alias:
+            return None
+        c = _load_user_connections(user).get(alias)
+        if not c:
+            return None
+        conn = OdooConnection(
+            alias="default",
+            url=c["url"], db=c["db"], username=c["user"],
+            api_key=c.get("api_key", ""), password=c.get("password", ""),
+            protocol=c.get("protocol", "xmlrpc"),
+        )
+        conn.authenticate()
+        return conn
+    return None  # inline / unknown → re-connect explicitly
+
+
+def _conn(args: dict) -> OdooConnection:
+    """Resolve the connection for a tool call (strict session model).
+
+    Resolution order — NO silent fallback:
       1. Explicit non-default named alias in ``args["connection"]`` →
          honored from the global catalogue (``manager``).
-      2. This Claude session's active connection (per-session isolation) —
-         set by odoo_connect / identify / user_connection_activate.
-      3. Fallback: global ``manager["default"]`` (env bootstrap /
-         single-connection / backward compat for un-identified callers).
+      2. SINGLE_CONNECTION=1 deployments → global "default" (explicit
+         single-tenant opt-in, documented).
+      3. This session's active connection: live object from SessionRuntime,
+         else rehydrated from the session-store descriptor.
+      4. Refusal: MCP_NO_CONNECTION (fail-closed).
     """
     alias = args.get("connection", "default")
     if alias and alias != "default":
         return _mgr().get(alias)
-    sc = _get_session_conn()
-    if sc is not None:
-        return sc
-    return _mgr().get("default")
+    if SINGLE_CONNECTION:
+        return _mgr().get("default")
+    sc = _sctx()
+    conn = session_runtime.get_conn(sc.session_key)
+    if conn is not None:
+        return conn
+    desc = session_store_inst.get_state(sc.session_key, "connection", "active")
+    if desc:
+        try:
+            conn = _rehydrate_session_conn(sc, desc)
+        except Exception as e:
+            logger.warning(f"[SESSION] conn rehydrate failed for {sc.session_key}: {e}")
+            conn = None
+        if conn is not None:
+            session_runtime.set_conn(sc.session_key, conn)
+            return conn
+        # Stale/unrehydratable descriptor → drop it, then refuse below.
+        session_store_inst.delete_state(sc.session_key, "connection", "active")
+    raise _sm_error("MCP_NO_CONNECTION")
 
 
 # ── TZ + backup helpers (used by stock_initial_* tools) ──
@@ -1401,8 +1455,6 @@ def _field_info(conn: OdooConnection, model: str, field_name: str) -> dict:
 # ─── Web Session Manager ─────────────────────────────────
 
 import requests as http_requests
-
-_web_sessions: dict[str, "OdooWebSession"] = {}
 
 
 class OdooWebSession:
@@ -1567,76 +1619,99 @@ class OdooWebSession:
         }
 
 
-def _web_session_key(alias: str) -> str:
-    """Composite key isolating web sessions per Claude session + alias."""
-    return f"{_get_mcp_session_key()}::{alias}"
-
-
 def _get_web_session(args: dict) -> OdooWebSession:
-    """Get the per-session web session for a connection alias."""
+    """Get this session's web session for a connection alias (strict model).
+
+    Live object from SessionRuntime; on miss, rehydrate from the session-store
+    cookie descriptor (survives in-process evictions). No global fallback.
+    """
     alias = args.get("connection", "default")
-    key = _web_session_key(alias)
-    if key in _web_sessions and _web_sessions[key].authenticated:
-        return _web_sessions[key]
+    sc = _sctx()
+    ws = session_runtime.get_web(sc.session_key, alias)
+    if ws is not None and ws.authenticated:
+        return ws
+    desc = session_store_inst.get_state(sc.session_key, "web", alias)
+    if desc and desc.get("session_cookie"):
+        ws = OdooWebSession(desc["url"], desc["db"], desc.get("login", ""), "")
+        ws.session.cookies.set("session_id", desc["session_cookie"])
+        ws.uid = desc.get("uid")
+        session_runtime.set_web(sc.session_key, alias, ws)
+        return ws
     raise RuntimeError(f"No active web session for '{alias}'. Call odoo_web_login first.")
 
 
 # ─── Per-user storage ──────────────────────────────────────
-
-# In-memory: mcp_session_id -> user_name
-_session_users: dict[str, str] = {}
-
-# In-memory: mcp_session_id -> active OdooConnection for THIS Claude session.
-# Активната конекция е per-сесия (per закачен Claude), НЕ глобална за MCP
-# процеса — така два Claude-а (дори на един и същ Odoo юзер: prod vs test)
-# не си разменят конекциите. Глобалният ``manager`` остава само каталог на
-# именованите връзки + env bootstrap; живата "default" се пази тук per сесия.
-import threading as _sessconn_threading
-_session_conns: dict[str, "OdooConnection"] = {}
-_session_conns_lock = _sessconn_threading.Lock()
+# Strict session model: all per-session state (identity, active connection,
+# telegram phone, web cookies) lives in the SQLite session store + the
+# SessionRuntime live-object cache. No in-memory fallback dicts.
 
 
-def _set_session_conn(conn: "OdooConnection") -> None:
-    """Bind the active connection to the current MCP session."""
-    with _session_conns_lock:
-        _session_conns[_get_mcp_session_key()] = conn
+def _tg_session_phone() -> str:
+    """Return the Telegram phone bound to THIS session (strict, fail-closed).
 
-
-def _get_session_conn() -> "OdooConnection | None":
-    """Return this session's active connection, or None if not set."""
-    with _session_conns_lock:
-        return _session_conns.get(_get_mcp_session_key())
-
-
-def _clear_session_conn() -> None:
-    """Drop this session's active connection (on disconnect/session close)."""
-    with _session_conns_lock:
-        _session_conns.pop(_get_mcp_session_key(), None)
+    Publisher isolation: if the principal runs an eager-init publisher, an
+    unbound session AUTO-ADOPTS the publisher's phone — so interactive
+    send/read reuse the publisher's already-authorized client (same registry
+    key) without any re-auth. Combined with the re-auth block in telegram_auth,
+    a tenant Claude can use Telegram but can NEVER break the persistent listener.
+    """
+    sc = _sctx()
+    st = session_store_inst.get_state(sc.session_key, "telegram", "phone")
+    phone = (st or {}).get("phone", "")
+    if phone:
+        return phone
+    pub = _eager_tg_phones.get(sc.principal) if sc.principal else None
+    if pub:
+        return pub
+    raise _sm_error("MCP_NO_TELEGRAM_PHONE")
 
 
 def _tg() -> "TelegramServiceManager":
-    """Resolve the Telegram client for the current principal.
+    """Resolve the Telegram client for the current principal + bound phone.
 
-    Telegram identity is per-USER (one human account), so we key by the
-    resolved MCP user — NOT by session. Un-identified callers fall back to
-    the legacy global session, preserving single-user setups.
+    Strict session model: requires BOTH a bound principal (identity) and a
+    phone bound to this session via telegram_auth. Registry key is
+    '<principal>:<phone_tag>' — several humans sharing one principal/Odoo
+    key still get fully separate persistent Telegram sessions. No global
+    fallback; config_file is ALWAYS per-principal.
     """
     reg = telegram_registry
     if reg is None:
-        raise Exception("Telegram registry not initialized")
-    user = _get_current_user({})
-    if user:
-        base = _user_dir(user, create=True)
-        return reg.for_user(
-            user,
-            session_path=os.path.join(base, "telegram_session"),
-            config_file=os.path.join(base, "telegram_config.json"),
-        )
-    return reg.for_user("__global__")
+        raise Exception("Telegram service not initialized")
+    user = _require_principal()
+    phone = _tg_session_phone()
+    tag = _sanitize_name(phone)
+    base = _user_dir(user, create=True)
+    return reg.for_user(
+        f"{user}:{tag}",
+        session_path=os.path.join(base, f"telegram_{tag}"),
+        config_file=os.path.join(base, "telegram_config.json"),
+    )
 
-# Per-async-task user context (isolates concurrent MCP sessions)
+
+def _tg_subs_file(principal: str | None) -> str:
+    """Resolve the per-principal subscription allow-list file.
+
+    principal=None → the session's bound principal (strict, no global file).
+    An explicit principal arg is the admin path (assigning to OTHERS).
+    """
+    user = principal or _require_principal()
+    return os.path.join(_user_dir(user, create=True), "telegram_subscriptions.json")
+
+
+def _google() -> "GoogleServiceManager":
+    """Resolve the Google manager for the current principal (strict model).
+
+    OAuth token lives under the principal's data dir; the shared OAuth
+    client credentials file identifies the application, not the user.
+    """
+    if google_registry is None:
+        raise Exception("Google service not initialized")
+    principal = _require_principal()
+    token_file = os.path.join(_user_dir(principal, create=True), "google_token.json")
+    return google_registry.for_user(principal, token_file=token_file)
+
 import contextvars
-_current_user_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar("current_user", default=None)
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 REPOS_DIR = os.environ.get("REPOS_DIR", "/repos")
@@ -1684,7 +1759,7 @@ _CYR_TO_LAT = str.maketrans({
 
 
 def _sanitize_name(name: str) -> str:
-    """Transliterate to ASCII and sanitize for use as directory name."""
+    """Transliterate to ASCII and sanitize for use as a single directory name."""
     # Cyrillic transliteration first, then NFKD for accented Latin
     text = name.lower().translate(_CYR_TO_LAT)
     nfkd = unicodedata.normalize("NFKD", text)
@@ -1692,7 +1767,13 @@ def _sanitize_name(name: str) -> str:
     safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in ascii_name)
     while "__" in safe:
         safe = safe.replace("__", "_")
-    return safe.strip("_") or "user"
+    safe = safe.strip("_")
+    # SECURITY: never let a name resolve to a path-traversal component. A bare
+    # "." / ".." (the only traversal a single component can express, since "/"
+    # is already mapped to "_") would point _user_dir at /data root.
+    if safe in ("", ".", "..") or set(safe) == {"."}:
+        return "user"
+    return safe
 
 
 # ─── AI Invoice — tenant helpers ─────────────────────────
@@ -1816,6 +1897,104 @@ def _user_dir(user_name: str, create: bool = False) -> str:
     return d
 
 
+# Keep-alive references for eager-initialised Telegram clients (persistent
+# server-side publishers → Centrifugo). Without holding the ref the manager
+# would be GC'd and its event loop torn down.
+_eager_tg_refs: list = []
+# principal -> bound phone for eager-init publishers. Interactive sessions for
+# such a principal AUTO-ADOPT this phone (reuse the publisher's authorized
+# client for send/read) and are BLOCKED from re-auth — so a tenant Claude can
+# never disrupt the persistent listener. This is the publisher-isolation guard.
+_eager_tg_phones: dict = {}
+
+
+def _telegram_eager_init() -> None:
+    """Boot-time persistent Telegram publisher (variant A).
+
+    The strict-session model creates Telegram clients lazily per session, so
+    incoming-message → Centrifugo push only runs while a session holds a client.
+    For a 24/7 server-side publisher, eagerly construct the client(s) for the
+    principals listed in TELEGRAM_EAGER_PRINCIPALS (CSV of '<principal>:<phone>',
+    e.g. 'rosen:+359886100204'), replicating _tg()'s path derivation WITHOUT a
+    session context. If the session is authorized this starts the NewMessage →
+    `telegram:<principal>:<phone_tag>` push listener and keeps it alive.
+    """
+    spec = os.environ.get("TELEGRAM_EAGER_PRINCIPALS", "").strip()
+    if not spec or telegram_registry is None:
+        return
+    for pair in spec.split(","):
+        pair = pair.strip()
+        if not pair or ":" not in pair:
+            continue
+        principal, phone = pair.split(":", 1)
+        principal, phone = principal.strip(), phone.strip()
+        if not principal or not phone:
+            continue
+        tag = _sanitize_name(phone)
+        base = _user_dir(principal, create=True)
+        try:
+            mgr = telegram_registry.for_user(
+                f"{principal}:{tag}",
+                session_path=os.path.join(base, f"telegram_{tag}"),
+                config_file=os.path.join(base, "telegram_config.json"),
+            )
+            _eager_tg_refs.append(mgr)
+            _eager_tg_phones[principal] = phone
+            logger.info("telegram eager-init: %s:%s (push listener will start "
+                        "if session authorized; principal re-auth now BLOCKED)",
+                        principal, tag)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("telegram eager-init failed for %r: %s", pair, e)
+
+
+async def _telegram_send_asgi(scope, receive, send) -> None:
+    """POST /telegram/send {chat_id, text} → relay via the eager publisher.
+
+    Variant A reply path: Odoo posts here; we send through the single authorized
+    Telethon client (eager-init publisher) — no second client/login. Auth: shared
+    secret in TELEGRAM_SEND_SECRET (header X-Tg-Send-Secret). Fail-closed."""
+    async def _json(status: int, obj: dict):
+        body = json.dumps(obj).encode("utf-8")
+        await send({"type": "http.response.start", "status": status,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": body})
+
+    if scope.get("method") != "POST":
+        return await _json(405, {"error": "method_not_allowed"})
+    secret = os.environ.get("TELEGRAM_SEND_SECRET", "")
+    if not secret:
+        return await _json(503, {"error": "send_disabled",
+                                 "hint": "set TELEGRAM_SEND_SECRET"})
+    hdrs = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+    if not hmac.compare_digest(hdrs.get("x-tg-send-secret", ""), secret):
+        return await _json(401, {"error": "unauthorized"})
+    # read body
+    raw = b""
+    while True:
+        ev = await receive()
+        raw += ev.get("body", b"")
+        if not ev.get("more_body"):
+            break
+    try:
+        data = json.loads(raw or b"{}")
+    except Exception:
+        return await _json(400, {"error": "bad_json"})
+    chat = data.get("chat_id") or data.get("chat")
+    text = data.get("text") or ""
+    if chat in (None, "") or not text:
+        return await _json(400, {"error": "chat_id and text required"})
+    if not _eager_tg_refs:
+        return await _json(503, {"error": "no_publisher",
+                                 "hint": "TELEGRAM_EAGER_PRINCIPALS not active"})
+    try:
+        # send_message is sync (runs on the manager's own loop via _run).
+        res = await asyncio.to_thread(_eager_tg_refs[0].send_message, chat, text)
+        return await _json(200, {"ok": True, "result": res})
+    except Exception as e:  # noqa: BLE001
+        logger.warning("telegram /send failed for %s: %s", chat, e)
+        return await _json(502, {"error": "send_failed", "detail": str(e)})
+
+
 def _user_connections_file(user_name: str) -> str:
     return os.path.join(_user_dir(user_name), "connections.json")
 
@@ -1852,43 +2031,288 @@ def _save_user_active(user_name: str, active: dict):
         json.dump(active, f, indent=2, ensure_ascii=False)
 
 
-def _get_mcp_session_key() -> str:
-    """Get unique key for the current MCP session (per-client isolation)."""
+# ─── Strict session model (v2.30.0) ─────────────────────────
+# Source of truth: SQLite session store (session_store.py). Fail-closed:
+# no fallbacks — a tool call without resolvable session data is refused
+# with a structured error (error_code + how_to_fix).
+import session_store as _ss
+from dataclasses import dataclass as _sm_dataclass
+
+session_store_inst: "_ss.SessionStore | None" = None
+session_runtime: "_ss.SessionRuntime | None" = None
+
+
+@_sm_dataclass(frozen=True)
+class SessionContext:
+    """Resolved identity of the running tool call (set by the call_tool gate)."""
+    session_key: str            # 'mcp:<sid>' | 'sse:<sid>'
+    transport: str              # 'streamable_http' | 'sse'
+    principal: str | None       # mcp_user safe name (None until bound)
+    principal_src: str | None   # 'unified_auth' | 'identify' | None
+    caller: dict | None         # unified-auth dict {mcp_user, alias, url, db, login, uid}
+
+
+_session_ctx: "contextvars.ContextVar[SessionContext | None]" = contextvars.ContextVar(
+    "mcp_session_ctx", default=None,
+)
+
+# Canonical session error messages (English — translated client-side if ever needed)
+_SM_MSG = {
+    "MCP_NO_SESSION": (
+        "No MCP session established.",
+        "Re-initialize the MCP connection (the client must echo the Mcp-Session-Id "
+        "header issued at initialize). If the server was restarted, reconnect the client.",
+    ),
+    "MCP_SESSION_ORPHANED": (
+        "This MCP session has expired or was orphaned by a server restart.",
+        "Reconnect the MCP client to start a fresh session, then re-run identify()/"
+        "telegram_auth() as needed.",
+    ),
+    "MCP_NO_IDENTITY": (
+        "No identity is bound to this MCP session.",
+        "Either reconnect with unified-auth headers (Authorization: Bearer <odoo_api_key> "
+        "+ X-Odoo-Url, X-Odoo-Db, X-Odoo-Login) or call identify(name='<your profile>') "
+        "once in this session.",
+    ),
+    "MCP_NO_CONNECTION": (
+        "No active Odoo connection in this session.",
+        "Call identify(...) to auto-activate your saved connection, or "
+        "odoo_connect(url=, db=, username=, api_key=), or user_connection_activate(alias=).",
+    ),
+    "MCP_NO_TELEGRAM_PHONE": (
+        "No Telegram account is bound to this session.",
+        "Call telegram_auth(phone='+359...') first — if this phone was authorized "
+        "before, no SMS code is needed.",
+    ),
+    "MCP_AUTH_FAILED": (
+        "Unified-auth headers are present but failed validation against Odoo.",
+        "Check Authorization: Bearer <odoo_api_key> + X-Odoo-Url/X-Odoo-Db/X-Odoo-Login "
+        "values, and that the connection is registered (POST /api/user/register-connection).",
+    ),
+    "MCP_SESSION_PRINCIPAL_MISMATCH": (
+        "This MCP session is already bound to a different identity.",
+        "Reconnect the MCP client to start a fresh session.",
+    ),
+}
+
+
+def _sm_error(code: str) -> "_ss.SessionError":
+    msg, fix = _SM_MSG[code]
+    return _ss.SessionError(code, msg, fix)
+
+
+def _auth_fingerprint(raw_headers: dict) -> str | None:
+    """sha256 over url|db|login|api_key from unified-auth headers (audit only)."""
+    try:
+        auth = raw_headers.get(b"authorization", b"").decode()
+        key = auth[7:] if auth.startswith("Bearer ") else ""
+        blob = "|".join([
+            raw_headers.get(b"x-odoo-url", b"").decode().rstrip("/"),
+            raw_headers.get(b"x-odoo-db", b"").decode(),
+            raw_headers.get(b"x-odoo-login", b"").decode(),
+            key,
+        ])
+        return _auth_hashlib.sha256(blob.encode()).hexdigest()
+    except Exception:
+        return None
+
+
+_SM_REAP_INTERVAL = 900  # seconds between inline reaper passes
+_sm_last_reap = 0.0
+
+
+def _tg_reap_clients() -> list:
+    """Disconnect Telethon clients with no active session AND no subscriptions.
+
+    Clients are keyed '<principal>:<phone_tag>'. A client whose phone is still
+    bound to at least one ACTIVE session row stays. A client with a non-empty
+    subscription allow-list also stays — its Centrifugo push feed is a feature
+    that deliberately outlives MCP sessions. Everything else is disconnected,
+    which releases the Telethon SQLite session-file lock.
+    """
+    if telegram_registry is None or session_store_inst is None:
+        return []
+    try:
+        import telegram_subscriptions as _tsub
+    except Exception:
+        _tsub = None
+    live_keys = set()
+    try:
+        for s in session_store_inst.list_sessions(include_orphaned=False):
+            principal = s.get("principal")
+            if not principal:
+                continue
+            st = session_store_inst.get_state(s["session_key"], "telegram", "phone")
+            phone = (st or {}).get("phone")
+            if phone:
+                live_keys.add(f"{principal}:{_sanitize_name(phone)}")
+    except Exception as e:
+        logger.warning(f"[SESSION] tg reap: store scan failed: {e}")
+        return []
+    reaped = []
+    for key in telegram_registry.keys():
+        if key in live_keys:
+            continue
+        principal = key.split(":", 1)[0]
+        subs_path = os.path.join(_user_dir(principal), "telegram_subscriptions.json")
+        try:
+            has_subs = bool(_tsub.list_subs(subs_path)) if _tsub else False
+        except Exception:
+            has_subs = False
+        if has_subs:
+            continue  # push feed pinned by subscriptions — keep the client
+        if telegram_registry.disconnect(key):
+            reaped.append(key)
+    return reaped
+
+
+def _sm_maybe_reap() -> None:
+    """Inline reaper: orphan TTL-expired sessions + purge old ones, ≤1/15min."""
+    global _sm_last_reap
+    import time as _t
+    now = _t.monotonic()
+    if now - _sm_last_reap < _SM_REAP_INTERVAL:
+        return
+    _sm_last_reap = now
+    try:
+        res = session_store_inst.cleanup()
+        gone = (res.get("newly_orphaned") or []) + (res.get("purged") or [])
+        if gone and session_runtime is not None:
+            session_runtime.evict(gone, on_evict=_sm_teardown)
+        if gone:
+            logger.info(f"[SESSION] reaper: orphaned={len(res.get('newly_orphaned') or [])} "
+                        f"purged={len(res.get('purged') or [])}")
+        tg_reaped = _tg_reap_clients()
+        if tg_reaped:
+            logger.info(f"[SESSION] reaper: telegram clients disconnected: {tg_reaped}")
+        try:
+            import metrics
+            for _k in (res.get("newly_orphaned") or []):
+                metrics.observe_session_reaped("ttl_expired")
+            for _k in (res.get("purged") or []):
+                metrics.observe_session_reaped("purged")
+            rows = session_store_inst.list_sessions()
+            metrics.observe_session_store_counts(
+                sum(1 for r in rows if r.get("status") == "active"),
+                sum(1 for r in rows if r.get("status") != "active"),
+            )
+        except Exception:
+            pass
+    except Exception as e:
+        logger.warning(f"[SESSION] reaper failed: {e}")
+
+
+def _sm_teardown(kind: str, key, obj) -> None:
+    """Best-effort teardown of live per-session objects on evict."""
+    try:
+        if kind == "web" and obj is not None:
+            obj.destroy()
+    except Exception:
+        pass
+    # Odoo RPC connections hold no persistent socket — dropping the ref suffices.
+    # Telegram clients are per principal:phone and refcounted separately (see
+    # _tg_maybe_disconnect) because Centrifugo push must survive session loss.
+
+
+async def resolve_session_context() -> "SessionContext":
+    """Resolve (or establish) the session row for the running MCP request.
+
+    Must be called from the async handler task, where mcp_server.request_context
+    is available. Raises SessionError on any unresolvable state (fail-closed).
+    """
+    store = session_store_inst
+    if store is None:
+        raise _ss.SessionError("MCP_NO_SESSION", "Session store is not initialized.",
+                               "Server startup bug — check server logs.")
     try:
         ctx = mcp_server.request_context
-        return str(id(ctx.session))
     except (LookupError, AttributeError):
-        return "default"
+        raise _sm_error("MCP_NO_SESSION")
+    req = getattr(ctx, "request", None)
+    skey = transport = None
+    if req is not None:
+        try:
+            sid = req.headers.get("mcp-session-id")
+        except Exception:
+            sid = None
+        if sid:
+            skey, transport = f"mcp:{sid}", "streamable_http"
+        else:
+            try:
+                qsid = req.query_params.get("session_id")
+            except Exception:
+                qsid = None
+            if qsid:
+                skey, transport = f"sse:{qsid}", "sse"
+    if skey is None:
+        raise _sm_error("MCP_NO_SESSION")
+
+    # Principal from unified-auth headers (validated per request, 5-min cached)
+    caller = None
+    raw_headers = dict(req.scope.get("headers") or [])
+    if raw_headers.get(b"x-odoo-url"):
+        caller = get_caller_odoo_user(raw_headers)
+        if not caller:
+            raise _sm_error("MCP_AUTH_FAILED")
+
+    row = store.resolve(skey)
+    if row is None:
+        # The transport-level session is alive (the SDK already validated the
+        # session id), so a missing row means "first tool call" — create it.
+        # create() returns None when an orphaned/revoked row holds this key.
+        ci = {}
+        try:
+            ci = {"user_agent": req.headers.get("user-agent", ""),
+                  "remote": (req.client.host if req.client else "")}
+        except Exception:
+            pass
+        row = store.create(
+            skey, transport,
+            principal=(caller or {}).get("mcp_user"),
+            principal_src="unified_auth" if caller else None,
+            auth_fp=_auth_fingerprint(raw_headers) if caller else None,
+            client_info=ci,
+        )
+        if row is None:
+            raise _sm_error("MCP_SESSION_ORPHANED")
+    else:
+        store.touch(skey)
+        if caller:
+            if row.principal is None:
+                store.bind_principal(skey, caller["mcp_user"], "unified_auth",
+                                     auth_fp=_auth_fingerprint(raw_headers))
+                row = store.resolve(skey) or row
+            elif row.principal != caller["mcp_user"]:
+                store.mark_orphaned(skey, "principal_mismatch")
+                raise _sm_error("MCP_SESSION_PRINCIPAL_MISMATCH")
+    _sm_maybe_reap()
+    return SessionContext(
+        session_key=skey, transport=transport,
+        principal=row.principal, principal_src=row.principal_src,
+        caller=caller,
+    )
 
 
-def _get_current_user(args: dict) -> str | None:
-    """Resolve the current MCP user for the running request.
+def _admin_principals() -> set:
+    """Principals allowed to see/revoke other users' sessions (env CSV)."""
+    raw = os.environ.get("MCP_ADMIN_PRINCIPALS", "")
+    return {p.strip() for p in raw.split(",") if p.strip()}
 
-    Security invariant (task 4): this function NEVER reads identity from
-    ``args``. Callers of memory_* / user_connection_* tools cannot pass a
-    ``user`` argument and address another profile — identity comes only
-    from the HTTP-validated ContextVar or from the per-session slot set
-    by ``identify()``.
 
-    Priority:
-      0. HTTP-validated Odoo caller (unified-auth, task 2).
-         ContextVar ``_odoo_caller_ctx`` is set by the ASGI middleware
-         after successful XMLRPC validation + connection lookup.
-      1. Per-session user bound by ``identify()`` tool call (stdio).
-      2. Backward-compat "current" slot (single-session legacy).
+def _sctx() -> "SessionContext":
+    """Session context accessor for sync tool code. Fail-closed."""
+    sc = _session_ctx.get()
+    if sc is None:
+        raise _sm_error("MCP_NO_SESSION")
+    return sc
 
-    Returns None if no identity is bound — tools should then error with
-    "Call identify(name) first" or "Use unified-auth headers".
-    """
-    caller = _odoo_caller_ctx.get()
-    if caller:
-        return caller["mcp_user"]
-    key = _get_mcp_session_key()
-    if key in _session_users:
-        return _session_users[key]
-    if "current" in _session_users:
-        return _session_users["current"]
-    return None
+
+def _require_principal() -> str:
+    """Return the bound principal or refuse (fail-closed)."""
+    sc = _sctx()
+    if not sc.principal:
+        raise _sm_error("MCP_NO_IDENTITY")
+    return sc.principal
 
 
 # ─── Odoo API-key authentication middleware (unified auth, task 2) ──
@@ -1902,11 +2326,19 @@ _auth_cache: dict[str, tuple[str, str, int, float]] = {}
 _auth_cache_lock = _auth_threading.Lock()
 AUTH_CACHE_TTL = int(os.environ.get("AUTH_CACHE_TTL", "300"))  # 5 minutes default
 
-# Per-async-task validated Odoo caller. Set by ASGI middleware,
-# read by MCP tool handlers via _get_current_user.
-_odoo_caller_ctx: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
-    "odoo_caller", default=None,
-)
+
+def _hmac_eq(a: str, b: str) -> bool:
+    """Constant-time string comparison for secrets/tokens."""
+    import hmac as _hmac
+    if not a or not b:
+        return False
+    return _hmac.compare_digest(str(a), str(b))
+
+
+# NOTE: v3 already ships a TOCTOU-safe _safe_save_path (+ _open_for_write_nofollow,
+# MCP_DOWNLOAD_ROOT) defined earlier in this module — kept as-is instead of the
+# v2 per-principal variant. The v2 security port's save_path confinement is
+# therefore already satisfied by v3's existing implementation.
 
 
 def _resolve_mcp_user(url: str, db: str, login: str, api_key: str) -> tuple[str, str] | None:
@@ -1998,6 +2430,36 @@ def _xmlrpc_validate(url: str, db: str, login: str, api_key: str) -> int | None:
         return None
 
 
+def _ssrf_target_allowed(url: str) -> bool:
+    """Return False if the URL host resolves to a private/loopback/link-local
+    address (SSRF guard for outbound auth XMLRPC when no whitelist is set).
+
+    Conservative: on resolution failure we ALLOW (a public FQDN that briefly
+    fails DNS shouldn't lock out legitimate logins); the whitelist is the
+    strong control, this is the safety net for the empty-whitelist default.
+    """
+    import ipaddress
+    import socket as _socket
+    from urllib.parse import urlparse
+    host = (urlparse(url).hostname or "").strip()
+    if not host:
+        return False
+    try:
+        infos = _socket.getaddrinfo(host, None)
+    except Exception:
+        return True  # can't resolve → not our call to block; whitelist is the gate
+    for info in infos:
+        ip = info[4][0]
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        if (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_reserved or addr.is_multicast or addr.is_unspecified):
+            return False
+    return True
+
+
 def get_caller_odoo_user(headers: dict) -> dict | None:
     """Resolve calling MCP user from HTTP headers.
 
@@ -2027,6 +2489,13 @@ def get_caller_odoo_user(headers: dict) -> dict | None:
         if url not in allowed:
             logger.warning(f"[AUTH] Rejected non-whitelisted Odoo URL: {url}")
             return None
+    elif not _ssrf_target_allowed(url):
+        # SECURITY: with no explicit whitelist, refuse outbound XMLRPC to
+        # private/loopback/link-local targets — otherwise a dummy Bearer +
+        # X-Odoo-Url=http://qdrant:6333 turns this auth path into a blind
+        # SSRF/port-scanner against the backend network.
+        logger.warning(f"[AUTH] Rejected SSRF-unsafe Odoo URL (private/loopback): {url}")
+        return None
 
     cache_key = _auth_hashlib.sha256(f"{url}|{db}|{login}|{api_key}".encode()).hexdigest()
     now = _auth_time.time()
@@ -2066,6 +2535,681 @@ def get_caller_odoo_user(headers: dict) -> dict | None:
         "mcp_user": mcp_user, "alias": alias,
         "url": url, "db": db, "login": login, "uid": uid,
     }
+
+
+# ─── Pre-authenticated session links (headless callers, e.g. Cowork) ──────
+#
+# A *session link* is a high-entropy URL — https://<host>/l/<token>/mcp — that
+# the ASGI layer resolves server-side to a stored binding {principal,
+# connection}. A request arriving on that path is treated exactly as if it had
+# carried the unified-auth headers (Authorization: Bearer <api_key> +
+# X-Odoo-Url/Db/Login) of that principal's saved connection.
+#
+# Rationale: some MCP clients (scheduled/headless Cowork sessions on claude.ai)
+# cannot attach custom request headers, so they land unauthenticated. A link
+# lets such a caller authenticate as a chosen principal WITHOUT the client ever
+# holding the Odoo api_key — the key stays in the principal's server-side
+# connections.json; the URL is the only thing the client carries.
+#
+# Security posture:
+#   • Token is 256-bit (secrets.token_urlsafe(32)); guessing is infeasible.
+#   • It is a CREDENTIAL: returned ONCE at provision time, stored only as a
+#     sha256 hash, and NEVER written to logs. Use is audited by link id +
+#     resolved principal + source ip (never the raw token).
+#   • A link grants the bound principal's access → provisioning is owner-scoped
+#     (admins may target others); revoke/rotate any time (rotate invalidates the
+#     old URL immediately).
+#   • Only /mcp, /sse and /messages* suffixes are honoured (no path smuggling).
+
+SESSION_LINKS_FILE = os.path.join(DATA_DIR, "session_links.json")
+SESSION_LINK_AUDIT_FILE = os.path.join(DATA_DIR, "session_links.audit.log")
+SESSION_LINK_TOOL_NAMES = {
+    "session_link_provision", "session_link_list",
+    "session_link_revoke", "session_link_rotate",
+}
+_session_links_lock = _auth_threading.Lock()
+
+
+def _session_link_public_base() -> str:
+    return os.environ.get("MCP_PUBLIC_URL", "https://mcp.odoo-shell.space").rstrip("/")
+
+
+def _session_link_token_hash(token: str) -> str:
+    return _auth_hashlib.sha256(token.encode()).hexdigest()
+
+
+def _load_session_links() -> dict:
+    if os.path.exists(SESSION_LINKS_FILE):
+        try:
+            with open(SESSION_LINKS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _save_session_links(data: dict) -> None:
+    tmp = SESSION_LINKS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, SESSION_LINKS_FILE)
+
+
+def _session_link_audit(event: str, link_id: str, principal: str | None,
+                        extra: dict | None = None) -> None:
+    """Append one JSON audit line. Records the link id + principal, NEVER the
+    raw token — the token is a credential and must not reach any log."""
+    try:
+        rec = {"ts": datetime.now(timezone.utc).isoformat(),
+               "event": event, "link_id": link_id, "principal": principal}
+        if extra:
+            rec.update(extra)
+        with open(SESSION_LINK_AUDIT_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        try:
+            os.chmod(SESSION_LINK_AUDIT_FILE, 0o600)
+        except OSError:
+            pass
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("session_link audit write failed: %s", _e)
+
+
+def _session_link_resolve(token: str) -> dict | None:
+    """Resolve a raw token → {id, principal, connection} or None. Bumps use
+    stats. O(1) lookup by token hash (the raw token is never stored)."""
+    if not token:
+        return None
+    th = _session_link_token_hash(token)
+    with _session_links_lock:
+        links = _load_session_links()
+        entry = links.get(th)
+        if not entry:
+            return None
+        exp = entry.get("expires_at")
+        if exp and _auth_time.time() > float(exp):
+            return None
+        entry["use_count"] = int(entry.get("use_count", 0)) + 1
+        entry["last_used"] = _auth_time.time()
+        _save_session_links(links)
+        return {"id": entry.get("id"), "principal": entry.get("principal"),
+                "connection": entry.get("connection")}
+
+
+def _session_link_tool_defs() -> list:
+    return [
+        Tool(name="session_link_provision",
+             description=("Mint a pre-authenticated session link (URL) for a headless "
+                          "caller (e.g. a scheduled Cowork session) that cannot send "
+                          "custom headers. The link authenticates as YOUR principal via "
+                          "one of your saved connections — the api_key stays server-side; "
+                          "the caller only holds the URL, and the token is shown ONCE. "
+                          "Args: connection (alias, required), label?, ttl_days?. "
+                          "Admins may pass principal to target another."),
+             inputSchema={"type": "object", "properties": {
+                 "connection": {"type": "string",
+                                "description": "Saved connection alias to bind the link to"},
+                 "label": {"type": "string", "description": "Free-text label"},
+                 "ttl_days": {"type": "number", "description": "Optional expiry in days"},
+                 "principal": {"type": "string",
+                               "description": "Admin-only: target principal (default: you)"}},
+                 "required": ["connection"]}),
+        Tool(name="session_link_list",
+             description=("List your active session links (id, connection, label, created, "
+                          "expiry, use_count, last_used). Never returns the token."),
+             inputSchema={"type": "object", "properties": {}}),
+        Tool(name="session_link_revoke",
+             description="Revoke a session link by id (owner or admin).",
+             inputSchema={"type": "object",
+                          "properties": {"id": {"type": "string"}},
+                          "required": ["id"]}),
+        Tool(name="session_link_rotate",
+             description=("Rotate a session link's token by id: issues a new URL and "
+                          "immediately invalidates the old one. Shown once."),
+             inputSchema={"type": "object",
+                          "properties": {"id": {"type": "string"}},
+                          "required": ["id"]}),
+        Tool(name="identify_with_token",
+             description=("Bind THIS MCP session to the principal behind a session-link "
+                          "token — for headless clients (e.g. scheduled Cowork) that "
+                          "cannot send unified-auth headers or change their connector "
+                          "URL. Pass the SAME token as in a /l/<token>/mcp link. Binds "
+                          "the principal (so Telegram/Google resolve to it) and activates "
+                          "the bound connection (so odoo_* target its Odoo). The api_key "
+                          "stays server-side. Call ONCE at session start, before Telegram."),
+             inputSchema={"type": "object",
+                          "properties": {"token": {"type": "string",
+                                         "description": "Session-link token (from provision/rotate)"}},
+                          "required": ["token"]}),
+    ]
+
+
+def _session_link_find_by_id(links: dict, link_id: str):
+    for th, e in links.items():
+        if e.get("id") == link_id:
+            return th, e
+    return None, None
+
+
+def _identify_with_token_handle(arguments: dict | None) -> dict:
+    """Bind THIS session to a session-link token's principal, WITHOUT changing
+    the connector URL or sending unified-auth headers.
+
+    For headless clients (e.g. Cowork) whose connector authenticates via the
+    shared OAuth/secret_token (→ no principal → not_identified): the client
+    calls this once at session start with the SAME token used in a
+    /l/<token>/mcp link. We resolve token → {principal, connection}, bind the
+    principal to the session row (persists like identify), and activate the
+    bound connection so odoo_* tools target its Odoo. Telegram/Google resolve
+    by principal, so they light up immediately. The api_key never leaves the
+    server. Only a session already authenticated at the HTTP layer can reach
+    this tool (unauthenticated requests are 401'd before dispatch).
+    """
+    arguments = arguments or {}
+    token = (arguments.get("token") or "").strip()
+    if not token:
+        return {"status": "error", "error": "token is required (the session-link token)."}
+    sc = _sctx()
+    bind = _session_link_resolve(token)
+    if not bind:
+        return {"status": "forbidden",
+                "error": "Invalid or expired token.",
+                "hint": "Provision/rotate a link (session_link_provision / _rotate) and use its token."}
+    principal = bind["principal"]
+    connection = bind["connection"]
+    # A session already bound to a DIFFERENT principal must not be rebound.
+    if sc.principal and sc.principal != principal:
+        return {"status": "mismatch",
+                "error": f"Session already bound to '{sc.principal}'; cannot rebind to '{principal}'.",
+                "hint": "Start a fresh MCP session, then call identify_with_token first."}
+    if sc.principal != principal:
+        # principal_src must satisfy the session-store CHECK constraint
+        # (only 'unified_auth' | 'identify'); token-identify is an identify variant.
+        session_store_inst.bind_principal(sc.session_key, principal, "identify")
+        sc = SessionContext(
+            session_key=sc.session_key, transport=sc.transport,
+            principal=principal, principal_src="identify", caller=None,
+        )
+        _session_ctx.set(sc)
+    # Activate the bound connection for THIS session (best-effort; Telegram works
+    # regardless of the active connection, so auth failure here is non-fatal).
+    activation = None
+    conns = _load_user_connections(principal)
+    c = (conns or {}).get(connection)
+    if c and not SINGLE_CONNECTION and all(c.get(k) for k in ("url", "db", "user")):
+        try:
+            conn = OdooConnection(
+                alias="default", url=c["url"], db=c["db"], username=c["user"],
+                api_key=c.get("api_key", ""), password=c.get("password", ""),
+                protocol=c.get("protocol", "xmlrpc"),
+            )
+            uid = conn.authenticate()
+            session_runtime.set_conn(sc.session_key, conn)
+            session_store_inst.set_state(sc.session_key, "connection", "active", {
+                "source": "session_link_token", "user": principal, "alias": connection,
+            })
+            _save_user_active(principal, {"alias": connection, **c})
+            activation = {"alias": connection, "uid": uid, "url": c["url"]}
+        except Exception as e:  # noqa: BLE001
+            activation = {"alias": connection, "error": str(e),
+                          "hint": "Principal bound (Telegram works); Odoo activation failed — "
+                                  "refresh the connection's api_key."}
+    _session_link_audit("identify", bind["id"], principal,
+                        {"via": "identify_with_token", "connection": connection})
+    return {"status": "identified", "principal": principal,
+            "principal_src": "identify", "bound_via": "session_link_token",
+            "connection": connection, "activation": activation,
+            "note": "Session bound to this principal. Telegram + Odoo now resolve to it."}
+
+
+# ─────────────────────────────────────────────────────────────
+# TOTP two-factor for name-identify (v3.3.0)
+# ─────────────────────────────────────────────────────────────
+# A principal may enrol an authenticator-app TOTP secret. Once enrolled, a
+# name-only identify(name=...) no longer binds directly — it returns
+# 'totp_required' and stashes a pending intent in session_state; the caller then
+# proves the second factor via identify_verify_totp(code=...). Enrolment itself
+# requires an already-identified session, so nobody can arm a factor on a profile
+# they don't already control. Secrets are stored per-principal, Fernet-encrypted
+# off MCP_KEY_PEPPER (reusing secrets_registry's crypto) — fail-closed when the
+# pepper is unset/weak. TOTP maths is RFC 6238, stdlib only.
+
+TOTP_AUDIT_FILE = os.path.join(DATA_DIR, "totp.audit.log")
+TOTP_TOOL_NAMES = {"identify_totp_enroll", "identify_totp_status",
+                   "identify_totp_disable"}
+TOTP_PENDING_NS = "web"            # session_state namespace for the pending intent
+TOTP_PENDING_KEY = "totp_pending"
+_TOTP_STEP = 30                    # seconds per RFC 6238 step
+_TOTP_DIGITS = 6
+_TOTP_WINDOW = 1                   # accept ±1 step for clock skew
+_TOTP_MAX_FAILS = 5               # consecutive fails per principal before lockout
+_TOTP_LOCKOUT_S = 300
+_totp_attempts: dict = {}          # principal -> {"fails": int, "until": float}
+_totp_lock = _auth_threading.Lock()
+
+
+def _totp_path(principal: str, create: bool = False) -> str:
+    return os.path.join(_user_dir(principal, create=create), "totp.json")
+
+
+def _totp_load(principal: str) -> dict | None:
+    fp = _totp_path(principal)
+    if not os.path.exists(fp):
+        return None
+    try:
+        with open(fp, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _totp_save(principal: str, data: dict) -> None:
+    fp = _totp_path(principal, create=True)
+    tmp = fp + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, fp)
+
+
+def _totp_enrolled(principal: str) -> bool:
+    d = _totp_load(principal)
+    return bool(d and d.get("secret_enc"))
+
+
+def _totp_pepper_ok() -> bool:
+    """True when MCP_KEY_PEPPER is set & strong enough for at-rest encryption."""
+    return bool(secrets_registry._pepper())
+
+
+def _totp_secret_new() -> str:
+    import base64
+    import secrets as _s
+    return base64.b32encode(_s.token_bytes(20)).decode("ascii").rstrip("=")
+
+
+def _totp_code(secret_b32: str, step: int) -> str:
+    """RFC 6238 TOTP code for a given 30s step (SHA1, 6 digits)."""
+    import base64
+    import hashlib
+    import struct
+    pad = "=" * (-len(secret_b32) % 8)
+    key = base64.b32decode(secret_b32.upper() + pad)
+    msg = struct.pack(">Q", int(step))
+    dig = hmac.new(key, msg, hashlib.sha1).digest()
+    off = dig[-1] & 0x0F
+    truncated = struct.unpack(">I", dig[off:off + 4])[0] & 0x7FFFFFFF
+    return str(truncated % (10 ** _TOTP_DIGITS)).zfill(_TOTP_DIGITS)
+
+
+def _totp_verify_secret(secret_b32: str, code: str, at: float | None = None):
+    """Return (ok, matched_step). Accepts ±_TOTP_WINDOW steps for clock skew."""
+    import time as _t
+    code = (code or "").strip().replace(" ", "")
+    if not code.isdigit() or len(code) != _TOTP_DIGITS:
+        return False, None
+    now = _t.time() if at is None else at
+    now_step = int(now) // _TOTP_STEP
+    for w in range(-_TOTP_WINDOW, _TOTP_WINDOW + 1):
+        st = now_step + w
+        if hmac.compare_digest(_totp_code(secret_b32, st), code):
+            return True, st
+    return False, None
+
+
+def _totp_provisioning_uri(principal: str, secret_b32: str) -> str:
+    from urllib.parse import quote
+    label = quote(f"OdooMCP:{principal}")
+    return (f"otpauth://totp/{label}?secret={secret_b32}&issuer=OdooMCP"
+            f"&algorithm=SHA1&digits={_TOTP_DIGITS}&period={_TOTP_STEP}")
+
+
+def _totp_qr_unicode(qr) -> str:
+    """Render a segno QR matrix as a plain-text unicode half-block QR (2 modules
+    per character row) with a quiet border. Portable text (terminal + chat);
+    scans best on a light background."""
+    rows = [list(r) for r in qr.matrix]
+    b = 2  # quiet-zone border in modules
+    width = len(rows[0]) + 2 * b
+    blank = [0] * width
+    grid = ([blank[:] for _ in range(b)]
+            + [[0] * b + list(r) + [0] * b for r in rows]
+            + [blank[:] for _ in range(b)])
+    if len(grid) % 2:
+        grid.append(blank[:])
+    lines = []
+    for y in range(0, len(grid), 2):
+        top, bot = grid[y], grid[y + 1]
+        line = []
+        for x in range(width):
+            t, d = top[x], bot[x]
+            line.append("█" if (t and d) else "▀" if t else "▄" if d else " ")
+        lines.append("".join(line))
+    return "\n".join(lines)
+
+
+def _totp_qr(uri: str) -> dict:
+    """Render the otpauth URI as QR: ASCII (terminal/chat) + SVG data-URI (web).
+    Returns {} when segno is unavailable — enrol still works via secret/otpauth_uri."""
+    try:
+        import segno
+    except Exception:  # noqa: BLE001
+        return {}
+    try:
+        qr = segno.make(uri, error="m")
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    try:
+        out["qr_ascii"] = _totp_qr_unicode(qr)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        out["qr_svg"] = qr.svg_data_uri(scale=6, border=4)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _totp_audit(event: str, principal: str | None, extra: dict | None = None) -> None:
+    """Append one JSON audit line. NEVER records the secret or the code."""
+    try:
+        rec = {"ts": datetime.now(timezone.utc).isoformat(),
+               "event": event, "principal": principal}
+        if extra:
+            rec.update(extra)
+        with open(TOTP_AUDIT_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        try:
+            os.chmod(TOTP_AUDIT_FILE, 0o600)
+        except OSError:
+            pass
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("totp audit write failed: %s", _e)
+
+
+def _totp_check(principal: str, code: str) -> dict:
+    """Verify a code against the principal's stored secret, with rate-limit and
+    replay protection. Returns {"ok": bool, "reason"?: str, "retry_after"?: int}."""
+    import time as _t
+    with _totp_lock:
+        st = _totp_attempts.get(principal)
+        if st and st.get("until", 0) > _t.time():
+            return {"ok": False, "reason": "locked",
+                    "retry_after": int(st["until"] - _t.time())}
+    d = _totp_load(principal)
+    if not d or not d.get("secret_enc"):
+        return {"ok": False, "reason": "not_enrolled"}
+    if not _totp_pepper_ok():
+        return {"ok": False, "reason": "weak_or_missing_pepper"}
+    secret = secrets_registry._decrypt(d["secret_enc"])
+    if not secret:
+        return {"ok": False, "reason": "decrypt_failed"}
+    ok, step = _totp_verify_secret(secret, code)
+    # Replay guard: a step already used to authenticate can't be reused.
+    replay = False
+    if ok and d.get("last_step") is not None and step is not None \
+            and int(step) <= int(d["last_step"]):
+        ok, replay = False, True
+    with _totp_lock:
+        if ok:
+            _totp_attempts.pop(principal, None)
+        else:
+            a = _totp_attempts.get(principal, {"fails": 0, "until": 0})
+            a["fails"] = a.get("fails", 0) + 1
+            if a["fails"] >= _TOTP_MAX_FAILS:
+                a["until"] = _t.time() + _TOTP_LOCKOUT_S
+                a["fails"] = 0
+            _totp_attempts[principal] = a
+    if ok:
+        d["last_step"] = int(step)
+        d["last_used"] = datetime.now(timezone.utc).isoformat()
+        _totp_save(principal, d)
+        return {"ok": True, "step": int(step)}
+    return {"ok": False, "reason": "replay" if replay else "invalid_code"}
+
+
+def _totp_enroll(principal: str, force: bool = False) -> dict:
+    if not _totp_pepper_ok():
+        return {"status": "error", "error": "weak_or_missing_pepper",
+                "hint": "Set MCP_KEY_PEPPER (≥32 chars) on the gateway before enrolling TOTP."}
+    if _totp_enrolled(principal) and not force:
+        return {"status": "already_enrolled", "principal": principal,
+                "hint": "Pass force=true to re-enroll (invalidates the current secret)."}
+    secret = _totp_secret_new()
+    enc = secrets_registry._encrypt(secret)
+    if not enc:
+        return {"status": "error", "error": "encrypt_failed",
+                "hint": "cryptography/Fernet unavailable or pepper weak."}
+    _totp_save(principal, {
+        "secret_enc": enc,
+        "enrolled_at": datetime.now(timezone.utc).isoformat(),
+        "algo": "SHA1", "digits": _TOTP_DIGITS, "step": _TOTP_STEP,
+        "last_step": None,
+    })
+    _totp_attempts.pop(principal, None)
+    _totp_audit("enroll", principal, {"force": bool(force)})
+    uri = _totp_provisioning_uri(principal, secret)
+    result = {"status": "enrolled", "principal": principal,
+              "otpauth_uri": uri,
+              "secret": secret,
+              "note": ("Scan the QR (qr_svg in a web view, or qr_ascii in a terminal) "
+                       "with any authenticator app, or enter the secret manually. Shown "
+                       "ONCE. Afterwards a fresh session identifies with identify(name) "
+                       "then identify_verify_totp(code).")}
+    result.update(_totp_qr(uri))   # qr_ascii + qr_svg (best-effort; absent if segno missing)
+    return result
+
+
+def _totp_tool_handle(name: str, arguments: dict | None, principal: str | None) -> dict:
+    """Enrol/status/disable — require an already-identified session (the caller
+    can only manage TOTP for the principal it is already bound to)."""
+    arguments = arguments or {}
+    if not principal:
+        return {"status": "error", "error": "no_identity",
+                "hint": "Identify first (unified-auth) before managing TOTP."}
+    if name == "identify_totp_status":
+        return {"status": "ok", "principal": principal,
+                "enrolled": _totp_enrolled(principal),
+                "pepper_ready": _totp_pepper_ok()}
+    if name == "identify_totp_enroll":
+        return _totp_enroll(principal, force=bool(arguments.get("force")))
+    if name == "identify_totp_disable":
+        if not _totp_enrolled(principal):
+            return {"status": "not_enrolled", "principal": principal}
+        try:
+            os.remove(_totp_path(principal))
+        except OSError:
+            pass
+        _totp_attempts.pop(principal, None)
+        _totp_audit("disable", principal)
+        return {"status": "disabled", "principal": principal}
+    return {"status": "error", "error": f"unknown totp tool {name}"}
+
+
+def _identify_verify_totp_handle(arguments: dict | None) -> dict:
+    """Second-factor step of name-identify: verify a TOTP code and bind THIS
+    session to the principal. Reachable by a not_identified session (like
+    identify_with_token) — dispatched before the security gate."""
+    arguments = arguments or {}
+    code = (arguments.get("code") or "").strip()
+    sc = _sctx()
+    # Resolve the target name: explicit arg, else the pending intent stashed by
+    # identify(name=...) on this session row.
+    name = (arguments.get("name") or "").strip()
+    if not name:
+        pend = session_store_inst.get_state(sc.session_key, TOTP_PENDING_NS, TOTP_PENDING_KEY)
+        name = (pend or {}).get("name") or ""
+    if not name:
+        return {"status": "error",
+                "error": "No pending identify. Call identify(name=...) first, or pass name."}
+    safe_name = _sanitize_name(name)
+    if not code:
+        return {"status": "error", "error": "code is required (6-digit TOTP)."}
+    if not _totp_enrolled(safe_name):
+        return {"status": "error",
+                "error": f"Profile '{safe_name}' has no TOTP enrolled.",
+                "hint": "Enroll from an authenticated session (identify_totp_enroll)."}
+    if sc.principal and sc.principal != safe_name:
+        return {"status": "mismatch",
+                "error": f"Session already bound to '{sc.principal}'; cannot rebind to '{safe_name}'.",
+                "hint": "Start a fresh MCP session, then identify + verify."}
+    res = _totp_check(safe_name, code)
+    if not res.get("ok"):
+        _totp_audit("verify_fail", safe_name, {"reason": res.get("reason")})
+        out = {"status": "totp_invalid", "error": res.get("reason")}
+        if res.get("reason") == "locked":
+            out["retry_after"] = res.get("retry_after")
+        return out
+    if sc.principal != safe_name:
+        session_store_inst.bind_principal(sc.session_key, safe_name, "identify")
+        sc = SessionContext(
+            session_key=sc.session_key, transport=sc.transport,
+            principal=safe_name, principal_src="identify", caller=None,
+        )
+        _session_ctx.set(sc)
+    try:
+        session_store_inst.delete_state(sc.session_key, TOTP_PENDING_NS, TOTP_PENDING_KEY)
+    except Exception:  # noqa: BLE001
+        pass
+    _totp_audit("verify_ok", safe_name, {"via": "identify_verify_totp"})
+    # Activate the saved active connection (best-effort), mirroring identify_with_token.
+    activation = None
+    conns = _load_user_connections(safe_name)
+    active = _load_user_active(safe_name)
+    alias = (active or {}).get("alias")
+    c = (conns or {}).get(alias) if alias else None
+    if c and not SINGLE_CONNECTION and all(c.get(k) for k in ("url", "db", "user")):
+        try:
+            conn = OdooConnection(
+                alias="default", url=c["url"], db=c["db"], username=c["user"],
+                api_key=c.get("api_key", ""), password=c.get("password", ""),
+                protocol=c.get("protocol", "xmlrpc"),
+            )
+            uid = conn.authenticate()
+            session_runtime.set_conn(sc.session_key, conn)
+            session_store_inst.set_state(sc.session_key, "connection", "active", {
+                "source": "totp_identify", "user": safe_name, "alias": alias,
+            })
+            _save_user_active(safe_name, {"alias": alias, **c})
+            activation = {"alias": alias, "uid": uid, "url": c["url"]}
+        except Exception as e:  # noqa: BLE001
+            activation = {"alias": alias, "error": str(e),
+                          "hint": "Principal bound; Odoo activation failed — refresh the api_key."}
+    return {"status": "identified", "principal": safe_name,
+            "principal_src": "identify", "bound_via": "totp",
+            "connection": alias, "activation": activation,
+            "note": "Second factor verified. Session bound; Telegram + Odoo now resolve to it."}
+
+
+def _session_link_handle(name: str, arguments: dict | None,
+                         principal: str | None) -> dict:
+    arguments = arguments or {}
+    if not principal:
+        return {"error": "no_identity",
+                "hint": "Authenticate (unified-auth) before managing session links."}
+    is_admin = principal in _admin_principals()
+
+    if name == "session_link_provision":
+        conn = (arguments.get("connection") or "").strip()
+        req_principal = (arguments.get("principal") or "").strip()
+        if req_principal and req_principal != principal and not is_admin:
+            return {"error": "denied", "reason": "not_admin_principal",
+                    "hint": "Only admins may provision links for another principal."}
+        target = req_principal or principal
+        if not conn:
+            return {"error": "connection_required"}
+        conns = _load_user_connections(target)
+        if conn not in (conns or {}):
+            return {"error": "unknown_connection", "connection": conn,
+                    "available": sorted((conns or {}).keys())}
+        c = conns[conn]
+        if not all(c.get(k) for k in ("url", "db", "user", "api_key")):
+            return {"error": "connection_incomplete", "connection": conn,
+                    "hint": "The bound connection needs url, db, user and api_key."}
+        ttl_days = arguments.get("ttl_days")
+        expires_at = None
+        if ttl_days:
+            try:
+                expires_at = _auth_time.time() + float(ttl_days) * 86400.0
+            except (TypeError, ValueError):
+                return {"error": "bad_ttl_days"}
+        token = _secrets_mod.token_urlsafe(32)
+        th = _session_link_token_hash(token)
+        link_id = "lnk_" + _secrets_mod.token_hex(4)
+        with _session_links_lock:
+            links = _load_session_links()
+            links[th] = {"id": link_id, "principal": target, "connection": conn,
+                         "label": (arguments.get("label") or ""),
+                         "created_at": _auth_time.time(), "created_by": principal,
+                         "expires_at": expires_at, "use_count": 0, "last_used": None}
+            _save_session_links(links)
+        _session_link_audit("provision", link_id, target,
+                            {"by": principal, "connection": conn})
+        return {"ok": True, "id": link_id, "principal": target, "connection": conn,
+                "url": f"{_session_link_public_base()}/l/{token}/mcp",
+                "expires_at": expires_at,
+                "note": ("Store this URL now — the token is shown ONCE and cannot be "
+                         "recovered. It grants this principal's access; treat it as a "
+                         "secret. Revoke or rotate with session_link_revoke / "
+                         "session_link_rotate.")}
+
+    if name == "session_link_list":
+        with _session_links_lock:
+            links = _load_session_links()
+        out = []
+        for _th, e in links.items():
+            if not is_admin and e.get("principal") != principal:
+                continue
+            out.append({k: e.get(k) for k in (
+                "id", "principal", "connection", "label", "created_at",
+                "created_by", "expires_at", "use_count", "last_used")})
+        out.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+        return {"count": len(out), "links": out}
+
+    if name == "session_link_revoke":
+        link_id = (arguments.get("id") or "").strip()
+        with _session_links_lock:
+            links = _load_session_links()
+            th, e = _session_link_find_by_id(links, link_id)
+            if not e:
+                return {"error": "not_found", "id": link_id}
+            if not is_admin and e.get("principal") != principal:
+                return {"error": "denied", "reason": "not_owner"}
+            del links[th]
+            _save_session_links(links)
+        _session_link_audit("revoke", link_id, e.get("principal"), {"by": principal})
+        return {"ok": True, "revoked": link_id}
+
+    if name == "session_link_rotate":
+        link_id = (arguments.get("id") or "").strip()
+        with _session_links_lock:
+            links = _load_session_links()
+            th, e = _session_link_find_by_id(links, link_id)
+            if not e:
+                return {"error": "not_found", "id": link_id}
+            if not is_admin and e.get("principal") != principal:
+                return {"error": "denied", "reason": "not_owner"}
+            token = _secrets_mod.token_urlsafe(32)
+            new_th = _session_link_token_hash(token)
+            del links[th]
+            e["use_count"] = 0
+            e["last_used"] = None
+            e["rotated_at"] = _auth_time.time()
+            links[new_th] = e
+            _save_session_links(links)
+        _session_link_audit("rotate", link_id, e.get("principal"), {"by": principal})
+        return {"ok": True, "id": link_id,
+                "url": f"{_session_link_public_base()}/l/{token}/mcp",
+                "note": "New URL — the previous one is now invalid. Shown once."}
+
+    return {"error": "unknown_tool", "tool": name}
 
 
 # ─── Memory storage helpers ─────────────────────────────────
@@ -3655,6 +4799,7 @@ TOOLS = [
                 "phone": {"type": "string", "description": "Phone number with country code (e.g. +359886100204)"},
                 "code": {"type": "string", "description": "Verification code from Telegram (step 2)", "default": ""},
                 "password": {"type": "string", "description": "2FA password if enabled", "default": ""},
+                "force": {"type": "boolean", "description": "OPERATOR ONLY: override the eager-publisher re-auth block (use only after stopping the publisher).", "default": False},
             },
             "required": ["phone"],
         },
@@ -3709,6 +4854,82 @@ TOOLS = [
                 "reply_to": {"type": "integer", "description": "Message ID to reply to", "default": 0},
             },
             "required": ["chat", "message"],
+        },
+    ),
+    Tool(
+        name="telegram_send_file",
+        description=(
+            "Send a file/document to a Telegram chat. The file must live under the "
+            "MCP download root (MCP_DOWNLOAD_ROOT, default /data/downloads) — pass a "
+            "relative path or an absolute path inside it. Chat can be @username, phone, or numeric ID."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "chat": {"type": "string", "description": "Chat identifier (@username, +phone, or numeric ID)"},
+                "path": {"type": "string", "description": "File path relative to the MCP download root (or absolute within it)"},
+                "caption": {"type": "string", "description": "Optional caption", "default": ""},
+                "reply_to": {"type": "integer", "description": "Message ID to reply to", "default": 0},
+            },
+            "required": ["chat", "path"],
+        },
+    ),
+    Tool(
+        name="telegram_download_media",
+        description=(
+            "Download media/document from a Telegram message into the MCP download root "
+            "(MCP_DOWNLOAD_ROOT, default /data/downloads). Returns the saved path."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "chat": {"type": "string", "description": "Chat identifier (@username, +phone, or numeric ID)"},
+                "message_id": {"type": "integer", "description": "Message id holding the media"},
+                "filename": {"type": "string", "description": "Destination filename relative to the MCP download root"},
+            },
+            "required": ["chat", "message_id", "filename"],
+        },
+    ),
+    Tool(
+        name="telegram_sub_add",
+        description=(
+            "Subscribe a principal's Telegram listener to a chat (admin allow-list). "
+            "No subscriptions for a principal = listen to ALL (back-compat). Once a "
+            "principal has any subscription, only those chats are pushed to its "
+            "telegram:<principal> channel. Use 'principal' to assign for another user."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "chat_id": {"type": "integer", "description": "Telegram chat id (negative for groups)"},
+                "principal": {"type": "string", "description": "Target principal/user (default: current)"},
+                "title": {"type": "string", "default": ""},
+                "note": {"type": "string", "default": ""},
+                "mode": {"type": "string", "default": "auto"},
+            },
+            "required": ["chat_id"],
+        },
+    ),
+    Tool(
+        name="telegram_sub_list",
+        description="List a principal's Telegram chat subscriptions. allow_all=true means no filter (listens to all).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "principal": {"type": "string", "description": "Target principal/user (default: current)"},
+            },
+        },
+    ),
+    Tool(
+        name="telegram_sub_remove",
+        description="Remove a chat from a principal's Telegram subscription allow-list.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "chat_id": {"type": "integer"},
+                "principal": {"type": "string", "description": "Target principal/user (default: current)"},
+            },
+            "required": ["chat_id"],
         },
     ),
     # ── Telegram Agent (intent-routed, scenario-driven chat handling) ──
@@ -3892,6 +5113,85 @@ TOOLS = [
         name="who_am_i",
         description="Show current user identity and active connection.",
         inputSchema={"type": "object", "properties": {}},
+    ),
+    # ── TOTP two-factor for name-identify ──
+    Tool(
+        name="identify_verify_totp",
+        description=(
+            "Second step of name-identify for a TOTP-protected profile. After "
+            "identify(name=...) returns status 'totp_required', call this with the "
+            "6-digit code from your authenticator app to prove the second factor and "
+            "bind THIS session to the principal (Telegram/Google/Odoo then resolve to "
+            "it). The 'name' is remembered from the prior identify call; pass it "
+            "explicitly only if identifying a different profile."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "6-digit TOTP code from your authenticator app"},
+                "name": {"type": "string", "description": "Profile name (optional; defaults to the pending identify)"},
+            },
+            "required": ["code"],
+        },
+    ),
+    Tool(
+        name="identify_totp_enroll",
+        description=(
+            "Arm authenticator-app two-factor (TOTP) for YOUR current identified "
+            "profile. Requires an already-authenticated session. Returns an "
+            "otpauth:// provisioning URI + the base32 secret, shown ONCE — add it to "
+            "your authenticator app immediately. Afterwards, name-identify for this "
+            "profile requires identify_verify_totp. Needs MCP_KEY_PEPPER set on the "
+            "gateway (secret is encrypted at rest)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "force": {"type": "boolean", "description": "Re-enroll even if already enrolled (invalidates the old secret)", "default": False},
+            },
+        },
+    ),
+    Tool(
+        name="identify_totp_status",
+        description="Report whether YOUR current profile has TOTP two-factor enrolled.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="identify_totp_disable",
+        description="Disable TOTP two-factor for YOUR current identified profile (removes the stored secret).",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="session_list",
+        description=(
+            "List MCP session-store rows. Regular callers see their own "
+            "sessions; admin principals (MCP_ADMIN_PRINCIPALS) see all."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "include_orphaned": {"type": "boolean",
+                                     "description": "Include orphaned/revoked rows (default true)"},
+                "principal": {"type": "string",
+                              "description": "Admin only: filter by principal"},
+            },
+        },
+    ),
+    Tool(
+        name="session_revoke",
+        description=(
+            "Revoke one MCP session (admin, or your own): marks the row "
+            "revoked and tears down its live resources (connection, web, "
+            "telegram client when unreferenced)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_key": {"type": "string",
+                                "description": "Session key as shown by session_list"},
+            },
+            "required": ["session_key"],
+        },
     ),
     Tool(
         name="user_connection_add",
@@ -4676,6 +5976,18 @@ async def list_tools() -> list[Tool]:
     # Apply feature flags
     if DISABLED_FEATURES:
         base = [t for t in base if not _tool_disabled(t.name)]
+    # Resolve THIS session for per-session tenant + elevation. list_tools is
+    # not wrapped by the call_tool session gate, so resolve here; fail-closed
+    # (no session → no tenant tools, treated as not-elevated) on a session-less
+    # or orphaned tools/list probe.
+    _skey = None
+    _principal = None
+    try:
+        _lsc = await resolve_session_context()
+        _skey = _lsc.session_key
+        _principal = _lsc.principal
+    except Exception:
+        _skey = None
     # v3 tenant routing: always-on tenants (e.g. main__*) are exposed
     # unconditionally; the active tenant's tools are added via tenant_router;
     # other tenants stay hidden until promoted via tenant_use.
@@ -4685,16 +5997,34 @@ async def list_tools() -> list[Tool]:
             prefix = t.name.split("__", 1)[0] if "__" in t.name else None
             if prefix in always_on:
                 base.append(t)
-    base.extend(tenant_router.active_tools())
+    base.extend(tenant_router.active_tools(_skey))
     base.extend(tenant_router.get_control_tools())
     base.append(sql_executor.get_tool_def())
     # v3 provisioning admin tools (issue/revoke/list API keys).
     # These are tagged via tool_security so USER role hides them.
     base.extend(api_key_manager.get_admin_tools())
+    # v3 fleet management + secrets registry admin tools (admin-principal only).
+    base.extend(fleet_manager.get_admin_tools())
+    base.extend(secrets_registry.get_admin_tools())
+    base.extend(module_deploy.get_admin_tools())
+    base.extend(supervisor_deploy.get_admin_tools())
+    base.extend(client_onboard.get_admin_tools())
+    base.extend(backup_manager.get_admin_tools())
+    base.extend(health_monitor.get_admin_tools())
+    base.extend(tenant_migrate.get_admin_tools())
     # v3 security: filter destructive tools for USER role (admin/legacy keep all).
-    base = tool_security.filter_tools_for_role(base, elevated=elevation.is_elevated())
+    _role = tool_security.get_role(
+        principal=_principal, admin_principals=_admin_principals())
+    base = tool_security.filter_tools_for_role(
+        base, role=_role, elevated=elevation.is_elevated(_skey))
     # Always expose elevation control tools (so USER can request elevation).
     base.extend(elevation.get_control_tools())
+    # Session handoff control plane (any authenticated principal).
+    base.extend(session_handoff.get_control_tools())
+    # tg-listen runbook helper (any authenticated principal).
+    base.extend(tg_listen_helper.get_control_tools())
+    # Pre-authenticated session links (any authenticated principal).
+    base.extend(_session_link_tool_defs())
     return base
 
 
@@ -4712,86 +6042,202 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 pass
             return [TextContent(type="text", text=json.dumps(
                 {"error": f"Tool '{name}' is disabled on this server (MCP_DISABLE_FEATURES)."}))]
-        # ── v3 provisioning admin tools (admin/elevated only) ──
-        if name in api_key_manager.ADMIN_TOOL_NAMES:
-            result = api_key_manager.handle(name, arguments)
-            text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
-            try:
-                import metrics
-                metrics.observe_tool_call(name, _m_status)
-            except Exception:
-                pass
-            return [TextContent(type="text", text=text)]
-        # ── v3 elevation control plane (always available, no role gate) ──
-        if name in elevation.CONTROL_TOOL_NAMES:
-            result = elevation.handle(name, arguments)
-            text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
-            try:
-                import metrics
-                metrics.observe_tool_call(name, _m_status)
-            except Exception:
-                pass
-            return [TextContent(type="text", text=text)]
-        # ── v3 security gate (USER role: refuse destructive + protected unlink) ──
-        allowed, sec_info = tool_security.check_call(
-            name, arguments, elevated=elevation.is_elevated()
-        )
-        if not allowed:
-            try:
-                import metrics
-                metrics.observe_tool_call(name, "denied")
-            except Exception:
-                pass
-            return [TextContent(type="text", text=json.dumps(
-                {"error": "denied", **sec_info}, ensure_ascii=False, indent=2))]
-        # ── v3 tenant routing control plane ──
-        if name in tenant_router.CONTROL_TOOL_NAMES:
-            result = await tenant_router.handle(name, arguments, mcp_server)
-            text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
-            try:
-                import metrics
-                metrics.observe_tool_call(name, _m_status)
-            except Exception:
-                pass
-            return [TextContent(type="text", text=text)]
-        # ── v3 SQL executor (classifier-gated) ──
-        if name == "odoo_sql_query":
-            role = os.environ.get("MCP_ROLE", "admin").strip().lower() or "admin"
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                sql_executor.execute,
-                arguments.get("query", ""),
-                arguments.get("params", []) or [],
-                arguments.get("fetch", True),
-                arguments.get("timeout", 30),
-                role,
+        # ── Session gate (strict model, v2.30.0) ──
+        # Every tool call must resolve to a session row in the store. Set the
+        # _session_ctx ContextVar BEFORE the v3-only gates run — they (and the
+        # downstream handlers) rely on _require_principal()/_sctx(). The v3
+        # gates (provisioning / elevation / tool_security / tenant / SQL) stay
+        # exactly as-is; the session gate sits ABOVE them, never replacing them.
+        # asyncio.to_thread (not run_in_executor) so contextvars — including
+        # _session_ctx — propagate into the worker thread.
+        sc = await resolve_session_context()
+        _ctx_token = _session_ctx.set(sc)
+        try:
+            # ── v3 admin-principal-only tool groups (ADMIN PRINCIPAL ONLY) ──
+            # SECURITY: provisioning (mints admin API keys), fleet management
+            # (mutates live stacks), and secrets registry (rotates tokens) all
+            # require a VERIFIED admin principal — NOT merely MCP_ROLE env, NOT
+            # merely elevation. These gates sit BEFORE the modules' handle(),
+            # which have no internal authz.
+            _admin_group = None
+            if name in api_key_manager.ADMIN_TOOL_NAMES:
+                _admin_group = api_key_manager
+            elif name in fleet_manager.ADMIN_TOOL_NAMES:
+                _admin_group = fleet_manager
+            elif name in secrets_registry.ADMIN_TOOL_NAMES:
+                _admin_group = secrets_registry
+            elif name in module_deploy.ADMIN_TOOL_NAMES:
+                _admin_group = module_deploy
+            elif name in supervisor_deploy.ADMIN_TOOL_NAMES:
+                _admin_group = supervisor_deploy
+            elif name in client_onboard.ADMIN_TOOL_NAMES:
+                _admin_group = client_onboard
+            elif name in backup_manager.ADMIN_TOOL_NAMES:
+                _admin_group = backup_manager
+            elif name in health_monitor.ADMIN_TOOL_NAMES:
+                _admin_group = health_monitor
+            elif name in tenant_migrate.ADMIN_TOOL_NAMES:
+                _admin_group = tenant_migrate
+            if _admin_group is not None:
+                _prov_denied = None
+                if not sc.principal:
+                    _prov_denied = {"error": "denied", "reason": "no_identity",
+                                    "tool": name,
+                                    "hint": "This admin tool requires an authenticated "
+                                            "admin principal listed in MCP_ADMIN_PRINCIPALS."}
+                elif sc.principal not in _admin_principals():
+                    _prov_denied = {"error": "denied", "reason": "not_admin_principal",
+                                    "tool": name, "principal": sc.principal,
+                                    "hint": "Only admin principals may run provisioning / "
+                                            "fleet / secrets tools."}
+                if _prov_denied is not None:
+                    try:
+                        import metrics
+                        metrics.observe_tool_call(name, "denied")
+                    except Exception:
+                        pass
+                    return [TextContent(type="text", text=json.dumps(
+                        _prov_denied, ensure_ascii=False, indent=2))]
+                result = _admin_group.handle(name, arguments)
+                text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+                try:
+                    import metrics
+                    metrics.observe_tool_call(name, _m_status)
+                except Exception:
+                    pass
+                return [TextContent(type="text", text=text)]
+            # ── v3 elevation control plane (per-session; reachable by USER) ──
+            if name in elevation.CONTROL_TOOL_NAMES:
+                result = elevation.handle(name, arguments,
+                                          key=sc.session_key, principal=sc.principal)
+                text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+                try:
+                    import metrics
+                    metrics.observe_tool_call(name, _m_status)
+                except Exception:
+                    pass
+                return [TextContent(type="text", text=text)]
+            # ── v3 session handoff control plane (per-session; any principal) ──
+            if name in session_handoff.CONTROL_TOOL_NAMES:
+                result = session_handoff.handle(
+                    name, arguments,
+                    session_key=sc.session_key, principal=sc.principal)
+                text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+                try:
+                    import metrics
+                    metrics.observe_tool_call(name, _m_status)
+                except Exception:
+                    pass
+                return [TextContent(type="text", text=text)]
+            # ── Pre-authenticated session links (any authenticated principal) ──
+            if name in SESSION_LINK_TOOL_NAMES:
+                result = _session_link_handle(name, arguments, principal=sc.principal)
+                text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+                try:
+                    import metrics
+                    metrics.observe_tool_call(name, _m_status)
+                except Exception:
+                    pass
+                return [TextContent(type="text", text=text)]
+            # ── Token-based identify (headless clients, no header/URL change) ──
+            # Reachable by a not_identified session (HTTP-authed via OAuth/secret
+            # token) — this is the whole point: it BINDS the principal. Dispatched
+            # before the security gate for the same reason.
+            if name == "identify_with_token":
+                result = _identify_with_token_handle(arguments)
+                text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+                try:
+                    import metrics
+                    metrics.observe_tool_call(name, _m_status)
+                except Exception:
+                    pass
+                return [TextContent(type="text", text=text)]
+            # ── TOTP second-factor identify (name-identify step 2) ──
+            # Reachable by a not_identified session for the same reason as
+            # identify_with_token: it BINDS the principal after verifying the
+            # authenticator code. Dispatched before the security gate.
+            if name == "identify_verify_totp":
+                result = _identify_verify_totp_handle(arguments)
+                text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+                try:
+                    import metrics
+                    metrics.observe_tool_call(name, _m_status)
+                except Exception:
+                    pass
+                return [TextContent(type="text", text=text)]
+            # ── v3 tg-listen helper (runbook generator; any principal) ──
+            if name in tg_listen_helper.CONTROL_TOOL_NAMES:
+                result = tg_listen_helper.handle(name, arguments)
+                text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+                try:
+                    import metrics
+                    metrics.observe_tool_call(name, _m_status)
+                except Exception:
+                    pass
+                return [TextContent(type="text", text=text)]
+            # ── v3 security gate (USER role: refuse destructive + protected unlink) ──
+            _role = tool_security.get_role(
+                principal=sc.principal, admin_principals=_admin_principals())
+            allowed, sec_info = tool_security.check_call(
+                name, arguments, role=_role,
+                elevated=elevation.is_elevated(sc.session_key)
             )
-            text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
-            try:
-                import metrics
-                metrics.observe_tool_call(name, "denied" if result.get("error") == "denied" else _m_status)
-            except Exception:
-                pass
-            return [TextContent(type="text", text=text)]
-        # ── Handle proxied tools directly in async context ──
-        if name in PROXY_TOOLS:
-            info = PROXY_TOOLS[name]
-            result = await _async_proxy_call(info["service"], info["tool"], arguments)
-        elif name == "proxy_call":
-            result = await _async_proxy_call(
-                arguments["service"], arguments["tool"], arguments.get("arguments", {}))
-        elif name == "proxy_refresh":
-            await asyncio.get_event_loop().run_in_executor(None, _discover_proxy_tools, None)
-            result = {
-                "status": "refreshed",
-                "proxied_tools": len(PROXY_TOOLS),
-                "services": {svc: sum(1 for v in PROXY_TOOLS.values() if v["service"] == svc)
-                             for svc in _get_proxy_services()},
-            }
-        else:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None, _execute_tool, name, arguments
-            )
+            if not allowed:
+                try:
+                    import metrics
+                    metrics.observe_tool_call(name, "denied")
+                except Exception:
+                    pass
+                return [TextContent(type="text", text=json.dumps(
+                    {"error": "denied", **sec_info}, ensure_ascii=False, indent=2))]
+            # ── v3 tenant routing control plane ──
+            if name in tenant_router.CONTROL_TOOL_NAMES:
+                result = await tenant_router.handle(name, arguments,
+                                                    sc.session_key, mcp_server)
+                text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+                try:
+                    import metrics
+                    metrics.observe_tool_call(name, _m_status)
+                except Exception:
+                    pass
+                return [TextContent(type="text", text=text)]
+            # ── v3 SQL executor (classifier-gated) ──
+            if name == "odoo_sql_query":
+                role = "admin" if elevation.is_elevated(sc.session_key) else _role
+                result = await asyncio.to_thread(
+                    sql_executor.execute,
+                    arguments.get("query", ""),
+                    arguments.get("params", []) or [],
+                    arguments.get("fetch", True),
+                    arguments.get("timeout", 30),
+                    role,
+                )
+                text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+                try:
+                    import metrics
+                    metrics.observe_tool_call(name, "denied" if result.get("error") == "denied" else _m_status)
+                except Exception:
+                    pass
+                return [TextContent(type="text", text=text)]
+            # ── Handle proxied tools directly in async context ──
+            if name in PROXY_TOOLS:
+                info = PROXY_TOOLS[name]
+                result = await _async_proxy_call(info["service"], info["tool"], arguments)
+            elif name == "proxy_call":
+                result = await _async_proxy_call(
+                    arguments["service"], arguments["tool"], arguments.get("arguments", {}))
+            elif name == "proxy_refresh":
+                await asyncio.to_thread(_discover_proxy_tools, None)
+                result = {
+                    "status": "refreshed",
+                    "proxied_tools": len(PROXY_TOOLS),
+                    "services": {svc: sum(1 for v in PROXY_TOOLS.values() if v["service"] == svc)
+                                 for svc in _get_proxy_services()},
+                }
+            else:
+                result = await asyncio.to_thread(_execute_tool, name, arguments)
+        finally:
+            _session_ctx.reset(_ctx_token)
         text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
         if len(text) > 100_000:
             text = text[:100_000] + "\n... (truncated, use limit/fields to narrow)"
@@ -4801,6 +6247,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         except Exception:
             pass
         return [TextContent(type="text", text=text)]
+    except _ss.SessionError as se:
+        # Fail-closed refusal: structured, machine-actionable error payload.
+        logger.info(f"[SESSION] tool {name} denied: {se.error_code}")
+        try:
+            import metrics
+            metrics.observe_tool_call(name, "session_denied")
+        except Exception:
+            pass
+        return [TextContent(type="text", text=json.dumps(
+            se.to_dict(), ensure_ascii=False, indent=2))]
     except Exception as e:
         logger.error(f"Tool {name} error: {e}")
         try:
@@ -4905,21 +6361,29 @@ def _open_connection_manager() -> dict:
 #   2. Direct SSH with ControlMaster            — always available as fallback.
 
 import threading as _threading
-_ssh_masters: dict = {}          # (user, host, port) → ControlPath str
+_ssh_masters: dict = {}          # (principal, user, host, port) → ControlPath str
 _ssh_masters_lock = _threading.Lock()
 _SSH_CTRL_DIR = Path("/tmp/.ssh-mux")
 
 
 def _ensure_ssh_master(user: str, host: str, port: int,
                        key_filename: str | None = None) -> str:
-    """Return a live ControlMaster socket path, creating one if needed."""
+    """Return a live ControlMaster socket path, creating one if needed.
+
+    Strict session model: multiplexed channels are isolated per PRINCIPAL —
+    a separate ControlPath directory (0700) per principal prevents one
+    identity from riding another's master socket.
+    """
+    principal = _require_principal()
+    ctrl_dir = _SSH_CTRL_DIR / _sanitize_name(principal)
     _SSH_CTRL_DIR.mkdir(mode=0o700, exist_ok=True)
-    key = (user, host, port)
+    ctrl_dir.mkdir(mode=0o700, exist_ok=True)
+    key = (principal, user, host, port)
     with _ssh_masters_lock:
         ctrl = _ssh_masters.get(key)
         if ctrl and Path(ctrl).exists():
             return ctrl
-        ctrl = str(_SSH_CTRL_DIR / f"{user}@{host}:{port}")
+        ctrl = str(ctrl_dir / f"{user}@{host}:{port}")
         _ssh_masters[key] = ctrl
 
     home_ssh = Path.home() / ".ssh"
@@ -5170,7 +6634,15 @@ def _execute_tool(name: str, args: dict) -> Any:
         # Test authentication — also triggers first-time cert fetch when
         # verify_ssl=False.
         uid = conn.authenticate()
-        _set_session_conn(conn)
+        if not SINGLE_CONNECTION:
+            sc = _sctx()
+            session_runtime.set_conn(sc.session_key, conn)
+            # Inline descriptor: secrets are NOT persisted in the session store —
+            # after a server restart the client must odoo_connect again.
+            session_store_inst.set_state(sc.session_key, "connection", "active", {
+                "source": "inline", "url": conn.url, "db": conn.db,
+                "username": conn.username, "protocol": conn.protocol,
+            })
         return {"status": "connected", "uid": uid, **conn.to_dict()}
 
     elif name == "odoo_cert_info":
@@ -5234,7 +6706,9 @@ def _execute_tool(name: str, args: dict) -> Any:
         alias = args.get("alias", "default")
         # Drop this session's active connection; also remove from the global
         # catalogue if it lives there (legacy).
-        _clear_session_conn()
+        sc = _sctx()
+        session_runtime.pop_conn(sc.session_key)
+        session_store_inst.delete_state(sc.session_key, "connection", "active")
         ok = m.remove(alias)
         return {"status": "removed", "alias": alias, "session_cleared": True}
 
@@ -5242,11 +6716,13 @@ def _execute_tool(name: str, args: dict) -> Any:
         return {"connections": m.list_all()}
 
     elif name == "identify":
-        # Unified-auth priority: if HTTP middleware validated the caller,
-        # use that identity (cannot be spoofed via args["name"]). Fall
-        # back to args["name"] only for stdio/local contexts where no
-        # HTTP validation is available.
-        caller = _odoo_caller_ctx.get()
+        # Unified-auth priority: when the gate validated the caller, identity
+        # comes from the Bearer key (cannot be spoofed via args["name"]) and
+        # is already bound to the session row. args["name"] is honored only
+        # for sessions without unified-auth headers (e.g. claude.ai OAuth) —
+        # it binds the principal to THIS session row (cookie semantics).
+        sc = _sctx()
+        caller = sc.caller
         if caller:
             user_name = caller["mcp_user"]
             safe_name = user_name  # already a safe dir name from registry
@@ -5261,25 +6737,61 @@ def _execute_tool(name: str, args: dict) -> Any:
                 }
             safe_name = _sanitize_name(user_name)
             preferred_alias = None
+            # TOTP second factor: if this profile enrolled an authenticator, a
+            # name-only identify does NOT bind — it stashes a pending intent and
+            # demands identify_verify_totp(code=...). This is what makes name
+            # identify safe for a profile that holds real credentials.
+            if not caller and _totp_enrolled(safe_name):
+                session_store_inst.set_state(
+                    sc.session_key, TOTP_PENDING_NS, TOTP_PENDING_KEY,
+                    {"name": safe_name})
+                return {
+                    "status": "totp_required",
+                    "profile": safe_name,
+                    "hint": ("This profile is protected by two-factor auth. Call "
+                             "identify_verify_totp(code=\"<6 digits from your "
+                             "authenticator>\") to finish signing in."),
+                }
+            # SECURITY (impersonation guard): a name-only identify (no unified-auth
+            # headers — claude.ai OAuth / shared token) must NOT grant access to an
+            # EXISTING profile that holds saved connections (real Odoo credentials).
+            # Otherwise any token holder could `identify(name="Rosen")` and inherit
+            # Rosen's saved keys / Telegram / Google. Binding to a NEW or empty
+            # profile (bootstrap) stays allowed. Stacks with a single trusted human
+            # may opt back in with MCP_ALLOW_NAME_IDENTIFY=1.
+            _existing_conns = _load_user_connections(user_name)
+            if _existing_conns and os.environ.get("MCP_ALLOW_NAME_IDENTIFY") != "1":
+                return {
+                    "status": "forbidden",
+                    "error": (
+                        f"Profile '{safe_name}' already has saved connections. "
+                        "Name-only identify cannot claim a profile with stored "
+                        "credentials. Connect with unified-auth headers "
+                        "(Authorization: Bearer <odoo_api_key> + X-Odoo-Url/Db/Login), "
+                        "or set MCP_ALLOW_NAME_IDENTIFY=1 on a single-user stack."
+                    ),
+                }
+            # Bind to the session row; a session already bound to a DIFFERENT
+            # identity is refused (SessionPrincipalMismatch → structured error).
+            session_store_inst.bind_principal(sc.session_key, safe_name, "identify")
+            sc = SessionContext(
+                session_key=sc.session_key, transport=sc.transport,
+                principal=safe_name, principal_src="identify", caller=None,
+            )
+            _session_ctx.set(sc)
 
         is_new = not os.path.isdir(os.path.join(DATA_DIR, "users", safe_name))
-
-        # Only write to session_users when we're NOT relying on unified-auth
-        # ContextVar. When caller is set, ContextVar is authoritative and
-        # session_users would just be stale noise for later calls.
-        if not caller:
-            session_key = _get_mcp_session_key()
-            _session_users[session_key] = user_name
-            _session_users["current"] = user_name  # backward compat
 
         conns = _load_user_connections(user_name)
         active = _load_user_active(user_name)
         alias_to_activate = preferred_alias or active.get("alias")
-        if alias_to_activate and alias_to_activate in conns:
+        activation_error = None
+        # При SINGLE_CONNECTION _conn() ползва само глобалния default —
+        # сесийна активация тук би била подвеждаща (никой не я чете).
+        if not SINGLE_CONNECTION and alias_to_activate and alias_to_activate in conns:
             c = conns[alias_to_activate]
             try:
-                # Session-scoped: bind to THIS Claude session, do not clobber
-                # the global manager["default"].
+                # Session-scoped: bind to THIS session, never the global manager.
                 conn = OdooConnection(
                     alias="default",
                     url=c["url"], db=c["db"],
@@ -5289,9 +6801,16 @@ def _execute_tool(name: str, args: dict) -> Any:
                     protocol=c.get("protocol", "xmlrpc"),
                 )
                 conn.authenticate()
-                _set_session_conn(conn)
+                session_runtime.set_conn(sc.session_key, conn)
+                session_store_inst.set_state(sc.session_key, "connection", "active", {
+                    "source": "user_profile", "user": safe_name,
+                    "alias": alias_to_activate,
+                })
                 logger.info(f"User {user_name}: auto-activated connection '{alias_to_activate}'")
             except Exception as e:
+                # Провалът се връща на клиента (не само WARNING в лога) —
+                # иначе сесията остава без връзка, а викащият не разбира.
+                activation_error = str(e)
                 logger.warning(f"User {user_name}: auto-activate '{alias_to_activate}' failed: {e}")
 
         result = {
@@ -5307,25 +6826,96 @@ def _execute_tool(name: str, args: dict) -> Any:
                 f"Profile '{safe_name}' is new. "
                 f"Data will be saved on first write."
             )
+        if activation_error:
+            result["activation_failed"] = {
+                "alias": alias_to_activate,
+                "error": activation_error[:300],
+            }
+            result["hint"] = (
+                f"Auto-activate of '{alias_to_activate}' FAILED — this session has "
+                "NO active connection and odoo_* tools will refuse "
+                "(MCP_NO_CONNECTION). Activate a working connection with "
+                "user_connection_activate(alias=...)."
+            )
         return result
 
+    elif name in TOTP_TOOL_NAMES:
+        # Enrol / status / disable — require an already-identified session.
+        return _totp_tool_handle(name, args, _sctx().principal)
+
     elif name == "who_am_i":
-        user = _get_current_user(args)
-        if not user:
-            return {"status": "not_identified", "hint": "Call identify(name) first"}
+        # Diagnostic: never refuses — reports session + identity state with
+        # bootstrap instructions when identity is missing.
+        sc = _sctx()
+        row = session_store_inst.resolve(sc.session_key)
+        session_info = {
+            "session": sc.session_key[:24] + ("..." if len(sc.session_key) > 24 else ""),
+            "transport": sc.transport,
+            "principal_src": sc.principal_src,
+            "created_at": getattr(row, "created_at", None),
+            "last_seen": getattr(row, "last_seen", None),
+            "expires_at": getattr(row, "expires_at", None),
+        }
+        if not sc.principal:
+            return {
+                "status": "not_identified",
+                **session_info,
+                "hint": _SM_MSG["MCP_NO_IDENTITY"][1],
+            }
+        user = sc.principal
         active = _load_user_active(user)
         conns = _load_user_connections(user)
+        conn_state = session_store_inst.get_state(sc.session_key, "connection", "active")
+        tg_state = session_store_inst.get_state(sc.session_key, "telegram", "phone")
+        tg_phone = (tg_state or {}).get("phone", "")
+        web_aliases = [r["key"] for r in
+                       session_store_inst.list_state(sc.session_key, "web")]
         return {
             "user": user,
+            **session_info,
             "connections": list(conns.keys()),
             "active": active.get("alias", None),
             "active_details": active,
+            "session_connection": conn_state,
+            "telegram_phone": (tg_phone[:5] + "..." if tg_phone else None),
+            "web_sessions": web_aliases,
         }
 
+    elif name == "session_list":
+        principal = _require_principal()
+        is_admin = principal in _admin_principals()
+        target = args.get("principal") if is_admin else principal
+        if args.get("principal") and not is_admin:
+            return {"error": "Only admin principals may filter by another principal.",
+                    "admin_env": "MCP_ADMIN_PRINCIPALS"}
+        rows = session_store_inst.list_sessions(
+            principal=target if (target or not is_admin) else None,
+            include_orphaned=args.get("include_orphaned", True),
+        )
+        return {"caller": principal, "admin": is_admin, "sessions": rows,
+                "telegram_clients": telegram_registry.keys() if (is_admin and telegram_registry) else None}
+
+    elif name == "session_revoke":
+        principal = _require_principal()
+        target_key = args["session_key"]
+        row = next((r for r in session_store_inst.list_sessions()
+                    if r.get("session_key") == target_key), None)
+        if row is None:
+            return {"error": f"Session '{target_key}' not found."}
+        is_admin = principal in _admin_principals()
+        if not is_admin and row.get("principal") != principal:
+            return {"error": "You may revoke only your own sessions "
+                             "(or be listed in MCP_ADMIN_PRINCIPALS)."}
+        session_store_inst.revoke(target_key)
+        if session_runtime is not None:
+            session_runtime.evict([target_key], on_evict=_sm_teardown)
+        tg_reaped = _tg_reap_clients()
+        return {"status": "revoked", "session_key": target_key,
+                "principal": row.get("principal"),
+                "telegram_clients_disconnected": tg_reaped}
+
     elif name == "user_connection_add":
-        user = _get_current_user(args)
-        if not user:
-            return {"error": "Call identify(name) first"}
+        user = _require_principal()
         conns = _load_user_connections(user)
         alias = args["alias"]
         conn_data = {
@@ -5355,9 +6945,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         return {"status": "saved", "alias": alias, "user": user}
 
     elif name == "user_connection_list":
-        user = _get_current_user(args)
-        if not user:
-            return {"error": "Call identify(name) first"}
+        user = _require_principal()
         conns = _load_user_connections(user)
         active = _load_user_active(user)
         result = []
@@ -5373,16 +6961,26 @@ def _execute_tool(name: str, args: dict) -> Any:
         return {"user": user, "connections": result}
 
     elif name == "user_connection_activate":
-        user = _get_current_user(args)
-        if not user:
-            return {"error": "Call identify(name) first"}
+        # SINGLE_CONNECTION прескача сесийната активация в _conn() — без този
+        # guard tool-ът връщаше "activated", а odoo_* удряха глобалния default
+        # (инцидентът tri-wall/ussmed 2026-06-12).
+        if SINGLE_CONNECTION:
+            return {
+                "error": "Single-connection deployment: per-user connection "
+                         "activation is disabled — all tools use the global "
+                         "'default' connection. Remove SINGLE_CONNECTION=true "
+                         "to enable per-session connections.",
+                "error_code": "MCP_SINGLE_CONNECTION",
+            }
+        user = _require_principal()
         alias = args["alias"]
         conns = _load_user_connections(user)
         if alias not in conns:
             return {"error": f"Connection '{alias}' not found. Use user_connection_list to see available."}
         c = conns[alias]
         _save_user_active(user, {"alias": alias, **c})
-        # Activate for THIS Claude session only (no global clobber).
+        # Activate for THIS session only (no global clobber).
+        sc = _sctx()
         try:
             conn = OdooConnection(
                 alias="default",
@@ -5393,7 +6991,10 @@ def _execute_tool(name: str, args: dict) -> Any:
                 protocol=c.get("protocol", "xmlrpc"),
             )
             uid = conn.authenticate()
-            _set_session_conn(conn)
+            session_runtime.set_conn(sc.session_key, conn)
+            session_store_inst.set_state(sc.session_key, "connection", "active", {
+                "source": "user_profile", "user": user, "alias": alias,
+            })
             return {"status": "activated", "alias": alias, "uid": uid, "url": c["url"]}
         except Exception as e:
             _save_user_active(user, {"alias": alias, **c})
@@ -5401,9 +7002,7 @@ def _execute_tool(name: str, args: dict) -> Any:
                     "hint": "Connection saved but auth failed. Check credentials."}
 
     elif name == "user_connection_delete":
-        user = _get_current_user(args)
-        if not user:
-            return {"error": "Call identify(name) first"}
+        user = _require_principal()
         alias = args["alias"]
         conns = _load_user_connections(user)
         if alias not in conns:
@@ -5420,7 +7019,7 @@ def _execute_tool(name: str, args: dict) -> Any:
     elif name == "memory_list":
         scope = args.get("scope", "all")
         result = {}
-        user = _get_current_user(args)
+        user = _sctx().principal
         if scope in ("all", "personal"):
             if user:
                 result["personal"] = _memory_list_files(_memory_user_dir(user))
@@ -5433,7 +7032,7 @@ def _execute_tool(name: str, args: dict) -> Any:
             # Licensed memories come from purchased memory packs; resolve
             # the tenant via the caller's Odoo context (db_name becomes
             # tenant_code for billing lookups).
-            caller = _odoo_caller_ctx.get() if "_odoo_caller_ctx" in globals() else None
+            caller = _sctx().caller
             tenant_code = (args.get("tenant_code") or "").strip()
             if not tenant_code and caller and caller.get("db"):
                 tenant_code = caller["db"]
@@ -5457,14 +7056,14 @@ def _execute_tool(name: str, args: dict) -> Any:
         # Sanitize
         filename = os.path.basename(filename)
         scope = args.get("scope", "")
-        user = _get_current_user(args)
+        user = _sctx().principal
 
         # Licensed scope uses tenant_code; resolve from auth ctx if absent.
         def _resolve_tenant():
             tc = (args.get("tenant_code") or "").strip()
             if tc:
                 return tc
-            caller = _odoo_caller_ctx.get() if "_odoo_caller_ctx" in globals() else None
+            caller = _sctx().caller
             return (caller or {}).get("db") if caller else None
 
         fpath = None
@@ -5517,9 +7116,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         if scope == "shared":
             directory = _memory_shared_dir(create=True)
         else:
-            user = _get_current_user(args)
-            if not user:
-                return {"error": "Call identify(name) first to write personal files"}
+            user = _require_principal()
             directory = _memory_user_dir(user, create=True)
 
         fpath = os.path.join(directory, filename)
@@ -5539,9 +7136,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         if scope == "shared":
             fpath = os.path.join(_memory_shared_dir(), filename)
         else:
-            user = _get_current_user(args)
-            if not user:
-                return {"error": "Call identify(name) first"}
+            user = _require_principal()
             fpath = os.path.join(_memory_user_dir(user), filename)
         if not os.path.isfile(fpath):
             return {"error": f"File '{filename}' not found in {scope}"}
@@ -5549,9 +7144,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         return {"status": "deleted", "filename": filename, "scope": scope}
 
     elif name == "memory_share":
-        user = _get_current_user(args)
-        if not user:
-            return {"error": "Call identify(name) first"}
+        user = _require_principal()
         import shutil
         filename = args["filename"].strip()
         user_dir = _memory_user_dir(user)
@@ -5585,9 +7178,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         }
 
     elif name == "memory_pull":
-        user = _get_current_user(args)
-        if not user:
-            return {"error": "Call identify(name) first"}
+        user = _require_principal()
         import shutil
         filename = args["filename"].strip()
         user_dir = _memory_user_dir(user, create=True)
@@ -5695,15 +7286,21 @@ def _execute_tool(name: str, args: dict) -> Any:
         if not host or not user:
             return {"error": f"SSH config incomplete for '{conn_alias}'"}
 
+        # SECURITY: quote caller-controlled extra_args so they can't break out
+        # of the git command into the shell (e.g. extra_args="; rm -rf /").
+        import shlex as _shlex
+        _ea = _shlex.quote(extra_args) if extra_args else ""
         git_commands = {
             "status": "git status",
             "pull": "git pull",
-            "log": f"git log --oneline {extra_args or '-20'}",
-            "branch": f"git branch {extra_args}",
-            "diff": f"git diff {extra_args}",
+            "log": f"git log --oneline {_ea or '-20'}",
+            "branch": f"git branch {_ea}",
+            "diff": f"git diff {_ea}",
             "remote": "git remote -v",
             "fetch": "git fetch --all",
-            "stash": f"git stash {extra_args}",
+            "stash": f"git stash {_ea}",
+            # 'custom' is an explicit arbitrary-remote-command escape hatch; it is
+            # equivalent to ssh_execute and gated by the same principal/connection.
             "custom": extra_args or args.get("custom_command", ""),
         }
 
@@ -5716,7 +7313,8 @@ def _execute_tool(name: str, args: dict) -> Any:
         needs_remote = operation in ("pull", "fetch", "custom")
         use_fwd = fwd and needs_remote
 
-        full_cmd = f"cd {repo_path} && {git_cmd}"
+        # SECURITY: quote repo_path so it can't inject shell metacharacters.
+        full_cmd = f"cd {_shlex.quote(repo_path)} && {git_cmd}"
         logger.info(f"Git remote: {user}@{host} agent={use_fwd} $ {full_cmd}")
         return _ssh_execute(host, user, full_cmd, port, key_file, 60, forward_agent=use_fwd)
 
@@ -5728,8 +7326,13 @@ def _execute_tool(name: str, args: dict) -> Any:
             params=args.get("params"),
         )
 
-    # ── All other tools need a connection ──
-    conn = _conn(args)
+    # ── Most remaining tools need an Odoo connection — but NOT all of them.
+    # Strict session model: _conn() now refuses (MCP_NO_CONNECTION) instead of
+    # silently falling back, so it must not run eagerly for connection-free
+    # tools (telegram/google/web/public/session admin) further down this chain.
+    _CONN_FREE_PREFIXES = ("telegram_", "google_", "session_", "odoo_web_",
+                           "public_access_", "mcp_terminal_", "ai_usage_log_")
+    conn = None if name.startswith(_CONN_FREE_PREFIXES) else _conn(args)
 
     if name == "odoo_version":
         common = xmlrpc.client.ServerProxy(
@@ -6791,7 +8394,6 @@ def _execute_tool(name: str, args: dict) -> Any:
             except ValueError as e:
                 return {"error": str(e)}
             data = base64.b64decode(content_b64)
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             with _open_for_write_nofollow(save_path) as f:
                 f.write(data)
             result["saved_to"] = save_path
@@ -6908,7 +8510,7 @@ def _execute_tool(name: str, args: dict) -> Any:
 
             # Check saved user connection for web credentials
             if not login or not password:
-                current_user = _get_current_user(args)
+                current_user = _sctx().principal
                 if current_user:
                     conns = _load_user_connections(current_user)
                     conn_cfg = conns.get(alias, {})
@@ -6924,7 +8526,15 @@ def _execute_tool(name: str, args: dict) -> Any:
         ws = OdooWebSession(url, db, login, password)
         try:
             info = ws.authenticate()
-            _web_sessions[_web_session_key(alias)] = ws
+            sc = _sctx()
+            session_runtime.set_web(sc.session_key, alias, ws)
+            # Cookie descriptor → store (rehydratable; the cookie is the secret,
+            # which is why mcp_sessions.db is created with mode 0600).
+            session_store_inst.set_state(sc.session_key, "web", alias, {
+                "url": ws.url, "db": ws.db, "login": ws.login,
+                "session_cookie": ws.session_id, "uid": ws.uid,
+                "authenticated_at": datetime.now(timezone.utc).isoformat(),
+            })
             return {
                 "status": "authenticated",
                 "uid": ws.uid,
@@ -6964,7 +8574,6 @@ def _execute_tool(name: str, args: dict) -> Any:
                 save_path = _safe_save_path(save_path)
             except ValueError as e:
                 return {"error": str(e)}
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             with _open_for_write_nofollow(save_path) as f:
                 f.write(pdf_bytes)
             return {"status": "saved", "path": save_path, "size": len(pdf_bytes)}
@@ -6979,7 +8588,9 @@ def _execute_tool(name: str, args: dict) -> Any:
 
     elif name == "odoo_web_logout":
         alias = args.get("connection", "default")
-        ws = _web_sessions.pop(_web_session_key(alias), None)
+        sc = _sctx()
+        ws = session_runtime.pop_web(sc.session_key, alias)
+        session_store_inst.delete_state(sc.session_key, "web", alias)
         if ws:
             ws.destroy()
             return {"status": "logged_out", "connection": alias}
@@ -7031,7 +8642,6 @@ def _execute_tool(name: str, args: dict) -> Any:
                 save_path = _safe_save_path(save_path)
             except ValueError as _e:
                 return {"error": str(_e)}
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             # Use _open_for_write_nofollow at the actual open site below.
             with _open_for_write_nofollow(save_path) as f:
                 f.write(content)
@@ -7054,7 +8664,6 @@ def _execute_tool(name: str, args: dict) -> Any:
                 save_path = _safe_save_path(save_path)
             except ValueError as _e:
                 return {"error": str(_e)}
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             # Use _open_for_write_nofollow at the actual open site below.
             with _open_for_write_nofollow(save_path) as f:
                 f.write(resp.content)
@@ -7090,7 +8699,6 @@ def _execute_tool(name: str, args: dict) -> Any:
                 save_path = _safe_save_path(save_path)
             except ValueError as _e:
                 return {"error": str(_e)}
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             # Use _open_for_write_nofollow at the actual open site below.
             with _open_for_write_nofollow(save_path) as f:
                 f.write(resp.content)
@@ -7114,7 +8722,6 @@ def _execute_tool(name: str, args: dict) -> Any:
                 save_path = _safe_save_path(save_path)
             except ValueError as _e:
                 return {"error": str(_e)}
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             # Use _open_for_write_nofollow at the actual open site below.
             with _open_for_write_nofollow(save_path) as f:
                 f.write(resp.content)
@@ -7141,7 +8748,6 @@ def _execute_tool(name: str, args: dict) -> Any:
                 save_path = _safe_save_path(save_path)
             except ValueError as _e:
                 return {"error": str(_e)}
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             # Use _open_for_write_nofollow at the actual open site below.
             with _open_for_write_nofollow(save_path) as f:
                 f.write(resp.content)
@@ -7189,7 +8795,6 @@ def _execute_tool(name: str, args: dict) -> Any:
                 save_path = _safe_save_path(save_path)
             except ValueError as _e:
                 return {"error": str(_e)}
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             # Use _open_for_write_nofollow at the actual open site below.
             with _open_for_write_nofollow(save_path) as f:
                 f.write(resp.content)
@@ -9361,32 +10966,33 @@ def _execute_tool(name: str, args: dict) -> Any:
             ),
         }
 
-    # ── Google Services ──
+    # ── Google Services (per-principal manager via _google()) ──
     elif name == "google_auth":
-        if google_mgr is None:
+        if google_registry is None:
             return {"error": "Google service not initialized"}
-        return google_mgr.authenticate(args.get("credentials_file", ""))
+        return _google().authenticate(args.get("credentials_file", ""))
 
     elif name == "google_auth_status":
-        if google_mgr is None:
+        if google_registry is None:
             return {"status": "not_initialized"}
+        gm = _google()
         return {
-            "status": "authenticated" if google_mgr.is_authenticated else "not_authenticated",
-            "email": google_mgr._get_email() if google_mgr.is_authenticated else None,
+            "status": "authenticated" if gm.is_authenticated else "not_authenticated",
+            "email": gm._get_email() if gm.is_authenticated else None,
         }
 
     elif name == "google_gmail_search":
-        return google_mgr.gmail_search(
+        return _google().gmail_search(
             query=args["query"],
             max_results=args.get("max_results", 10),
             label_ids=args.get("label_ids"),
         )
 
     elif name == "google_gmail_read":
-        return google_mgr.gmail_read(args["message_id"])
+        return _google().gmail_read(args["message_id"])
 
     elif name == "google_gmail_send":
-        return google_mgr.gmail_send(
+        return _google().gmail_send(
             to=args["to"],
             subject=args["subject"],
             body=args["body"],
@@ -9397,13 +11003,13 @@ def _execute_tool(name: str, args: dict) -> Any:
         )
 
     elif name == "google_gmail_labels":
-        return google_mgr.gmail_labels()
+        return _google().gmail_labels()
 
     elif name == "google_calendar_list":
-        return google_mgr.calendar_list()
+        return _google().calendar_list()
 
     elif name == "google_calendar_events":
-        return google_mgr.calendar_events(
+        return _google().calendar_events(
             calendar_id=args.get("calendar_id", "primary"),
             time_min=args.get("time_min", ""),
             time_max=args.get("time_max", ""),
@@ -9412,7 +11018,7 @@ def _execute_tool(name: str, args: dict) -> Any:
         )
 
     elif name == "google_calendar_create_event":
-        return google_mgr.calendar_create_event(
+        return _google().calendar_create_event(
             summary=args["summary"],
             start=args["start"],
             end=args["end"],
@@ -9426,32 +11032,68 @@ def _execute_tool(name: str, args: dict) -> Any:
     elif name == "google_calendar_update_event":
         event_id = args.pop("event_id")
         calendar_id = args.pop("calendar_id", "primary")
-        return google_mgr.calendar_update_event(
+        return _google().calendar_update_event(
             event_id=event_id, calendar_id=calendar_id, **args,
         )
 
     elif name == "google_calendar_delete_event":
-        return google_mgr.calendar_delete_event(
+        return _google().calendar_delete_event(
             event_id=args["event_id"],
             calendar_id=args.get("calendar_id", "primary"),
         )
 
-    # ── Telegram (per-principal client via _tg()) ──
+    # ── Telegram (per principal:phone client via _tg()) ──
     elif name == "telegram_configure":
         if telegram_registry is None:
             return {"error": "Telegram service not initialized"}
-        return _tg().configure(args["api_id"], args["api_hash"])
+        # Write api credentials straight to the principal's config file —
+        # no Telethon client is needed (and no phone is bound yet).
+        principal = _require_principal()
+        base = _user_dir(principal, create=True)
+        cfg_path = os.path.join(base, "telegram_config.json")
+        try:
+            api_id = int(args["api_id"])
+        except (TypeError, ValueError):
+            return {"error": "api_id must be an integer"}
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"api_id": api_id, "api_hash": args["api_hash"]}, f, indent=2)
+        return {"status": "configured", "principal": principal}
 
     elif name == "telegram_auth":
         if telegram_registry is None:
             return {"error": "Telegram service not initialized"}
+        # Bind this MCP session to the Telegram account (phone) FIRST — the
+        # session store row is the single source of truth for the binding.
+        phone = (args.get("phone") or "").strip()
+        if not phone:
+            return {"error": "phone is required (e.g. telegram_auth(phone='+359...'))."}
+        sc = _sctx()
+        _principal = _require_principal()
+        # Publisher isolation: a principal running an eager-init publisher is
+        # managed server-side. Re-auth from ANY session re-logs-in the account
+        # and revokes the publisher's auth key (AUTH_KEY_UNREGISTERED) — the
+        # repeated outage cause. Block it (escape hatch: force=True, operator).
+        if _principal in _eager_tg_phones and not args.get("force"):
+            return {
+                "status": "managed",
+                "message": (
+                    "This principal's Telegram is managed by the server-side "
+                    "eager publisher — re-auth is BLOCKED to protect the "
+                    "persistent listener. Your session auto-adopts the "
+                    "publisher's authorized client: use telegram_send_message / "
+                    "telegram_get_messages directly. (Operator only: force=True "
+                    "after stopping the publisher.)"),
+                "principal": _principal,
+            }
+        session_store_inst.set_state(sc.session_key, "telegram", "phone",
+                                     {"phone": phone})
         code = args.get("code", "")
         if code:
             return _tg().auth_verify(
-                phone=args["phone"], code=code,
+                phone=phone, code=code,
                 password=args.get("password", ""),
             )
-        return _tg().auth_send_code(args["phone"])
+        return _tg().auth_send_code(phone)
 
     elif name == "telegram_auth_status":
         if telegram_registry is None:
@@ -9481,6 +11123,51 @@ def _execute_tool(name: str, args: dict) -> Any:
             chat=chat, message=args["message"],
             reply_to=args.get("reply_to", 0),
         )
+
+    elif name == "telegram_send_file":
+        chat = args["chat"]
+        if chat.lstrip("-").isdigit():
+            chat = int(chat)
+        # Confine the readable file to the download root — never send arbitrary host files.
+        path = _safe_save_path(args["path"])
+        if not os.path.isfile(path):
+            return {"error": "file_not_found", "path": path,
+                    "hint": "Place the file under MCP_DOWNLOAD_ROOT first."}
+        return _tg().send_file(
+            chat=chat, file_path=path,
+            caption=args.get("caption", ""),
+            reply_to=args.get("reply_to", 0),
+        )
+
+    elif name == "telegram_download_media":
+        chat = args["chat"]
+        if chat.lstrip("-").isdigit():
+            chat = int(chat)
+        # Confine the write to the download root (TOCTOU-safe helper).
+        dest = _safe_save_path(args["filename"])
+        return _tg().download_media(
+            chat=chat, message_id=int(args["message_id"]), dest_path=dest,
+        )
+
+    elif name == "telegram_sub_add":
+        import telegram_subscriptions as _tsub
+        return _tsub.add_sub(
+            _tg_subs_file(args.get("principal")), args["chat_id"],
+            title=args.get("title", ""), note=args.get("note", ""),
+            mode=args.get("mode", "auto"))
+
+    elif name == "telegram_sub_list":
+        import telegram_subscriptions as _tsub
+        path = _tg_subs_file(args.get("principal"))
+        return {
+            "principal": args.get("principal") or _require_principal(),
+            "allow_all": _tsub.allowed_chats(path) is None,
+            "subscriptions": _tsub.list_subs(path),
+        }
+
+    elif name == "telegram_sub_remove":
+        import telegram_subscriptions as _tsub
+        return _tsub.remove_sub(_tg_subs_file(args.get("principal")), args["chat_id"])
 
     # ── Telegram Agent ──
     elif name == "telegram_agent_enroll":
@@ -9523,10 +11210,29 @@ async def health_endpoint(request):
 
 
 def create_app():
-    global manager, google_mgr, telegram_registry, session_mgr
+    global manager, google_registry, telegram_registry, session_mgr
+    global session_store_inst, session_runtime
 
     manager = ConnectionManager(CONNECTIONS_FILE)
     logger.info(f"Loaded {len(manager.connections)} connection(s): {list(manager.connections.keys())}")
+
+    # ── Strict session model (v2.30.0): SQLite session store ──
+    session_store_inst = _ss.SessionStore(
+        _ss.DEFAULT_DB_PATH, ttl_seconds=_ss.DEFAULT_TTL,
+        retention_days=_ss.DEFAULT_RETENTION_DAYS,
+    )
+    session_runtime = _ss.SessionRuntime()
+    # Server restart orphans every transport-level session (the SDK keeps them
+    # in memory) — mark all previously-active rows so the reaper can purge them
+    # and clients get MCP_SESSION_ORPHANED instead of silent state reuse.
+    _orphaned = session_store_inst.mark_all_active_orphaned("server_restart")
+    if _orphaned:
+        logger.info(f"[SESSION] restart: orphaned {len(_orphaned)} stale session(s)")
+    _purged = session_store_inst.cleanup()
+    if _purged.get("purged"):
+        logger.info(f"[SESSION] startup purge: {len(_purged['purged'])} old row(s)")
+    logger.info(f"[SESSION] strict session store ready at {_ss.DEFAULT_DB_PATH} "
+                f"(ttl={_ss.DEFAULT_TTL}s, retention={_ss.DEFAULT_RETENTION_DAYS}d)")
 
     session_mgr = SessionManager(SESSIONS_DB)
     stale = session_mgr.cleanup_stale()
@@ -9534,11 +11240,9 @@ def create_app():
         logger.info(f"Cleaned up {stale} stale session(s)")
     logger.info(f"Session manager ready at {SESSIONS_DB}")
 
-    google_mgr = GoogleServiceManager()
-    if google_mgr.is_authenticated:
-        logger.info("Google services: authenticated")
-    else:
-        logger.info("Google services: not authenticated (call google_auth to connect)")
+    # Per-principal Google managers (lazy; token under users/<principal>/).
+    google_registry = GoogleRegistry()
+    logger.info("Google: per-principal registry ready (managers created lazily)")
 
     # Per-principal Telegram clients (lazy, created on first use per user).
     telegram_registry = TelegramRegistry()
@@ -9594,6 +11298,48 @@ def create_app():
             "client_credentials grant provides no isolation. Set a distinct "
             "secret via MCP_OAUTH_CLIENT_SECRET for production."
         )
+
+    # ── OAuth ephemeral issuance (security fix) ──
+    # SECURITY: never hand out MCP_SECRET_TOKEN through the public OAuth flow.
+    # Dynamic client registration mints a per-client random secret; the token
+    # and authorize endpoints mint short-lived random artifacts kept in memory.
+    # _check_auth accepts the long-lived secret_token (admin/legacy) OR a live
+    # issued access token. Restart invalidates issued tokens → clients re-auth
+    # (MCP/claude.ai connectors do this automatically).
+    import secrets as _secrets
+    _oauth_clients: dict[str, dict] = {}   # client_id -> {"secret":..., "ts":...}
+    _oauth_codes: dict[str, float] = {}    # auth code -> expiry (monotonic)
+    _oauth_tokens: dict[str, float] = {}   # access token -> expiry (monotonic)
+    _oauth_lock = _auth_threading.Lock()
+    _OAUTH_CODE_TTL = 300        # 5 min
+    _OAUTH_TOKEN_TTL = 86400     # 24h
+
+    def _oauth_mint(store: dict, ttl: int) -> str:
+        import time as _t
+        tok = _secrets.token_urlsafe(32)
+        with _oauth_lock:
+            now = _t.monotonic()
+            # opportunistic cleanup of expired entries
+            for k in [k for k, exp in store.items() if exp < now]:
+                store.pop(k, None)
+            store[tok] = now + ttl
+        return tok
+
+    def _oauth_consume(store: dict, tok: str) -> bool:
+        import time as _t
+        if not tok:
+            return False
+        with _oauth_lock:
+            exp = store.pop(tok, None)
+        return bool(exp) and exp >= _t.monotonic()
+
+    def _oauth_token_valid(tok: str) -> bool:
+        import time as _t
+        if not tok:
+            return False
+        with _oauth_lock:
+            exp = _oauth_tokens.get(tok)
+        return bool(exp) and exp >= _t.monotonic()
     ollama_upstream = os.environ.get("OLLAMA_UPSTREAM", "http://ollama:11434").rstrip("/")
     ollama_api_key = os.environ.get("OLLAMA_API_KEY", "").strip()
     protected_paths = {"/mcp", "/sse", "/messages", "/api/session/register",
@@ -9620,28 +11366,29 @@ def create_app():
         auth = headers.get(b"authorization", b"").decode()
         if auth.startswith("Bearer "):
             bearer = auth[7:]
-            if hmac.compare_digest(bearer, secret_token):
+            # Long-lived admin/legacy secret OR a live OAuth-issued token.
+            if hmac.compare_digest(bearer, secret_token) or _oauth_token_valid(bearer):
                 return True
         return False
 
     def _check_auth_and_resolve(headers):
-        """Auth check that also resolves the calling MCP user.
+        """HTTP-level auth gate (401 boundary only).
 
         Strategy:
-          1. If headers carry the new unified-auth schema (X-Odoo-Url +
-             Bearer + X-Odoo-Db + X-Odoo-Login), validate XMLRPC and
-             resolve to a registered MCP user. Success → set ContextVar.
-             Failure → reject (do NOT fall back to legacy — caller chose
-             this schema explicitly).
-          2. Otherwise, fall back to legacy `_check_auth` (no caller
-             identity bound; tools rely on identify()/_session_users).
+          1. If headers carry the unified-auth schema (X-Odoo-Url + Bearer
+             + X-Odoo-Db + X-Odoo-Login), validate XMLRPC and resolve to a
+             registered MCP user. Failure → reject (no legacy fallback —
+             the caller chose this schema explicitly).
+          2. Otherwise, fall back to legacy `_check_auth`.
+
+        Identity binding to the MCP session happens in the call_tool gate
+        (resolve_session_context) — NOT here. No ContextVar side effects.
 
         Returns (ok: bool, caller: dict | None).
         """
         if headers.get(b"x-odoo-url"):
             caller = get_caller_odoo_user(headers)
             if caller:
-                _odoo_caller_ctx.set(caller)
                 return True, caller
             return False, None
         return _check_auth(headers), None
@@ -9682,6 +11429,48 @@ def create_app():
 
         path = scope.get("path", "")
 
+        # ── Pre-authenticated session link ( /l/<token>[/suffix] ) ──
+        # Resolve a stored link → inject the bound principal's unified-auth
+        # headers and rewrite the path, so headless callers (e.g. scheduled
+        # Cowork sessions) that cannot set custom headers still authenticate as
+        # the bound principal. The remaining dispatch (auth check + /mcp handler)
+        # then runs exactly as for a normal unified-auth request. An invalid or
+        # expired token yields an opaque 404. The raw token is never logged.
+        if scope["type"] == "http" and (path == "/l" or path.startswith("/l/")):
+            _l_ok = False
+            _l_parts = path.split("/", 3)
+            _l_tok = _l_parts[2] if len(_l_parts) > 2 else ""
+            _l_suf = ("/" + _l_parts[3]) if (len(_l_parts) > 3 and _l_parts[3]) else "/mcp"
+            if _l_suf != "/mcp" and _l_suf != "/sse" and not _l_suf.startswith("/messages"):
+                _l_suf = "/mcp"
+            if len(_l_tok) >= 16:
+                _l_bind = _session_link_resolve(_l_tok)
+                if _l_bind:
+                    _l_conns = _load_user_connections(_l_bind["principal"])
+                    _l_c = (_l_conns or {}).get(_l_bind["connection"])
+                    if _l_c and all(_l_c.get(_k) for _k in ("url", "db", "user", "api_key")):
+                        _l_hdrs = [(k, v) for (k, v) in scope.get("headers", [])
+                                   if k.lower() not in (b"authorization", b"x-odoo-url",
+                                                        b"x-odoo-db", b"x-odoo-login")]
+                        _l_hdrs.append((b"authorization",
+                                        ("Bearer " + _l_c["api_key"]).encode()))
+                        _l_hdrs.append((b"x-odoo-url", _l_c["url"].encode()))
+                        _l_hdrs.append((b"x-odoo-db", _l_c["db"].encode()))
+                        _l_hdrs.append((b"x-odoo-login", _l_c["user"].encode()))
+                        scope["headers"] = _l_hdrs
+                        scope["path"] = _l_suf
+                        if "raw_path" in scope:
+                            scope["raw_path"] = _l_suf.encode()
+                        path = _l_suf
+                        _l_ip = (scope.get("client") or ("?", 0))[0]
+                        _session_link_audit("use", _l_bind["id"], _l_bind["principal"],
+                                            {"ip": _l_ip, "suffix": _l_suf})
+                        _l_ok = True
+            if not _l_ok:
+                from starlette.responses import Response
+                await Response("Not Found", status_code=404)(scope, receive, send)
+                return
+
         # ── Admin portal dispatch (hidden) ─────────────────────
         if _admin_app and scope["type"] == "http" and admin_ui.path_matches(path):
             await _admin_app(scope, receive, send)
@@ -9692,11 +11481,26 @@ def create_app():
             await _provisioning_app(scope, receive, send)
             return
 
-        # ── Debug: log headers on /mcp requests (sensitive values redacted) ──
-        if scope["type"] == "http" and path in ("/mcp", "/oauth/token", "/oauth/authorize", "/oauth/register"):
+        # ── v3 Telegram send (variant A: Odoo replies via the publisher) ──
+        # Odoo's telegram.account.send_endpoint POSTs {chat_id, text} here; we
+        # relay through the eager-init publisher client (the single authorized
+        # Telethon client) so no second client/login is needed. Guarded by a
+        # shared secret (TELEGRAM_SEND_SECRET); fail-closed if unset.
+        if scope["type"] == "http" and path == "/telegram/send":
+            await _telegram_send_asgi(scope, receive, send)
+            return
+
+        # ── Optional auth debug (OFF by default; secrets always redacted) ──
+        # SECURITY: never log Authorization / X-Odoo-* / Cookie / X-Api-Token —
+        # the Bearer value IS a live Odoo api_key. Gated behind MCP_DEBUG_HEADERS=1
+        # for diagnostics only; even then sensitive headers are masked.
+        if (os.environ.get("MCP_DEBUG_HEADERS") == "1"
+                and scope["type"] == "http"
+                and path in ("/mcp", "/oauth/token", "/oauth/authorize", "/oauth/register")):
             _SENSITIVE_HEADERS = {
                 "authorization", "x-api-token", "x-odoo-api-key",
                 "cookie", "x-admin-rechallenge", "x-bridge-token",
+                "x-odoo-url", "x-odoo-db", "x-odoo-login",
             }
             hdrs = {}
             for _k, _v in scope.get("headers", []):
@@ -9771,13 +11575,21 @@ def create_app():
                             cid, csecret = decoded.split(":", 1)
 
                 if grant_type == "client_credentials":
-                    cid_ok = cid and hmac.compare_digest(str(cid), oauth_client_id)
-                    sec_ok = csecret and hmac.compare_digest(str(csecret), oauth_client_secret)
-                    if cid_ok and sec_ok:
+                    # Valid against the configured client OR any dynamically
+                    # registered client. Mint a fresh random access token —
+                    # NEVER return secret_token.
+                    with _oauth_lock:
+                        reg = _oauth_clients.get(cid)
+                    ok_static = (cid and hmac.compare_digest(str(cid), oauth_client_id)
+                                 and csecret and hmac.compare_digest(str(csecret), oauth_client_secret)
+                                 and oauth_client_secret
+                                 and not hmac.compare_digest(str(oauth_client_secret), str(secret_token)))
+                    ok_dynamic = bool(reg) and csecret and hmac.compare_digest(str(csecret), str(reg["secret"]))
+                    if ok_static or ok_dynamic:
                         response = JSONResponse({
-                            "access_token": secret_token,
+                            "access_token": _oauth_mint(_oauth_tokens, _OAUTH_TOKEN_TTL),
                             "token_type": "Bearer",
-                            "expires_in": 86400,
+                            "expires_in": _OAUTH_TOKEN_TTL,
                         })
                     else:
                         response = JSONResponse(
@@ -9785,11 +11597,12 @@ def create_app():
                 elif grant_type == "authorization_code":
                     code = params.get("code", [None])[0]
                     redirect_uri = params.get("redirect_uri", [None])[0]
+                    # Code is redirect-uri-bound + single-use (v3 _oauth_consume_code).
                     if code and _oauth_consume_code(code, redirect_uri):
                         response = JSONResponse({
-                            "access_token": secret_token,
+                            "access_token": _oauth_mint(_oauth_tokens, _OAUTH_TOKEN_TTL),
                             "token_type": "Bearer",
-                            "expires_in": 86400,
+                            "expires_in": _OAUTH_TOKEN_TTL,
                         })
                     else:
                         response = JSONResponse(
@@ -9840,9 +11653,19 @@ def create_app():
             request = Request(scope, receive)
             try:
                 body = await request.json()
+                # Dynamic client registration: mint a UNIQUE per-client id +
+                # random secret. NEVER expose the global secret_token here.
+                new_cid = "mcp-" + _secrets.token_urlsafe(12)
+                new_secret = _secrets.token_urlsafe(32)
+                import time as _t
+                with _oauth_lock:
+                    # cap registry size to avoid unbounded growth
+                    if len(_oauth_clients) > 1000:
+                        _oauth_clients.clear()
+                    _oauth_clients[new_cid] = {"secret": new_secret, "ts": _t.monotonic()}
                 response = JSONResponse({
-                    "client_id": oauth_client_id,
-                    "client_secret": oauth_client_secret,
+                    "client_id": new_cid,
+                    "client_secret": new_secret,
                     "client_name": body.get("client_name", "mcp-client"),
                     "redirect_uris": body.get("redirect_uris", []),
                     "grant_types": ["authorization_code", "client_credentials"],
@@ -10369,10 +12192,11 @@ def create_app():
                 response = JSONResponse({"error": str(e)}, status_code=400)
             await response(scope, receive, send)
         elif path == "/api/identify" and scope["type"] == "http" and scope.get("method") == "POST":
-            # Unified-auth-aware: if middleware validated the caller,
-            # identity comes from ContextVar (spoof-proof). Only when no
-            # HTTP auth was enforced (no secret_token, no X-Odoo-*) we
-            # fall back to body.name for dev/local compatibility.
+            # Profile-info endpoint for claude-terminal bootstrap. Strict
+            # session model: this endpoint has NO MCP session — it neither
+            # binds identity to any session nor touches the global manager
+            # (both legacy behaviors removed). Unified-auth headers, when
+            # present, are validated directly (spoof-proof).
             from starlette.requests import Request
             from starlette.responses import JSONResponse
             request = Request(scope, receive)
@@ -10380,7 +12204,8 @@ def create_app():
                 body = await request.json() if await request.body() else {}
             except Exception:
                 body = {}
-            caller = _odoo_caller_ctx.get()
+            _hdrs = dict(scope.get("headers") or [])
+            caller = get_caller_odoo_user(_hdrs) if _hdrs.get(b"x-odoo-url") else None
             try:
                 if caller:
                     user_name = caller["mcp_user"]
@@ -10398,24 +12223,9 @@ def create_app():
                     preferred_alias = None
 
                 is_new = not os.path.isdir(os.path.join(DATA_DIR, "users", safe_name))
-                _session_users["current"] = user_name
                 conns = _load_user_connections(user_name)
                 active = _load_user_active(user_name)
                 alias_to_activate = preferred_alias or active.get("alias")
-                if alias_to_activate and alias_to_activate in conns:
-                    c = conns[alias_to_activate]
-                    try:
-                        conn = manager.add(
-                            alias="default",
-                            url=c["url"], db=c["db"],
-                            username=c["user"],
-                            api_key=c.get("api_key", ""),
-                            password=c.get("password", ""),
-                            protocol=c.get("protocol", "xmlrpc"),
-                        )
-                        conn.authenticate()
-                    except Exception:
-                        pass
                 response = JSONResponse({
                     "status": "new_profile" if is_new else "identified",
                     "user": user_name,
@@ -10521,23 +12331,47 @@ def create_app():
             from starlette.responses import JSONResponse
             request = Request(scope, receive)
             method = scope.get("method", "GET")
+            # SECURITY (IDOR fix): caller must prove ownership of <name> via
+            # unified-auth headers — caller.mcp_user must equal sanitize(name).
+            # Without that proof a token holder could read/overwrite any
+            # profile's connections (incl. plaintext api_key). No fallback.
+            _hdrs = dict(scope.get("headers") or [])
+            _caller = get_caller_odoo_user(_hdrs) if _hdrs.get(b"x-odoo-url") else None
+
+            def _owns(target_name: str) -> bool:
+                return bool(_caller) and _caller["mcp_user"] == _sanitize_name(target_name)
+
+            def _redact_conns(conns: dict) -> dict:
+                out = {}
+                for alias, c in (conns or {}).items():
+                    c2 = dict(c)
+                    if c2.get("api_key"):
+                        c2["api_key"] = "<set>"
+                    if c2.get("password"):
+                        c2["password"] = "<set>"
+                    out[alias] = c2
+                return out
             try:
                 if method == "GET":
-                    # GET /api/user/connections?name=Rosen
                     name = request.query_params.get("name", "")
                     if not name:
                         response = JSONResponse({"error": "name parameter required"}, status_code=400)
+                    elif not _owns(name):
+                        response = JSONResponse(
+                            {"error": "Forbidden: prove ownership via unified-auth "
+                                      "headers (Authorization: Bearer <odoo_api_key> + "
+                                      "X-Odoo-Url/Db/Login) matching this profile."},
+                            status_code=403)
                     else:
                         conns = _load_user_connections(name)
                         active = _load_user_active(name)
                         response = JSONResponse({
                             "user": name,
                             "profile": _sanitize_name(name),
-                            "connections": conns,
+                            "connections": _redact_conns(conns),
                             "active": active.get("alias"),
                         })
                 elif method == "POST":
-                    # POST /api/user/connections — save full connections dict
                     body = await request.json()
                     name = body.get("name", "")
                     connections = body.get("connections", {})
@@ -10545,9 +12379,15 @@ def create_app():
                         response = JSONResponse({"error": "name required"}, status_code=400)
                     elif not isinstance(connections, dict):
                         response = JSONResponse({"error": "connections must be a dict"}, status_code=400)
+                    elif not _owns(name):
+                        response = JSONResponse(
+                            {"error": "Forbidden: prove ownership via unified-auth "
+                                      "headers matching this profile. To register a new "
+                                      "connection use POST /api/user/register-connection "
+                                      "(validates the key by XMLRPC)."},
+                            status_code=403)
                     else:
                         _save_user_connections(name, connections)
-                        # Optionally save active connection
                         if body.get("active"):
                             _save_user_active(name, {"alias": body["active"]})
                         response = JSONResponse({
@@ -10566,16 +12406,16 @@ def create_app():
             from starlette.requests import Request as _Req
             from starlette.responses import JSONResponse as _JSONResp
             _request = _Req(scope, receive)
-            # Internal Docker network (172.24.x / 172.27.x) is trusted without token
-            _client_ip = (scope.get("client") or ("", 0))[0]
-            _is_internal = _client_ip.startswith("172.") or _client_ip == "127.0.0.1"
-            if not _is_internal:
-                _expected = os.environ.get("MCP_ADMIN_TOKEN", "")
-                _provided = (_request.headers.get("authorization") or "").replace("Bearer ", "", 1).strip()
-                if not _expected or not hmac.compare_digest(_provided, _expected):
-                    _r = _JSONResp({"error": "auth required"}, status_code=401)
-                    await _r(scope, receive, send)
-                    return
+            # SECURITY: always require MCP_ADMIN_TOKEN. The old "internal Docker
+            # network (172.x) is trusted" check was bypassable — Cloudflare tunnel
+            # traffic arrives over the docker bridge with a 172.x source IP, so
+            # every proxied external request looked internal. No IP-based trust.
+            _expected = os.environ.get("MCP_ADMIN_TOKEN", "")
+            _provided = (_request.headers.get("authorization") or "").replace("Bearer ", "", 1).strip()
+            if not _expected or not hmac.compare_digest(_provided, _expected):
+                _r = _JSONResp({"error": "auth required"}, status_code=401)
+                await _r(scope, receive, send)
+                return
             try:
                 import base64 as _b64x
                 _body = await _request.json()
@@ -10599,6 +12439,11 @@ def create_app():
                     _t0 = _tm.monotonic()
                     _pages = _vis.count_pdf_pages(_file_bytes) if _mimetype == "application/pdf" else 1
                     _model = _vis.choose_model(pages=_pages, size_bytes=len(_file_bytes))
+                    # Model override from the caller (Odoo: company.ai_invoice_model_id
+                    # → Settings → MCP Server → AI Invoice Model). Empty = auto-route.
+                    _model_ovr = (_body.get("model") or "").strip()
+                    if _model_ovr:
+                        _model = _model_ovr
                     _sys, _msgs = _vis.build_messages(
                         file_b64=_b64h.b64encode(_file_bytes).decode(), mimetype=_mimetype)
                     _hint_u = {"role": "user", "content": [{"type": "text", "text":
@@ -10666,15 +12511,14 @@ def create_app():
             from starlette.requests import Request as _CReq
             from starlette.responses import JSONResponse as _CResp
             _creq = _CReq(scope, receive)
-            _client_ip = (scope.get("client") or ("", 0))[0]
-            _is_internal = _client_ip.startswith("172.") or _client_ip == "127.0.0.1"
-            if not _is_internal:
-                _expected = os.environ.get("MCP_ADMIN_TOKEN", "")
-                _provided = (_creq.headers.get("authorization") or "").replace("Bearer ", "", 1).strip()
-                if not _expected or not hmac.compare_digest(_provided, _expected):
-                    _r = _CResp({"error": "auth required"}, status_code=401)
-                    await _r(scope, receive, send)
-                    return
+            # SECURITY: always require MCP_ADMIN_TOKEN (no 172.x IP-based trust —
+            # CF tunnel traffic shares the docker bridge source range).
+            _expected = os.environ.get("MCP_ADMIN_TOKEN", "")
+            _provided = (_creq.headers.get("authorization") or "").replace("Bearer ", "", 1).strip()
+            if not _expected or not hmac.compare_digest(_provided, _expected):
+                _r = _CResp({"error": "auth required"}, status_code=401)
+                await _r(scope, receive, send)
+                return
             try:
                 import base64 as _b64c, json as _jsc, re as _rec, time as _tmc
                 import httpx as _hxc
@@ -10816,6 +12660,44 @@ if __name__ == "__main__":
     tenant_router.wire(
         get_proxy_services=_get_proxy_services,
         discover_one=_discover_one,
+        get_session_state=(lambda sk, ns, k: session_store_inst.get_state(sk, ns, k))
+            if session_store_inst is not None else None,
+        set_session_state=(lambda sk, ns, k, v: session_store_inst.set_state(sk, ns, k, v))
+            if session_store_inst is not None else None,
+    )
+    # v3 fleet manager: inventory + canary upgrade/rollback over deployed stacks.
+    fleet_manager.wire(
+        get_proxy_services=_get_proxy_services,
+        discover_one=_discover_one,
+    )
+    # v3 module deploy: rsync addon → ephemeral -u → restart → runtime gate.
+    module_deploy.wire(
+        ssh_execute=_ssh_execute,
+        ensure_ssh_master=_ensure_ssh_master,
+        get_conn=lambda alias: _mgr().get(alias),
+    )
+    # v3 supervisor remote: supervisor.py през Portainer (sidecar exec / one-shot).
+    supervisor_deploy.wire(
+        ssh_execute=_ssh_execute,
+        ensure_ssh_master=_ensure_ssh_master,
+        get_conn=lambda alias: _mgr().get(alias),
+    )
+    # v3 backup/DR: pg_dump + filestore → S3, restore to staging.
+    backup_manager.wire(
+        ssh_execute=_ssh_execute,
+        ensure_ssh_master=_ensure_ssh_master,
+    )
+    # v3 health monitor: scan all stacks, classify, emit alerts.
+    health_monitor.wire(fleet_manager=fleet_manager)
+    # v3 tenant migration: assess + plan (backup→staging→smoke→cutover plan).
+    tenant_migrate.wire(backup_manager=backup_manager, health_monitor=health_monitor)
+    # v3 session handoff: two-phase consent transfer between principals.
+    session_handoff.wire(
+        set_tenant=(lambda sk, tenant: session_store_inst.set_state(
+            sk, "tenant", "active", {"name": tenant}))
+            if session_store_inst is not None else None,
+        revoke_session=(lambda sk: session_store_inst.revoke(sk, "handoff_transfer"))
+            if session_store_inst is not None else None,
     )
 
     # ── Discover proxy tools — eager only for always-on tenants (main).
@@ -10841,17 +12723,35 @@ if __name__ == "__main__":
                     break
             except Exception as e:
                 logger.warning(f"Proxy attempt {attempt+1}: {e}")
-        # Restore active tenant from disk (warm its cache too)
-        active = tenant_router.get_active_tenant()
-        if active and active not in eager:
-            try:
-                tenant_router.refresh_tenant_tools(active)
-                logger.info(f"v3: restored active tenant '{active}' from disk")
-            except Exception as e:
-                logger.warning(f"v3: failed to restore active tenant '{active}': {e}")
+        # Migrate the legacy GLOBAL active-tenant file (pre per-session model):
+        # the active tenant is now per-session state, so we do NOT auto-activate
+        # any session. We only pre-warm the named tenant's shared cache (perf),
+        # then rename the file so it's never read again as a source of truth.
+        try:
+            _legacy = tenant_router.ACTIVE_TENANT_FILE
+            if _legacy.exists():
+                import json as _json
+                _name = (_json.loads(_legacy.read_text()) or {}).get("name")
+                if _name and _name not in eager:
+                    tenant_router.refresh_tenant_tools(_name)
+                    logger.info(f"v3: pre-warmed legacy tenant '{_name}' cache (no session auto-activated)")
+                _legacy.rename(_legacy.with_suffix(".json.migrated"))
+                logger.info("v3: migrated legacy active_tenant.json → .migrated (per-session model)")
+        except Exception as e:
+            logger.warning(f"v3: legacy active-tenant migration skipped: {e}")
         logger.info(f"Proxy startup done: {len(PROXY_TOOLS)} eager tools (always-on={sorted(eager)})")
 
     threading.Thread(target=_startup_discover, daemon=True).start()
+
+    # v3 variant A: eager persistent Telegram publisher(s) → Centrifugo.
+    def _eager_tg():
+        import time
+        time.sleep(8)  # let telegram_registry + Centrifugo env settle
+        try:
+            _telegram_eager_init()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("telegram eager-init thread error: %s", e)
+    threading.Thread(target=_eager_tg, daemon=True).start()
 
     # Initialise Prometheus metrics scaffold (2.x baseline; full integration
     # is 3.x — scraping config not included here).

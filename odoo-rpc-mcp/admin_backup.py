@@ -26,6 +26,7 @@ import logging
 import os
 import zipfile
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Any, Optional
 
 try:
@@ -57,6 +58,26 @@ S3_REGION = os.environ.get("S3_REGION", "default")
 
 ROTATION_CONFIG = os.environ.get("BACKUP_ROTATION_CONFIG", "/shared-data/backup_rotation.json")
 ROTATION_LOG = os.environ.get("BACKUP_ROTATION_LOG", "/shared-data/backup_rotation.log")
+
+# System snapshot — main stack only. Paths are archived into a single tar.gz
+# and uploaded to mcp-backup-main under `system/<date>.tar.gz`. Missing paths
+# are silently skipped. Files named `stack.env` get their values masked.
+SYSTEM_BACKUP_PATHS = [
+    "/data/memory",
+    "/data/connections.json",
+    "/data/sessions.db",
+    "/data/admin_audit.log",
+    "/data/ssl_certs",
+    "/data/proxy_services.json",
+    "/mcp-stack/docker-compose.yml",
+    "/mcp-stack/proxy_services.json",
+    "/mcp-stack/stack.env",
+    # Portainer-managed compose dirs may hold the real stack.env
+    "/mcp-stack-compose/stack.env",
+    "/mcp-stack-compose/docker-compose.yml",
+]
+SYSTEM_BACKUP_BUCKET = "mcp-backup-main"
+SYSTEM_RETENTION_DAYS = int(os.environ.get("SYSTEM_BACKUP_RETENTION_DAYS", "30"))
 
 
 # ── S3 helpers ───────────────────────────────────────────────
@@ -113,9 +134,15 @@ def _bucket_stats(bucket: str) -> dict:
 # ── Re-challenge (admin password re-entry for destructive ops) ──
 
 def _rechallenge_ok(req: Request, sess: dict) -> bool:
+    """Accept either the user's admin password OR the MCP_ADMIN_TOKEN env secret."""
     pw = req.headers.get("x-admin-rechallenge") or ""
     if not pw:
         return False
+    # Path 1: match the server's admin token (env-configured, stable).
+    admin_token = os.environ.get("MCP_ADMIN_TOKEN", "").strip()
+    if admin_token and pw == admin_token:
+        return True
+    # Path 2: compare against the caller's local password hash.
     au = _load_user_auth(sess["login"])
     if not au or not au.get("password_hash"):
         return False
@@ -281,6 +308,8 @@ async def _page_dashboard(req: Request):
     <span class="ms-3 text-muted small">tenant: <code>{TENANT_ID}</code></span>
     <div class="ms-auto">
       <button class="btn btn-sm btn-outline-secondary" onclick="bkRefresh()"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+      <button class="btn btn-sm btn-success ms-1" onclick="bkWriteNow()"><i class="bi bi-plus-circle"></i> New backup</button>
+      {"<button class='btn btn-sm btn-danger ms-1' onclick='bkSystemSnapshot()'><i class='bi bi-shield-check'></i> System snapshot</button>" if IS_MAIN else ""}
       <button class="btn btn-sm btn-outline-warning ms-1" onclick="bkRotateNow()"><i class="bi bi-clock-history"></i> Run rotation now</button>
       <button class="btn btn-sm btn-outline-primary ms-1" data-bs-toggle="modal" data-bs-target="#retentionModal"><i class="bi bi-gear"></i> Retention</button>
     </div>
@@ -442,6 +471,44 @@ async function bkDeletePrefix(bucket) {{
 }}
 function bkExportZip(bucket) {{
   window.location = P+'/backups/api/zip?bucket='+encodeURIComponent(bucket);
+}}
+async function bkSystemSnapshot() {{
+  const pw = await bkRechall('Create SYSTEM snapshot (memory + configs + sessions) into mcp-backup-main?');
+  if (!pw) return;
+  const btn = event.target.closest('button');
+  if (btn) {{ btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> snapshotting...'; }}
+  try {{
+    const res = await bkFetch(P+'/backups/api/system-snapshot', {{
+      method: 'POST',
+      headers: {{'X-Admin-Rechallenge': pw}}
+    }});
+    alert('System snapshot stored:\\n' + res.bucket + '/' + res.key + '\\n' + humanBytes(res.size_bytes) +
+          '\\nIncluded: ' + (res.manifest.included.length) + ' paths');
+    bkLoadBucket('mcp-backup-main');
+  }} catch (e) {{
+    alert('Snapshot failed: ' + e);
+  }} finally {{
+    if (btn) {{ btn.disabled = false; btn.innerHTML = '<i class="bi bi-shield-check"></i> System snapshot'; }}
+  }}
+}}
+async function bkWriteNow() {{
+  if (!CURRENT) {{ alert('Select a bucket tab first.'); return; }}
+  const op = prompt('Operation label (e.g. "manual_snapshot"):', 'manual');
+  if (!op) return;
+  const note = prompt('Note (optional):', '') || '';
+  const pw = await bkRechall('Confirm writing backup in "'+CURRENT+'"');
+  if (!pw) return;
+  try {{
+    const res = await bkFetch(P+'/backups/api/write-now', {{
+      method: 'POST',
+      headers: {{'Content-Type':'application/json','X-Admin-Rechallenge': pw}},
+      body: JSON.stringify({{bucket: CURRENT, operation: op, note: note}})
+    }});
+    alert('Wrote ' + res.bucket + '/' + res.key);
+    bkLoadBucket(CURRENT);
+  }} catch (e) {{
+    alert('Write failed: ' + e);
+  }}
 }}
 async function bkRotateNow() {{
   const pw = await bkRechall('Confirm run rotation now');
@@ -632,6 +699,182 @@ async def _api_zip(req: Request):
                              headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
+def _mask_env(text: str) -> str:
+    """Mask values in a KEY=VALUE env file (keeps first 6 chars + ****)."""
+    out = []
+    for line in text.splitlines():
+        if not line or line.lstrip().startswith("#") or "=" not in line:
+            out.append(line); continue
+        k, _, v = line.partition("=")
+        if len(v) > 8:
+            v = v[:6] + "****"
+        out.append(f"{k}={v}")
+    return "\n".join(out) + "\n"
+
+
+def _build_system_snapshot() -> tuple[bytes, str, dict]:
+    """Return (tar.gz bytes, S3 key, manifest). Missing paths skipped."""
+    import io
+    import tarfile
+
+    now = datetime.now(timezone.utc)
+    key = f"system/{now.strftime('%Y-%m-%d_%H%M%S')}_system.tar.gz"
+    buf = io.BytesIO()
+    included, skipped = [], []
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for p in SYSTEM_BACKUP_PATHS:
+            path = Path(p)
+            try:
+                exists = path.exists()
+            except PermissionError as exc:
+                skipped.append(f"{p}: permission denied"); continue
+            except OSError as exc:
+                skipped.append(f"{p}: {exc}"); continue
+            if not exists:
+                skipped.append(p); continue
+            arc = p.lstrip("/")
+            if path.is_file() and path.name == "stack.env":
+                try:
+                    data = _mask_env(path.read_text(encoding="utf-8")).encode("utf-8")
+                    info = tarfile.TarInfo(arc)
+                    info.size = len(data)
+                    info.mtime = int(path.stat().st_mtime)
+                    info.mode = 0o644
+                    tar.addfile(info, io.BytesIO(data))
+                    included.append(p + " (masked)")
+                except Exception as exc:
+                    skipped.append(f"{p}: {exc}")
+            else:
+                try:
+                    tar.add(str(path), arcname=arc)
+                    included.append(p)
+                except Exception as exc:
+                    skipped.append(f"{p}: {exc}")
+        # embed manifest alongside the files
+        manifest = {
+            "backup_date_utc": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "type": "system_snapshot",
+            "included": included,
+            "skipped": skipped,
+        }
+        manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+        info = tarfile.TarInfo("MANIFEST.json")
+        info.size = len(manifest_bytes)
+        info.mtime = int(now.timestamp())
+        info.mode = 0o644
+        tar.addfile(info, io.BytesIO(manifest_bytes))
+    buf.seek(0)
+    return buf.read(), key, manifest
+
+
+def run_system_snapshot() -> dict:
+    """Build + upload a system snapshot. Returns manifest + S3 location."""
+    if not IS_MAIN:
+        raise RuntimeError("system_snapshot is a main-tenant operation only")
+    data, key, manifest = _build_system_snapshot()
+    s3 = _s3()
+    s3.put_object(
+        Bucket=SYSTEM_BACKUP_BUCKET, Key=key, Body=data,
+        ContentType="application/gzip",
+    )
+    result = {
+        "bucket": SYSTEM_BACKUP_BUCKET,
+        "key": key,
+        "size_bytes": len(data),
+        "manifest": manifest,
+    }
+    _log_rotation(f"system_snapshot wrote {key} size={len(data)} "
+                  f"included={len(manifest['included'])} skipped={len(manifest['skipped'])}")
+    return result
+
+
+def rotate_system_snapshots() -> dict:
+    """Delete system/ objects older than SYSTEM_RETENTION_DAYS."""
+    if not IS_MAIN:
+        return {"skipped": "not main"}
+    s3 = _s3()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=SYSTEM_RETENTION_DAYS)
+    deleted = []
+    for page in s3.get_paginator("list_objects_v2").paginate(
+            Bucket=SYSTEM_BACKUP_BUCKET, Prefix="system/"):
+        for o in page.get("Contents", []):
+            if o["LastModified"] < cutoff:
+                s3.delete_object(Bucket=SYSTEM_BACKUP_BUCKET, Key=o["Key"])
+                deleted.append(o["Key"])
+    if deleted:
+        _log_rotation(f"system_snapshot rotation deleted {len(deleted)} objects")
+    return {"deleted": deleted, "retention_days": SYSTEM_RETENTION_DAYS}
+
+
+async def _api_system_snapshot(req: Request):
+    sess, err = _guard_admin(req)
+    if err: return err
+    if not IS_MAIN:
+        return _apply_sec_headers(JSONResponse(
+            {"error": "system snapshot is for the main tenant only"},
+            status_code=403))
+    if not _rechallenge_ok(req, sess):
+        return _apply_sec_headers(JSONResponse({"error": "rechallenge failed"}, status_code=401))
+    try:
+        result = run_system_snapshot()
+        _audit(sess["login"], "backup_system_snapshot", result["key"],
+               _client_ip(req), req.headers.get("user-agent", ""),
+               {"size": result["size_bytes"]})
+    except Exception as exc:
+        logger.exception("system snapshot failed")
+        return _apply_sec_headers(JSONResponse({"error": str(exc)}, status_code=500))
+    return _apply_sec_headers(JSONResponse(result))
+
+
+async def _api_write_now(req: Request):
+    """Manual backup trigger from the UI — writes a small JSON snapshot.
+
+    Body: {"bucket": str, "operation": str, "note": str, "payload": dict?}
+
+    Useful to verify S3 path, seed an empty bucket, or capture a "checkpoint"
+    at a specific moment. Requires rechallenge because it's a write.
+    """
+    sess, err = _guard_admin(req)
+    if err: return err
+    if not _rechallenge_ok(req, sess):
+        return _apply_sec_headers(JSONResponse({"error": "rechallenge failed"}, status_code=401))
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    bucket = str(body.get("bucket", "")).strip()
+    operation = str(body.get("operation", "manual")).strip() or "manual"
+    note = str(body.get("note", "") or "")[:2000]
+    extra = body.get("payload") if isinstance(body.get("payload"), dict) else None
+    if not _allowed_bucket(bucket):
+        return _apply_sec_headers(JSONResponse({"error": "bucket not allowed"}, status_code=403))
+
+    now = datetime.now(timezone.utc)
+    key = f"{now.strftime('%Y-%m-%d')}/{operation}_{now.strftime('%H%M%S%f')}_{sess['login']}.json"
+    doc = {
+        "backup_date_utc": now.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+        "operation": operation,
+        "connection": bucket.removeprefix("mcp-backup-"),
+        "created_via": "admin_ui",
+        "actor": sess["login"],
+        "note": note,
+    }
+    if extra:
+        doc["payload"] = extra
+    try:
+        s3 = _s3()
+        s3.put_object(
+            Bucket=bucket, Key=key,
+            Body=json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8"),
+            ContentType="application/json",
+        )
+    except Exception as exc:
+        return _apply_sec_headers(JSONResponse({"error": str(exc)}, status_code=500))
+    _audit(sess["login"], "backup_manual_write", f"{bucket}/{key}",
+           _client_ip(req), req.headers.get("user-agent", ""))
+    return _apply_sec_headers(JSONResponse({"bucket": bucket, "key": key, "size": len(doc)}))
+
+
 async def _api_rotate_now(req: Request):
     sess, err = _guard_admin(req)
     if err: return err
@@ -693,6 +936,16 @@ def start_scheduler():
     sched.add_job(lambda: rotate_once(dry_run=False),
                   CronTrigger(hour=hh, minute=mm, timezone=tz),
                   name="backup_rotate", max_instances=1, coalesce=True)
+    if IS_MAIN:
+        # Daily system snapshot 1h before rotation, plus retention sweep right after.
+        sched.add_job(run_system_snapshot,
+                      CronTrigger(hour=(hh - 1) % 24, minute=mm, timezone=tz),
+                      name="system_snapshot", max_instances=1, coalesce=True)
+        sched.add_job(rotate_system_snapshots,
+                      CronTrigger(hour=hh, minute=(mm + 5) % 60, timezone=tz),
+                      name="system_snapshot_rotate", max_instances=1, coalesce=True)
+        logger.info("system snapshot scheduled daily at %02d:%02d %s (retention %dd)",
+                    (hh - 1) % 24, mm, tz, SYSTEM_RETENTION_DAYS)
     sched.start()
     logger.info("backup rotation scheduled daily at %s %s", run_at, tz)
     return sched
@@ -710,5 +963,7 @@ def get_routes() -> list:
         Route(f"{p}/backups/api/prefix", _api_prefix_delete, methods=["DELETE"]),
         Route(f"{p}/backups/api/zip", _api_zip),
         Route(f"{p}/backups/api/rotate-now", _api_rotate_now, methods=["POST"]),
+        Route(f"{p}/backups/api/write-now", _api_write_now, methods=["POST"]),
+        Route(f"{p}/backups/api/system-snapshot", _api_system_snapshot, methods=["POST"]),
         Route(f"{p}/backups/api/retention", _api_retention, methods=["GET", "PUT"]),
     ]

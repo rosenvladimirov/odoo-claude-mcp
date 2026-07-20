@@ -177,40 +177,31 @@ The shorter version: most other MCP-Odoo bridges are great for "one developer wa
 
 ## 🏗 Architecture
 
-```
-                        ┌──────────────────────────────┐
-                        │   Claude.ai / Claude Code    │
-                        │   Claude Desktop / IDE       │
-                        └──────────────┬───────────────┘
-                                       │ HTTPS + Token Auth
-                                       ▼
-        ┌──────────────────────────────────────────────────────────┐
-        │              odoo-claude-mcp gateway                     │
-        │  ┌────────────────────────────────────────────────────┐  │
-        │  │  Unified MCP Router (server.py)                    │  │
-        │  │  • Proxies to backend MCP servers                  │  │
-        │  │  • Per-user profiles & connections                 │  │
-        │  │  • Shared memory store                             │  │
-        │  └────────────────────────────────────────────────────┘  │
-        └──────────────────────────────────────────────────────────┘
-                                       │
-        ┌──────────────────────────────┴──────────────────────────────┐
-        │                                                              │
-   ┌────┴─────┐  ┌──────────┐  ┌──────────┐  ┌───────────┐  ┌────────┴──┐
-   │ odoo-rpc │  │  ee-mcp  │  │ oca-mcp  │  │ github-mcp│  │portainer- │
-   │   -mcp   │  │ (Odoo EE)│  │   (OCA)  │  │           │  │    mcp    │
-   └──────────┘  └──────────┘  └──────────┘  └───────────┘  └───────────┘
-   ┌──────────┐  ┌──────────┐  ┌────────────────┐
-   │filesystem│  │ teams-mcp│  │claude-terminal │
-   │   -mcp   │  │          │  │  (xterm + tmux)│
-   └──────────┘  └──────────┘  └────────────────┘
-                                       │
-                      ┌────────────────┼────────────────┐
-                      ▼                ▼                ▼
-                 ┌────────┐       ┌─────────┐      ┌─────────┐
-                 │  Odoo  │       │ Qdrant  │      │ Ollama  │
-                 │ 15-19  │       │  VDB    │      │  LLMs   │
-                 └────────┘       └─────────┘      └─────────┘
+```mermaid
+flowchart TD
+    A["🧑 Claude.ai · Claude Code · Claude Desktop · IDE"]
+    A -->|HTTPS + Bearer token| B
+    subgraph GW["odoo-claude-mcp gateway"]
+        B["Unified MCP Router · server.py<br/>• Proxies to 7 backend MCP servers<br/>• Per-user profiles &amp; connections<br/>• Shared memory store · audit log"]
+    end
+    B --> C1["odoo-rpc-mcp<br/>(core, 100+ tools)"]
+    B --> C2["ee-mcp<br/>(Odoo EE)"]
+    B --> C3["oca-mcp<br/>(OCA repos)"]
+    B --> C4["github-mcp"]
+    B --> C5["portainer-mcp"]
+    B --> C6["filesystem-mcp"]
+    B --> C7["teams-mcp"]
+    B --> C8["claude-terminal<br/>(xterm.js + tmux)"]
+    C1 --> D1["Odoo 15→19<br/>(N tenants)"]
+    C1 --> D2["Qdrant<br/>(vector DB)"]
+    C1 --> D3["Ollama<br/>(local LLMs)"]
+
+    classDef gw fill:#e0e7ff,stroke:#4338ca,color:#1e1b4b;
+    classDef be fill:#f3f4f6,stroke:#6b7280,color:#111827;
+    classDef st fill:#fef3c7,stroke:#d97706,color:#451a03;
+    class B gw;
+    class C1,C2,C3,C4,C5,C6,C7,C8 be;
+    class D1,D2,D3 st;
 ```
 
 ---
@@ -293,8 +284,8 @@ major series has a dedicated branch).
 
 **Repos:**
 
-- **Odoo 18**: [`l10n-bulgaria` → `l10n_bg_claude_terminal`](https://github.com/rosenvladimirov/l10n-bulgaria/tree/18.0/l10n_bg_claude_terminal) · current: **18.0.1.28.0**
-- **Odoo 19**: [`l10n-bulgaria` → `l10n_bg_claude_terminal`](https://github.com/rosenvladimirov/l10n-bulgaria/tree/19.0/l10n_bg_claude_terminal) · current: **19.0.1.24.0**
+- **Odoo 18**: [`l10n-bulgaria` → `l10n_bg_claude_terminal`](https://github.com/rosenvladimirov/l10n-bulgaria/tree/18.0/l10n_bg_claude_terminal) · current: **18.0.1.36.1**
+- **Odoo 19**: [`l10n-bulgaria` → `l10n_bg_claude_terminal`](https://github.com/rosenvladimirov/l10n-bulgaria/tree/19.0/l10n_bg_claude_terminal) · current: **19.0.1.34.1**
 - **Odoo 16**: same repo, branch `16.0`
 
 > 🌍 **Non-Bulgarian deployments?** Use the international fork
@@ -555,6 +546,31 @@ See the [Bulgaria-specific OCA modules](https://github.com/OCA/l10n-bulgaria) fo
 
 ---
 
+## ❓ FAQ
+
+**Does it work with Odoo Enterprise?**
+Yes. Odoo 15→19 (Community + Enterprise) are all supported via XML-RPC + JSON-RPC. EE-specific tools (license check, EE module discovery, dependency analysis) live in the dedicated `ee-mcp` server. No Odoo SH-specific hooks — works on any self-hosted Odoo (bare metal, Docker, K3s, Odoo SH outbound).
+
+**Is this OCA-approved / on the Odoo Apps Store?**
+The companion modules (`l10n_bg_claude_terminal`, the broader `l10n-bulgaria` family) are maintained by the [OCA `l10n-bulgaria` maintainer](https://github.com/OCA/l10n-bulgaria). The MCP server itself is an independent project (not an Odoo app), AGPL-3.0, distributed via Docker Hub + GitHub. Track 3.x will publish a SaaS billing module on the Odoo Apps Store separately.
+
+**BYOK (bring your own Anthropic key) — is it safe?**
+Yes. Each authenticated user can configure their own Anthropic API key via the Odoo UI (`Preferences → Claude Terminal`). Keys are stored encrypted in the per-user profile (`/data/users/{username}/`) and never leak to other tenants. The server never bundles a shared Anthropic key into multi-tenant deployments.
+
+**Can one stack serve multiple Odoo databases?**
+Yes — that's the core design. One MCP server instance proxies to N Odoo connections, each with its own credentials, language, and timezone. `odoo_connect` / `user_connection_activate` switch the active database mid-session. Per-user memory namespaces keep context isolated.
+
+**Does it require Cloudflare?**
+No. Cloudflare is the recommended production topology (Tunnel + WAF + AI Gateway), but the stack runs fine behind any reverse proxy (Nginx, Traefik, Caddy) or directly on a LAN/VPN. The `docker-compose.local.yml` override removes the Cloudflare network requirement for local dev.
+
+**What's the difference between this and Rutger Klabbers's `odoo-mcp-pro`?**
+Different scope. `odoo-mcp-pro` is a focused single-user/single-DB Odoo MCP wrapper. `odoo-claude-mcp` is a multi-tenant gateway with 7+ federated MCP servers (Odoo + GitHub + OCA + Portainer + filesystem + Teams + claude-terminal), per-user authentication, audit logging, and a companion Odoo billing module for SaaS providers. Both projects are open source — pick the one that matches your deployment shape.
+
+**Can I run only the parts I need?**
+Yes. Compose profiles gate optional services: `docker compose up -d` starts only the core (no Portainer, no Teams). Use `--profile portainer` / `--profile teams` / `--profile full` to add them. K3s overlays are similarly modular.
+
+---
+
 ## 🛤 Two Tracks — Which Branch Do You Want?
 
 This project ships on **two parallel branches**, each targeting a different
@@ -620,10 +636,12 @@ own clients at scale.
 
 ## 🗺 Roadmap
 
-- [ ] **Billing module** — native Odoo module for SaaS per-user MCP billing (in progress)
-- [ ] **Multi-tenant dashboard** — admin UI for managing hosted MCP instances
-- [ ] **Skills marketplace** — publish and subscribe to pre-built Odoo workflows
-- [ ] **Invoice AI integration** — direct account.move extraction from attachments
+- [x] **Billing module** — `l10n_bg_ai_billing` 19.0.1.3.0 shipped (4 tiers, millicents precision, Portainer auto-provisioning)
+- [x] **Invoice AI integration** — `l10n_bg_ai_pipeline` + `l10n_bg_ai_invoice_glue` shipped (98.5% conf EAD OCR, Odoo 18+19, end-to-end tokenize)
+- [x] **Self-service tenant provisioning** — v3 `/provision` endpoint LIVE on `mcp.odoo-shell.space` (Apr 2026)
+- [ ] **Try-shop trial demo** — `try.mcpworks.net` with Stripe checkout for paid trial stacks (in progress, Q2 2026)
+- [ ] **Multi-tenant admin dashboard** — admin UI for managing hosted MCP instances
+- [ ] **Skills marketplace** — publish and subscribe to pre-built Odoo workflows (`ai.skill` records + memory packs)
 - [ ] **Audit log UI** — searchable web UI for MCP tool call history
 - [ ] **Self-healing connections** — automatic retry with token refresh on auth failures
 
