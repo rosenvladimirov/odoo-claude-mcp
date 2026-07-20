@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.3.1"
+__version__ = "3.3.4"
 
 import asyncio
 import hmac
@@ -52,6 +52,7 @@ import provisioning_api
 import fleet_manager
 import secrets_registry
 import module_deploy
+import supervisor_deploy
 import client_onboard
 import backup_manager
 import health_monitor
@@ -5920,6 +5921,7 @@ async def list_tools() -> list[Tool]:
     base.extend(fleet_manager.get_admin_tools())
     base.extend(secrets_registry.get_admin_tools())
     base.extend(module_deploy.get_admin_tools())
+    base.extend(supervisor_deploy.get_admin_tools())
     base.extend(client_onboard.get_admin_tools())
     base.extend(backup_manager.get_admin_tools())
     base.extend(health_monitor.get_admin_tools())
@@ -5980,6 +5982,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 _admin_group = secrets_registry
             elif name in module_deploy.ADMIN_TOOL_NAMES:
                 _admin_group = module_deploy
+            elif name in supervisor_deploy.ADMIN_TOOL_NAMES:
+                _admin_group = supervisor_deploy
             elif name in client_onboard.ADMIN_TOOL_NAMES:
                 _admin_group = client_onboard
             elif name in backup_manager.ADMIN_TOOL_NAMES:
@@ -12563,6 +12567,12 @@ if __name__ == "__main__":
     )
     # v3 module deploy: rsync addon → ephemeral -u → restart → runtime gate.
     module_deploy.wire(
+        ssh_execute=_ssh_execute,
+        ensure_ssh_master=_ensure_ssh_master,
+        get_conn=lambda alias: _mgr().get(alias),
+    )
+    # v3 supervisor remote: supervisor.py през Portainer (sidecar exec / one-shot).
+    supervisor_deploy.wire(
         ssh_execute=_ssh_execute,
         ensure_ssh_master=_ensure_ssh_master,
         get_conn=lambda alias: _mgr().get(alias),

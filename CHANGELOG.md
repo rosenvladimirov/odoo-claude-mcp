@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.4] — 2026-07-20 — supervisor sidecar transport (Cloudflare-fronted hosts)
+
+Adds a second transport to `supervisor_deploy` that `exec`s into an **already
+running** toolbox container instead of creating a one-shot one. Needed for hosts
+whose Portainer sits behind a Cloudflare tunnel: the bodyless
+`POST /containers/{id}/start` gets re-chunked in transit, so Docker >= 29 reads
+`ContentLength=-1` as a non-empty body and rejects it with HTTP 400
+(`non-empty request body removed in v1.24`). Every bodied request — create, exec,
+archive — passes cleanly. See ADR-0002. The 400 was diagnosed live on
+`mozu`/ic-intracom.bg (Docker 29.6.2 in Proxmox LXC CT20010); the sidecar path
+itself is not yet exercised against that host.
+
+- `supervisor.transport` on the alias: `auto` (default) | `sidecar` | `oneshot`.
+  Under `auto`, the presence of `supervisor.sidecar` selects the sidecar path, so
+  existing aliases (e.g. `odoo-dev-server`) keep the proven one-shot behaviour.
+- `supervisor_sidecar_status(target)` — read-only liveness check for the alias's
+  sidecar; returns the one-time `docker run` bootstrap line when it is missing or
+  stopped. The sidecar is deliberately **not** started from the MCP: starting a
+  container is the very operation the tunnel blocks, so it stays a one-off manual
+  step by the operator.
+- One-shot path now pins `LogConfig: json-file`; on hosts using another log driver
+  `GET /containers/{id}/logs` returned 0 bytes and runs looked silent.
+- Op ledger records now carry `transport`.
+
+The one-shot transport is retained for this release and will be removed once the
+sidecar path has proven itself in production.
+
+## [3.3.3] — 2026-07-18 — supervisor_deploy reads per-user connections
+
+`supervisor_deploy._load_entry` now also scans the per-user connection store
+(`/data/users/*/connections.json`) after the static global candidates, matching
+how the deployed gateway actually stores connections (there is no global
+`/data/connections.json` in the multi-tenant deployment). Admin-gated, so scanning
+all users for the alias is acceptable. Also tolerates both flat `{alias:{}}` and
+wrapped `{connections:{alias:{}}}` shapes. Unblocks `supervisor_status(target)` for
+aliases that live only in a per-user store (e.g. `mozu`).
+
+## [3.3.2] — 2026-07-17 — Supervisor remote control (Portainer one-shot)
+
+New admin tool group `supervisor_deploy` (`supervisor_status`, `supervisor_run`,
+`supervisor_history`) for remotely driving the Odoo addons orchestrator
+(`supervisor.py`) via the **Portainer Docker API** — for hosts reachable only
+through Portainer (no outbound SSH). Runs the `supervisor-19.0-slim` toolbox image
+as a one-shot container (pull → create → start → wait → logs → remove).
+
+- `supervisor_status(target)` — read-only git drift report (`--github-status`;
+  supervisor returns before any symlink/pip/chown, verified).
+- `supervisor_run(target, mode, dry_run)` — modes status|github_update|github_sync|
+  oca|ee|force|init; destructive modes are **DRY-RUN by default** (plan only) unless
+  `dry_run=false` + `MCP_SUPERVISOR_DRY_RUN=0`.
+- Admin-principal gated (server.py) + USER-blocked (tool_security). Per-alias config
+  via a `supervisor` block (image, conf_path, binds, endpoint_id) in connections.json,
+  Portainer creds from the alias `portainer` block. Audit ledger
+  `supervisor_deploy_ops.jsonl`.
+- Note: no per-action TOTP exists in the codebase; DRY-RUN-default + admin gate +
+  the alias `read_only` flag are the guard for destructive modes.
+
 ## [3.3.1] — 2026-07-11 — TOTP enrol returns a QR code
 
 `identify_totp_enroll` now renders the `otpauth://` URI as a scannable QR so any

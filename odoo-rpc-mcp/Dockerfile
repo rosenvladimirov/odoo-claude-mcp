@@ -50,6 +50,7 @@ COPY --chmod=644 cloudflare_provisioning.py .
 COPY --chmod=644 fleet_manager.py .
 COPY --chmod=644 secrets_registry.py .
 COPY --chmod=644 module_deploy.py .
+COPY --chmod=644 supervisor_deploy.py .
 COPY --chmod=644 client_onboard.py .
 COPY --chmod=644 backup_manager.py .
 COPY --chmod=644 health_monitor.py .

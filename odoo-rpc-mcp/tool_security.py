@@ -66,6 +66,11 @@ DEFAULT_USER_BLOCKED_TOOLS: set[str] = {
     "module_deploy_status",
     "module_deploy_rollback",
     "module_deploy_history",
+    # v3 supervisor remote control (Portainer sidecar exec / one-shot supervisor.py)
+    "supervisor_status",
+    "supervisor_run",
+    "supervisor_history",
+    "supervisor_sidecar_status",
     # v3 client onboarding wizard
     "client_onboard",
     "client_onboard_status",
