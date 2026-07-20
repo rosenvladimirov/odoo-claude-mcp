@@ -28,6 +28,7 @@ COPY --chmod=644 telegram_service.py .
 COPY --chmod=644 telegram_subscriptions.py .
 COPY --chmod=644 centrifugo_client.py .
 COPY --chmod=644 centrifugo_token.py .
+COPY --chmod=644 telegram_agent.py .
 COPY --chmod=644 ai_usage_log.py .
 COPY --chmod=644 ai_vision_service.py .
 COPY --chmod=644 ai_invoice_engine.py .
