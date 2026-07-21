@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.5] — 2026-07-21 — publisher isolation keyed by phone, not principal
+
+The publisher-isolation guard added in 3.3.x only protected the publisher's *own*
+principal. A **different** principal could still call `telegram_auth` with the
+publisher's phone — which logs the account in a second time and makes Telegram
+revoke one of the two auth keys. Observed live on 2026-07-21: principal `teolino`
+had bound its own Telethon session to `rosen`'s `+359886100204`, and at 08:38:42
+UTC that key died with `RpcError(401, AUTH_KEY_UNREGISTERED)`. The reported
+symptom — "Telethon on the server is down, restart the send client" — was wrong
+on every count: Telethon kept streaming throughout, and a restart cannot revive a
+server-side-revoked key. See ADR-0001 in `specs/mcp-telegram-publisher-isolation/`.
+
+- `telegram_auth` now refuses a phone that is another principal's eager publisher.
+  **No `force` escape** on this path: a tenant principal has no legitimate reason
+  to log in someone else's Telegram account, and the session file would land in
+  the caller's user dir (tenancy breach). Matching is on the sanitized tag, so
+  `+359…` and `359…` are the same account.
+- `telegram_configure` now refuses to change `api_id` under a running publisher
+  of the same principal (an auth key is bound to its api_id — rewriting it kills
+  the key instantly, with no login and no warning). `force=True` for the operator.
+- The pre-existing own-principal re-auth block is unchanged.
+- Both blocks log a `WARNING` naming the caller, so the next occurrence is
+  greppable instead of surfacing as "Telethon is broken".
+
+Not covered: this does **not** grant Telegram to a principal without a publisher
+(`MCP_NO_TELEGRAM_PHONE` stays) — that is a separate access decision.
+
 ## [3.3.4] — 2026-07-20 — supervisor sidecar transport (Cloudflare-fronted hosts)
 
 Adds a second transport to `supervisor_deploy` that `exec`s into an **already

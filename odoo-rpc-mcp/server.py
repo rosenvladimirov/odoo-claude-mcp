@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.3.4"
+__version__ = "3.3.5"
 
 import asyncio
 import hmac
@@ -1906,6 +1906,24 @@ _eager_tg_refs: list = []
 # client for send/read) and are BLOCKED from re-auth — so a tenant Claude can
 # never disrupt the persistent listener. This is the publisher-isolation guard.
 _eager_tg_phones: dict = {}
+# phone_tag -> owning principal. The principal-keyed guard above only protects
+# the publisher's OWN principal; a DIFFERENT principal could still call
+# telegram_auth with the publisher's phone, log the account in a second time and
+# have Telegram revoke the publisher's auth key (observed 2026-07-21: principal
+# 'teolino' re-authed rosen's +359886100204 → AUTH_KEY_UNREGISTERED). Keyed by
+# phone, this blocks that cross-principal path.
+_eager_tg_phone_owner: dict = {}
+
+
+def _eager_phone_owner(phone: str) -> str:
+    """Return the principal that owns `phone` as an eager publisher, else ''.
+
+    Matching is on the sanitized tag, so '+359...' and '359...' are the same
+    account (that is also how the session file name is derived).
+    """
+    if not phone:
+        return ""
+    return _eager_tg_phone_owner.get(_sanitize_name(phone), "")
 
 
 def _telegram_eager_init() -> None:
@@ -1940,8 +1958,10 @@ def _telegram_eager_init() -> None:
             )
             _eager_tg_refs.append(mgr)
             _eager_tg_phones[principal] = phone
+            _eager_tg_phone_owner[tag] = principal
             logger.info("telegram eager-init: %s:%s (push listener will start "
-                        "if session authorized; principal re-auth now BLOCKED)",
+                        "if session authorized; re-auth of this principal AND "
+                        "of this phone from any other principal now BLOCKED)",
                         principal, tag)
         except Exception as e:  # noqa: BLE001
             logger.warning("telegram eager-init failed for %r: %s", pair, e)
@@ -11057,6 +11077,30 @@ def _execute_tool(name: str, args: dict) -> Any:
             api_id = int(args["api_id"])
         except (TypeError, ValueError):
             return {"error": "api_id must be an integer"}
+        # Publisher isolation, part 3: a Telethon auth key is bound to the
+        # api_id. Rewriting it under a running publisher invalidates that key
+        # INSTANTLY — no login, no code, no warning — and the symptom then looks
+        # like "Telethon is broken, restart the server" (which never helps).
+        if principal in _eager_tg_phones and not args.get("force"):
+            _cur = 0
+            try:
+                with open(cfg_path, encoding="utf-8") as f:
+                    _cur = int(json.load(f).get("api_id") or 0)
+            except Exception:  # noqa: BLE001 - missing/corrupt config
+                _cur = 0
+            if _cur and _cur != api_id:
+                logger.warning("telegram_configure BLOCKED for publisher "
+                               "principal %r: api_id %s -> %s",
+                               principal, _cur, api_id)
+                return {
+                    "status": "managed",
+                    "message": (
+                        "This principal runs a server-side Telegram publisher. "
+                        "Changing api_id would revoke its auth key instantly. "
+                        "(Operator only: force=True after stopping the "
+                        "publisher.)"),
+                    "principal": principal,
+                }
         with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump({"api_id": api_id, "api_hash": args["api_hash"]}, f, indent=2)
         return {"status": "configured", "principal": principal}
@@ -11071,10 +11115,31 @@ def _execute_tool(name: str, args: dict) -> Any:
             return {"error": "phone is required (e.g. telegram_auth(phone='+359...'))."}
         sc = _sctx()
         _principal = _require_principal()
-        # Publisher isolation: a principal running an eager-init publisher is
-        # managed server-side. Re-auth from ANY session re-logs-in the account
-        # and revokes the publisher's auth key (AUTH_KEY_UNREGISTERED) — the
-        # repeated outage cause. Block it (escape hatch: force=True, operator).
+        # Publisher isolation, part 1 — CROSS-PRINCIPAL. The phone belongs to
+        # somebody else's eager publisher: a second login on that account makes
+        # Telegram revoke one of the two auth keys. No force escape here — a
+        # tenant principal has no legitimate reason to log in another
+        # principal's Telegram account (and doing so is also a tenancy breach:
+        # the session file would land in the caller's user dir).
+        _owner = _eager_phone_owner(phone)
+        if _owner and _owner != _principal:
+            logger.warning("telegram_auth BLOCKED: principal %r tried to "
+                           "(re-)auth phone owned by publisher %r",
+                           _principal, _owner)
+            return {
+                "status": "forbidden",
+                "message": (
+                    "This phone is a server-side publisher of another "
+                    "principal. Logging it in from here would revoke that "
+                    "publisher's auth key. Use your own phone, or ask the "
+                    "operator to relay through the publisher."),
+                "principal": _principal,
+            }
+        # Publisher isolation, part 2 — OWN PRINCIPAL: a principal running an
+        # eager-init publisher is managed server-side. Re-auth from ANY session
+        # re-logs-in the account and revokes the publisher's auth key
+        # (AUTH_KEY_UNREGISTERED) — the repeated outage cause. Block it
+        # (escape hatch: force=True, operator).
         if _principal in _eager_tg_phones and not args.get("force"):
             return {
                 "status": "managed",
