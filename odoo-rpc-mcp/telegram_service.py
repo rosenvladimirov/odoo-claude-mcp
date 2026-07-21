@@ -206,6 +206,12 @@ class TelegramServiceManager:
             return {"status": "error", "message": "Not configured. Call telegram_configure first."}
 
         try:
+            # Reconnect a dropped transport before starting the login flow —
+            # mirrors is_authenticated(); without it a stale disconnected client
+            # raises "Cannot send requests while disconnected" (e.g. after the
+            # server revokes a dead authkey).
+            if not self._client.is_connected():
+                self._run(self._client.connect())
             result = self._run(self._client.send_code_request(phone))
             self._phone_code_hash = result.phone_code_hash
             return {
@@ -222,6 +228,10 @@ class TelegramServiceManager:
             return {"status": "error", "message": "Not configured."}
 
         try:
+            # Same reconnect guard as auth_send_code — verify must not fail on a
+            # dropped transport.
+            if not self._client.is_connected():
+                self._run(self._client.connect())
             self._run(self._client.sign_in(
                 phone=phone,
                 code=code,
@@ -261,6 +271,11 @@ class TelegramServiceManager:
         if not self.is_authenticated:
             return {"status": "not_authenticated"}
         me = self._run(self._client.get_me())
+        if me is None:
+            # is_user_authorized() passed a moment ago but the server then
+            # rejected the authkey (AUTH_KEY_UNREGISTERED) — report cleanly
+            # instead of crashing on None.first_name.
+            return {"status": "not_authenticated"}
         return {
             "status": "authenticated",
             "user": me.first_name,
