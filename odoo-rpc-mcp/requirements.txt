@@ -1,4 +1,8 @@
-mcp>=1.0.0
+# Горната граница е задължителна: mcp 2.0.0 махна декораторния API на
+# low-level Server (@list_tools/@call_tool → add_request_handler), а server.py
+# още стъпва на него. Без нея първият rebuild вдига контейнер, който пада на
+# import. Вдига се чак след миграция към 2.0 API.
+mcp>=1.0.0,<2.0.0
 uvicorn>=0.30.0
 google-api-python-client>=2.100.0
 google-auth>=2.20.0
