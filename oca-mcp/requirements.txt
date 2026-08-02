@@ -1,2 +1,4 @@
-mcp>=1.0.0
+# Виж odoo-rpc-mcp/requirements.txt — mcp 2.0.0 махна @list_tools/@call_tool,
+# които server.py още ползва.
+mcp>=1.0.0,<2.0.0
 oca-maintainers-tools @ git+https://github.com/OCA/maintainer-tools.git
