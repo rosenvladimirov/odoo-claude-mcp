@@ -7,6 +7,147 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.30.3] — 2026-06-13 — Telegram file transfer (v2/v3 lockstep)
+
+Backport of the v3 3.0.7 feature: the Telegram MCP could only send/read text.
+
+- `telegram_send_file(chat, path, caption?, reply_to?)` — send a file/document;
+  source path confined to the download root via `_safe_save_path`.
+- `telegram_download_media(chat, message_id, filename)` — download a message's
+  media into the confined download root.
+- Service layer: `TelegramService.send_file` / `download_media` (Telethon).
+
+## [2.30.1] — 2026-06-10 — Security hardening (audit fixes P0/P1/P2)
+
+Closes findings from the 2026-06-10 security audit
+(`docs/SECURITY_AUDIT_2026_06_10.md`). The strict session model itself was
+sound; these fixes harden the surrounding HTTP layer (mostly pre-existing).
+
+### Security — P0
+- **Credential leak via AUTH-DEBUG removed** — full request headers (incl.
+  `Authorization: Bearer <Odoo api_key>`) were logged at INFO on every /mcp +
+  OAuth request. Now OFF by default; gated behind `MCP_DEBUG_HEADERS=1` and
+  even then Authorization/X-Odoo-*/Cookie/X-Api-Token are redacted.
+- **/api/user/connections IDOR fixed** — GET/POST now require unified-auth
+  ownership proof (`caller.mcp_user == sanitize(name)`); GET redacts
+  api_key/password. Previously any token holder could read (plaintext keys)
+  or overwrite any profile's connections.
+- **OAuth no longer hands out the master token** — `/oauth/register` mints a
+  per-client random secret; `/oauth/token` and `/oauth/authorize` mint
+  short-lived random access tokens/codes (in-memory, TTL). `MCP_SECRET_TOKEN`
+  is never returned through the public OAuth flow. The gate accepts the
+  long-lived secret (admin/legacy) OR a live issued token. Restart → clients
+  re-auth automatically.
+- **Arbitrary file write (save_path) confined** — `odoo_web_report` +
+  `public_access_*` now write only under `users/<principal>/downloads/`
+  (`_safe_save_path`); absolute paths and `..` rejected. Was: write anywhere
+  the process could (authorized_keys, cron, server.py) → RCE.
+
+### Security — P1
+- **AI extract endpoints** (`/api/ai/extract-raw`, `/api/ai/customs/extract-raw`)
+  now require `MCP_ADMIN_TOKEN` unconditionally — removed the bypassable
+  "172.x source IP is internal" trust (Cloudflare tunnel traffic shares the
+  docker bridge range, so every proxied request looked internal).
+- **SSRF guard** — with no `ALLOWED_ODOO_URLS` whitelist, outbound auth XMLRPC
+  to private/loopback/link-local hosts is refused (`_ssrf_target_allowed`),
+  blocking blind backend port-scans via a dummy Bearer + `X-Odoo-Url`.
+- **identify(name) impersonation guard** — a name-only identify (no
+  unified-auth headers) can no longer claim an EXISTING profile that holds
+  saved connections; bootstrap of new/empty profiles still works. Opt back in
+  on single-user stacks with `MCP_ALLOW_NAME_IDENTIFY=1`.
+
+### Security — P2
+- `git_remote` shlex-quotes `repo_path`/`extra_args` (shell injection).
+- `_sanitize_name` rejects `.`/`..` traversal components.
+- WAL sidecar files (`-wal`/`-shm`) are chmod 0600 alongside the DB.
+- Constant-time secret comparison (`_hmac_eq`) on token paths.
+
+### Known remaining (deliberately deferred)
+- TLS verification stays `verify=False`/`CERT_NONE` for Odoo XMLRPC/web —
+  flipping it globally on 8 production stacks with self-signed/pinned Odoo
+  instances needs per-connection testing; tracked for a follow-up.
+
+### Tests
+- `tests/test_security_fixes.py` (sanitize traversal, save_path confinement,
+  SSRF guard, constant-time compare).
+
+## [2.30.0] — 2026-06-10 — Strict session model (fail-closed, SQLite session store)
+
+**BREAKING.** Complete migration of all per-session/per-user state to a
+SQLite session store (`/data/mcp_sessions.db`, WAL, 0600). Every tool call
+must resolve to a session row; absence of session data is a structured
+refusal (`error_code` + `how_to_fix`), never a silent fallback. Design doc:
+`docs/SESSION_MODEL_V2_MIGRATION_PLAN.md`.
+
+### Added
+- **`session_store.py`** — `SessionStore` (sessions + session_state tables,
+  schema migrations, sliding TTL `MCP_SESSION_TTL` default 24h, retention
+  `MCP_SESSION_RETENTION_DAYS` default 7d, `MCP_SESSIONS_DB` path) +
+  `SessionRuntime` live-object cache (OdooConnection / OdooWebSession).
+- **Session gate in `call_tool`** — resolves `Mcp-Session-Id` (streamable
+  HTTP) / `session_id` query param (SSE) to a store row; binds the
+  unified-auth principal on first call; refuses with `MCP_NO_SESSION` /
+  `MCP_NO_IDENTITY` / `MCP_NO_CONNECTION` / `MCP_NO_TELEGRAM_PHONE` /
+  `MCP_AUTH_FAILED` / `MCP_SESSION_ORPHANED` / `MCP_SESSION_PRINCIPAL_MISMATCH`.
+- **Orphan lifecycle** — server restart marks all active rows
+  `orphaned/server_restart`; inline reaper (≤1/15min) orphans TTL-expired
+  rows, purges past retention, evicts live objects, and disconnects
+  Telethon clients with no active session AND no subscription allow-list
+  (releases the SQLite session-file lock — fixes recurring
+  "database is locked"). Clients pinned by non-empty subscriptions keep
+  their Centrifugo push feed alive by design.
+- **Tools `session_list` / `session_revoke`** — own sessions for everyone;
+  cross-principal visibility/revoke for `MCP_ADMIN_PRINCIPALS` (env CSV).
+- **Metrics** — `mcp_sessions_reaped_total{reason}`,
+  `mcp_store_sessions_active`, `mcp_store_sessions_orphaned`, tool-call
+  status `session_denied`.
+- **Per-principal Google** — `GoogleRegistry`; OAuth token now at
+  `users/<principal>/google_token.json` (was a single shared
+  `/data/google_token.json` for ALL users — cross-user mailbox exposure).
+- Integration suite `tests/test_session_isolation.py` (8 scenarios:
+  isolation of two sessions sharing one key, principal mismatch, restart
+  orphaning, revoke, invalid session id) + `tests/test_session_store.py`.
+
+### Changed
+- `identify(name)` binds the principal to THIS session row (cookie
+  semantics); a session already bound to a different identity is refused.
+- `who_am_i` reports session row info (created/last_seen/expires, active
+  connection descriptor, masked telegram phone, web aliases) and never errors.
+- Telegram: phone binding lives in the session row; Telethon session is
+  keyed `<principal>:<phone_tag>` with the config file ALWAYS
+  per-principal (closes the `__global__:{phone}` shared-config hole).
+  `telegram_configure` writes the principal config directly (no client).
+- Web sessions: cookie descriptor persisted per (session, alias) —
+  rehydratable after in-process eviction.
+- SSH ControlMaster sockets are now per principal
+  (`/tmp/.ssh-mux/<principal>/`, 0700).
+- `asyncio.to_thread` replaces `run_in_executor` for tool dispatch —
+  contextvars (session context) now propagate into the worker thread.
+- `mcp>=1.16.0` (needs `RequestContext.request`).
+
+### Removed (fail-closed — no replacements)
+- `_session_users` (incl. the `"current"` global fallback that let one
+  session inherit another's identity), `_session_tg_phone`,
+  `_session_conns`, `_web_sessions`, `_get_current_user`,
+  `_get_mcp_session_key`, `_odoo_caller_ctx` middleware side effect,
+  global `google_mgr`, both `__global__` Telegram fallbacks, the silent
+  `manager["default"]` fallback in `_conn()` and the single-connection
+  auto-fallback in `ConnectionManager.get()`.
+
+### Migration notes
+- **Server restart invalidates all sessions** (transport-level; clients
+  re-initialize automatically). Unified-auth clients rebind silently;
+  claude.ai OAuth sessions need one `identify(name=...)`; Telegram needs
+  one `telegram_auth(phone=...)` (no SMS — the session file is intact).
+- Deployments that relied on the env-bootstrap `manager["default"]`
+  without identify must set `SINGLE_CONNECTION=1` (explicit single-tenant
+  opt-in, unchanged semantics) or use explicit `connection` aliases.
+- Legacy shared files are abandoned, not auto-migrated:
+  `/data/telegram_session*`, `/data/telegram_config.json`,
+  `/data/telegram_subscriptions.json`, `/data/google_token.json`.
+  Move per user if needed: `mv /data/google_token.json
+  /data/users/<principal>/google_token.json`; Telegram re-auth is simpler.
+
 ## [2.26.0a] — 2026-05-06 — claude-terminal Phase 2.0a/b: hashed dirs + multi-tenant disclosure
 
 Stop-the-bleeding hardening of `claude-terminal` against cross-tenant

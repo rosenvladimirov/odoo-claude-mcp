@@ -33,21 +33,30 @@ TOKEN_FILE = Path(os.environ.get(
 
 
 class GoogleServiceManager:
-    """Manages Google OAuth2 authentication and API access."""
+    """Manages Google OAuth2 authentication and API access.
 
-    def __init__(self):
+    Strict session model: token/credentials paths are parameterized so a
+    registry can hold one manager per principal (token under the
+    principal's data dir). The OAuth client credentials default to the
+    shared application file — that identifies the app, not the user.
+    """
+
+    def __init__(self, token_file=None, credentials_file=None):
+        self._token_file = Path(token_file) if token_file else TOKEN_FILE
+        self._credentials_file = (Path(credentials_file)
+                                  if credentials_file else CREDENTIALS_FILE)
         self._credentials = None
         self._gmail_service = None
         self._calendar_service = None
         self._try_load_token()
 
     def _try_load_token(self):
-        if not TOKEN_FILE.exists():
+        if not self._token_file.exists():
             return
         try:
             from google.oauth2.credentials import Credentials
             self._credentials = Credentials.from_authorized_user_file(
-                str(TOKEN_FILE), SCOPES
+                str(self._token_file), SCOPES
             )
             if self._credentials and self._credentials.expired and self._credentials.refresh_token:
                 from google.auth.transport.requests import Request
@@ -60,8 +69,8 @@ class GoogleServiceManager:
 
     def _save_token(self):
         if self._credentials:
-            TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-            TOKEN_FILE.write_text(self._credentials.to_json())
+            self._token_file.parent.mkdir(parents=True, exist_ok=True)
+            self._token_file.write_text(self._credentials.to_json())
 
     @property
     def is_authenticated(self) -> bool:
@@ -69,7 +78,7 @@ class GoogleServiceManager:
 
     def authenticate(self, credentials_file: str = "") -> dict:
         """Run OAuth2 flow. Returns status dict."""
-        creds_path = Path(credentials_file) if credentials_file else CREDENTIALS_FILE
+        creds_path = Path(credentials_file) if credentials_file else self._credentials_file
 
         if not creds_path.exists():
             return {
@@ -374,3 +383,32 @@ class GoogleServiceManager:
             calendarId=calendar_id, eventId=event_id
         ).execute()
         return {"status": "deleted", "event_id": event_id}
+
+
+class GoogleRegistry:
+    """Per-principal GoogleServiceManager registry (strict session model).
+
+    Mirrors TelegramRegistry: one lazily-created manager per principal, with
+    the OAuth token stored under the principal's data dir. The shared OAuth
+    client credentials file identifies the application, not the user.
+    """
+
+    def __init__(self):
+        import threading
+        self._mgrs: dict[str, GoogleServiceManager] = {}
+        self._lock = threading.Lock()
+
+    def for_user(self, principal: str, token_file=None,
+                 credentials_file=None) -> GoogleServiceManager:
+        with self._lock:
+            mgr = self._mgrs.get(principal)
+            if mgr is None:
+                mgr = GoogleServiceManager(
+                    token_file=token_file, credentials_file=credentials_file,
+                )
+                self._mgrs[principal] = mgr
+            return mgr
+
+    def evict(self, principal: str):
+        with self._lock:
+            self._mgrs.pop(principal, None)

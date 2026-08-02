@@ -18,7 +18,12 @@ from pathlib import Path
 logger = logging.getLogger("telegram-agent")
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
-_STORE = Path(DATA_DIR) / "telegram_agent" / "enroll.json"
+
+# Наследеният ГЛОБАЛЕН стор (до 2.26.1). Пази се САМО за четене при първата
+# миграция — виж _load(). Пътят на живия стор е per-principal и идва отвън,
+# от server._tg_agent_file(), защото сценариите носят data_scope/ценова
+# листа/company_id, т.е. поверителна конфигурация на конкретния принципал.
+_LEGACY_STORE = Path(DATA_DIR) / "telegram_agent" / "enroll.json"
 
 # Which tools each toolset exposes. The operator must restrict itself to the
 # active toolset (and in `auto` mode have ONLY these tools available) so that
@@ -50,43 +55,65 @@ DEFAULT_SCENARIO = {
 }
 
 
-def _load() -> dict:
-    if _STORE.exists():
+def _load(store) -> dict:
+    """Прочети записванията от per-principal стора.
+
+    При липсващ файл се пробва еднократно наследеният ГЛОБАЛЕН
+    ``$DATA_DIR/telegram_agent/enroll.json`` и съдържанието му се пренася при
+    принципала. Така заварените записвания не изчезват при вдигането на
+    2.31.0, но новите писания вече никога не отиват в общия файл.
+    """
+    p = Path(store)
+    if p.exists():
         try:
-            return json.loads(_STORE.read_text())
+            return json.loads(p.read_text())
         except Exception as e:  # noqa: BLE001
             logger.warning(f"telegram_agent store read failed: {e}")
+        return {}
+    if _LEGACY_STORE.exists():
+        try:
+            d = json.loads(_LEGACY_STORE.read_text())
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"telegram_agent legacy store read failed: {e}")
+            return {}
+        logger.warning(
+            "telegram_agent: пренасям %d записвания от глобалния %s към %s "
+            "(еднократна миграция към strict модела)",
+            len(d), _LEGACY_STORE, p)
+        _save(store, d)
+        return d
     return {}
 
 
-def _save(d: dict) -> None:
-    _STORE.parent.mkdir(parents=True, exist_ok=True)
-    _STORE.write_text(json.dumps(d, ensure_ascii=False, indent=2))
+def _save(store, d: dict) -> None:
+    p = Path(store)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(d, ensure_ascii=False, indent=2))
 
 
-def enroll(chat_id, mode: str = "notify", scenario: dict | None = None) -> dict:
+def enroll(store, chat_id, mode: str = "notify", scenario: dict | None = None) -> dict:
     chat_id = str(chat_id)
     sc = {**DEFAULT_SCENARIO, **(scenario or {})}
     if mode:
         sc["mode"] = mode
-    d = _load()
+    d = _load(store)
     d[chat_id] = sc
-    _save(d)
+    _save(store, d)
     return {"status": "enrolled", "chat_id": chat_id, "mode": sc["mode"],
             "default_toolset": sc.get("default_toolset"),
             "skills": [s["name"] for s in sc.get("skills", [])]}
 
 
-def unenroll(chat_id) -> dict:
+def unenroll(store, chat_id) -> dict:
     chat_id = str(chat_id)
-    d = _load()
+    d = _load(store)
     existed = d.pop(chat_id, None) is not None
-    _save(d)
+    _save(store, d)
     return {"status": "unenrolled" if existed else "not_enrolled", "chat_id": chat_id}
 
 
-def list_enrolled() -> dict:
-    d = _load()
+def list_enrolled(store) -> dict:
+    d = _load(store)
     return {"enrolled": [
         {"chat_id": k, "mode": v.get("mode"), "persona": v.get("persona"),
          "default_toolset": v.get("default_toolset"),
@@ -95,25 +122,25 @@ def list_enrolled() -> dict:
     ]}
 
 
-def get_scenario(chat_id) -> dict:
+def get_scenario(store, chat_id) -> dict:
     chat_id = str(chat_id)
-    d = _load()
+    d = _load(store)
     if chat_id not in d:
         return {"error": "chat not enrolled", "chat_id": chat_id}
     return {"chat_id": chat_id, "scenario": d[chat_id]}
 
 
-def set_scenario(chat_id, scenario: dict) -> dict:
+def set_scenario(store, chat_id, scenario: dict) -> dict:
     chat_id = str(chat_id)
-    d = _load()
+    d = _load(store)
     if chat_id not in d:
         return {"error": "chat not enrolled — enroll first", "chat_id": chat_id}
     d[chat_id] = {**DEFAULT_SCENARIO, **scenario}
-    _save(d)
+    _save(store, d)
     return {"status": "scenario_updated", "chat_id": chat_id}
 
 
-def route(chat_id, text: str) -> dict:
+def route(store, chat_id, text: str) -> dict:
     """Classify conversation direction → active toolset + guardrails.
 
     v1 matches the scenario's skill triggers (keyword). The operator should then
@@ -122,7 +149,7 @@ def route(chat_id, text: str) -> dict:
     (Semantic skill routing via embeddings is the planned upgrade.)
     """
     chat_id = str(chat_id)
-    d = _load()
+    d = _load(store)
     if chat_id not in d:
         return {"error": "chat not enrolled", "chat_id": chat_id}
     sc = d[chat_id]
@@ -159,14 +186,14 @@ def _resolve_pricelist_id(conn, name: str):
         return None
 
 
-def product_lookup(conn, chat_id, query: str, limit: int = 20) -> dict:
+def product_lookup(store, conn, chat_id, query: str, limit: int = 20) -> dict:
     """Search products, returning ONLY the scenario's allowlisted fields.
 
     The guardrail: even if asked, nothing outside `data_scope.fields` is read or
     returned. If a pricelist is configured, list_price is recomputed for it.
     """
     chat_id = str(chat_id)
-    sc = _load().get(chat_id)
+    sc = _load(store).get(chat_id)
     if not sc:
         return {"error": "chat not enrolled"}
     scope = sc.get("data_scope", {})
@@ -201,7 +228,7 @@ def product_lookup(conn, chat_id, query: str, limit: int = 20) -> dict:
             "note": "Only data_scope.fields returned (confidential fields withheld)."}
 
 
-def create_quote(conn, chat_id, lines: list, partner_id: int | None = None) -> dict:
+def create_quote(store, conn, chat_id, lines: list, partner_id: int | None = None) -> dict:
     """Create a DRAFT sale.order in the scenario's company. Returns a shareable
     summary. Honors `quote_send`: 'approve' → never auto-sends (operator/Rosen
     confirms); 'auto' → operator may send the summary in chat.
@@ -209,7 +236,7 @@ def create_quote(conn, chat_id, lines: list, partner_id: int | None = None) -> d
     lines: [{product_id|default_code, qty, [price_unit]}]
     """
     chat_id = str(chat_id)
-    sc = _load().get(chat_id)
+    sc = _load(store).get(chat_id)
     if not sc:
         return {"error": "chat not enrolled"}
     cid = sc.get("company_id")

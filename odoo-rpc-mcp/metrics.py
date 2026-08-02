@@ -35,12 +35,16 @@ backup_writes: Optional["Counter"] = None
 active_sessions: Optional["Gauge"] = None
 http_requests: Optional["Counter"] = None
 build_info: Optional["Gauge"] = None
+sessions_reaped: Optional["Counter"] = None
+store_sessions_active: Optional["Gauge"] = None
+store_sessions_orphaned: Optional["Gauge"] = None
 
 
 def init(version: str = "unknown") -> None:
     """Create the registry + metrics objects. Idempotent."""
     global registry, tool_calls, proxy_discoveries, backup_writes
     global active_sessions, http_requests, build_info
+    global sessions_reaped, store_sessions_active, store_sessions_orphaned
     if not METRICS_ENABLED:
         return
     if registry is not None:
@@ -81,6 +85,22 @@ def init(version: str = "unknown") -> None:
         ("version",),
         registry=registry,
     )
+    sessions_reaped = Counter(
+        "mcp_sessions_reaped_total",
+        "Session-store rows orphaned/purged by the reaper",
+        ("reason",),
+        registry=registry,
+    )
+    store_sessions_active = Gauge(
+        "mcp_store_sessions_active",
+        "Active rows in the strict session store",
+        registry=registry,
+    )
+    store_sessions_orphaned = Gauge(
+        "mcp_store_sessions_orphaned",
+        "Orphaned/revoked rows awaiting retention purge",
+        registry=registry,
+    )
     build_info.labels(version=version).set(1)
     logger.info("metrics initialised (version=%s)", version)
 
@@ -105,6 +125,17 @@ def observe_backup_write(operation: str, tenant: str) -> None:
 def observe_session_count(n: int) -> None:
     if METRICS_ENABLED and active_sessions is not None:
         active_sessions.set(n)
+
+
+def observe_session_reaped(reason: str) -> None:
+    if METRICS_ENABLED and sessions_reaped is not None:
+        sessions_reaped.labels(reason=reason).inc()
+
+
+def observe_session_store_counts(active: int, orphaned: int) -> None:
+    if METRICS_ENABLED and store_sessions_active is not None:
+        store_sessions_active.set(active)
+        store_sessions_orphaned.set(orphaned)
 
 
 def observe_http_request(method: str, path: str, status: int) -> None:

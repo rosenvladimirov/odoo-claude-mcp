@@ -11,6 +11,16 @@ const http = require("http");
 const fs = require("fs");
 const net = require("net");
 
+// Last-resort guard — една per-request грешка (напр. ERR_HTTP_HEADERS_SENT при
+// прекъснат proxy) НЕ трябва да сваля целия gateway процес и с него всички
+// активни терминал сесии. Логваме и продължаваме.
+process.on("uncaughtException", (err) => {
+    console.error("[gateway] uncaughtException (kept alive):", err && err.message);
+});
+process.on("unhandledRejection", (err) => {
+    console.error("[gateway] unhandledRejection (kept alive):", err && err.message);
+});
+
 const LISTEN_PORT = parseInt(process.env.GATEWAY_PORT || "8080", 10);
 const TTYD_PORT = parseInt(process.env.TTYD_PORT || "8081", 10);
 const TTYD_HOST = "127.0.0.1";
@@ -97,8 +107,15 @@ const server = http.createServer((req, res) => {
             }
         );
         mcpReq.on("error", (err) => {
-            res.writeHead(502);
-            res.end(`MCP server unavailable: ${err.message}`);
+            // headersSent guard — ако upstream-ът гръмне СЛЕД като отговорът е
+            // започнал, повторният writeHead хвърля ERR_HTTP_HEADERS_SENT и
+            // (необработен) сваля целия gateway процес → 502 на ВСИЧКИ сесии.
+            if (!res.headersSent) {
+                res.writeHead(502);
+                res.end(`MCP server unavailable: ${err.message}`);
+            } else {
+                try { res.end(); } catch (e) { /* socket вече затворен */ }
+            }
         });
         req.pipe(mcpReq, { end: true });
         return;
@@ -119,8 +136,14 @@ const server = http.createServer((req, res) => {
         }
     );
     proxyReq.on("error", () => {
-        res.writeHead(502);
-        res.end("Terminal server unavailable");
+        // Същият headersSent guard — това беше ред 122, който сваляше gateway-а
+        // (ERR_HTTP_HEADERS_SENT) когато ttyd прекъсне по средата на отговор.
+        if (!res.headersSent) {
+            res.writeHead(502);
+            res.end("Terminal server unavailable");
+        } else {
+            try { res.end(); } catch (e) { /* socket вече затворен */ }
+        }
     });
     req.pipe(proxyReq, { end: true });
 });
