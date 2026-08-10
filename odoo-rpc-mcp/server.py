@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.3.5"
+__version__ = "3.3.6"
 
 import asyncio
 import hmac
@@ -497,8 +497,50 @@ def _oauth_redirect_uri_allowed(redirect_uri: str) -> bool:
     return False
 
 
-def _oauth_issue_code(redirect_uri: str) -> str:
-    """Mint a one-shot OAuth authorization code bound to redirect_uri."""
+def _oauth_pkce_required() -> bool:
+    """PKCE S256 is mandatory on /oauth/authorize unless explicitly disabled.
+
+    claude.ai always sends `code_challenge` + `code_challenge_method=S256`
+    (verified live 2026-08-09), so enforcing this does not break the only
+    real consumer — it only closes the code-interception path for anyone else.
+    """
+    return os.environ.get("MCP_OAUTH_REQUIRE_PKCE", "1") not in ("0", "false", "False")
+
+
+def _oauth_client_credentials_allowed() -> bool:
+    """The `client_credentials` grant is OFF by default (3.3.6).
+
+    Combined with public dynamic registration it let ANY anonymous caller
+    mint a valid Bearer (register -> token -> /mcp). Audit over 30 days of
+    logs found zero legitimate uses: every real client authenticates via
+    unified X-Odoo-* headers, the MCP secret token, or authorization_code.
+    Set MCP_OAUTH_ALLOW_CLIENT_CREDENTIALS=1 to restore the old behaviour.
+    """
+    return os.environ.get("MCP_OAUTH_ALLOW_CLIENT_CREDENTIALS", "0") in ("1", "true", "True")
+
+
+def _oauth_verify_pkce(challenge: str, method: str, verifier: str) -> bool:
+    """Verify a PKCE code_verifier against the stored challenge (RFC 7636)."""
+    if not challenge:
+        return True  # nothing was bound at issuance
+    if not verifier:
+        return False
+    import base64 as _b64
+    import hashlib as _hl
+    meth = (method or "S256").upper()
+    if meth == "S256":
+        digest = _hl.sha256(verifier.encode("ascii")).digest()
+        computed = _b64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    elif meth == "PLAIN":
+        computed = verifier
+    else:
+        return False
+    return hmac.compare_digest(computed, challenge)
+
+
+def _oauth_issue_code(redirect_uri: str, code_challenge: str = "",
+                      code_challenge_method: str = "") -> str:
+    """Mint a one-shot OAuth authorization code bound to redirect_uri (+PKCE)."""
     code = _secrets_mod.token_urlsafe(32)
     expires_at = _time_mod.time() + _OAUTH_CODE_TTL
     with _oauth_codes_lock:
@@ -510,17 +552,21 @@ def _oauth_issue_code(redirect_uri: str) -> str:
         _oauth_codes[code] = {
             "expires_at": expires_at,
             "redirect_uri": redirect_uri or "",
+            "code_challenge": code_challenge or "",
+            "code_challenge_method": (code_challenge_method or "S256").upper(),
         }
     return code
 
 
-def _oauth_consume_code(code: str, redirect_uri: str | None) -> bool:
+def _oauth_consume_code(code: str, redirect_uri: str | None,
+                        code_verifier: str | None = None) -> bool:
     """Consume a one-shot OAuth code. Returns True iff valid & not expired.
 
     Enforces:
       - code exists in store
       - not expired
       - redirect_uri matches the one bound at issuance (when present)
+      - PKCE code_verifier hashes to the bound challenge (when present)
     Always removes the code on lookup (atomic single-use).
     """
     with _oauth_codes_lock:
@@ -532,7 +578,40 @@ def _oauth_consume_code(code: str, redirect_uri: str | None) -> bool:
     bound = entry.get("redirect_uri", "")
     if bound and redirect_uri and not hmac.compare_digest(bound, redirect_uri):
         return False
+    challenge = entry.get("code_challenge", "")
+    if challenge and not _oauth_verify_pkce(
+            challenge, entry.get("code_challenge_method", "S256"), code_verifier or ""):
+        logger.warning("[OAuth] PKCE verification failed for a redeemed code")
+        return False
     return True
+
+
+_SECRET_CONN_KEYS = ("api_key", "password", "token", "secret", "api_token",
+                     "client_secret", "private_key", "passphrase")
+
+
+def _redact_connection_secrets(conn: Any) -> Any:
+    """Return a deep copy of a connection dict with every secret masked.
+
+    3.3.6: `who_am_i` used to return `active_details` verbatim — including
+    the Odoo `api_key` and the nested `portainer.token` in cleartext. Any
+    client (or transcript, or log) on that principal then held live
+    credentials. Masking keeps the shape and the "is it set?" signal, which
+    is all the diagnostic actually needs.
+    """
+    if isinstance(conn, dict):
+        out = {}
+        for k, v in conn.items():
+            if isinstance(v, (dict, list)):
+                out[k] = _redact_connection_secrets(v)
+            elif v and k.lower() in _SECRET_CONN_KEYS:
+                out[k] = "<set>"
+            else:
+                out[k] = v
+        return out
+    if isinstance(conn, list):
+        return [_redact_connection_secrets(x) for x in conn]
+    return conn
 
 
 def _open_for_write_nofollow(path: str):
@@ -6897,7 +6976,9 @@ def _execute_tool(name: str, args: dict) -> Any:
             **session_info,
             "connections": list(conns.keys()),
             "active": active.get("alias", None),
-            "active_details": active,
+            # 3.3.6: secrets masked — this used to hand out the live api_key
+            # and portainer token to anything that called who_am_i.
+            "active_details": _redact_connection_secrets(active),
             "session_connection": conn_state,
             "telegram_phone": (tg_phone[:5] + "..." if tg_phone else None),
             "web_sessions": web_aliases,
@@ -11612,7 +11693,11 @@ def create_app():
                 "token_endpoint": f"{base}/oauth/token",
                 "registration_endpoint": f"{base}/oauth/register",
                 "response_types_supported": ["code"],
-                "grant_types_supported": ["authorization_code", "client_credentials"],
+                # 3.3.6: advertise only what the server actually accepts, so
+                # clients negotiate correctly instead of failing at /token.
+                "grant_types_supported": (["authorization_code", "client_credentials"]
+                                          if _oauth_client_credentials_allowed()
+                                          else ["authorization_code"]),
                 "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
                 "code_challenge_methods_supported": ["S256"],
             })
@@ -11641,7 +11726,18 @@ def create_app():
                         if ":" in decoded:
                             cid, csecret = decoded.split(":", 1)
 
-                if grant_type == "client_credentials":
+                if grant_type == "client_credentials" and not _oauth_client_credentials_allowed():
+                    # 3.3.6: OFF by default. Public dynamic registration + this
+                    # grant = anonymous Bearer minting. Re-enable only with
+                    # MCP_OAUTH_ALLOW_CLIENT_CREDENTIALS=1.
+                    logger.warning(
+                        "[OAuth] client_credentials refused (disabled); client_id=%s",
+                        str(cid)[:64])
+                    response = JSONResponse(
+                        {"error": "unsupported_grant_type",
+                         "error_description": "client_credentials is disabled on this server"},
+                        status_code=400)
+                elif grant_type == "client_credentials":
                     # Valid against the configured client OR any dynamically
                     # registered client. Mint a fresh random access token —
                     # NEVER return secret_token.
@@ -11664,8 +11760,9 @@ def create_app():
                 elif grant_type == "authorization_code":
                     code = params.get("code", [None])[0]
                     redirect_uri = params.get("redirect_uri", [None])[0]
-                    # Code is redirect-uri-bound + single-use (v3 _oauth_consume_code).
-                    if code and _oauth_consume_code(code, redirect_uri):
+                    code_verifier = params.get("code_verifier", [None])[0]
+                    # Code is redirect-uri-bound + single-use + PKCE-bound (3.3.6).
+                    if code and _oauth_consume_code(code, redirect_uri, code_verifier):
                         response = JSONResponse({
                             "access_token": _oauth_mint(_oauth_tokens, _OAUTH_TOKEN_TTL),
                             "token_type": "Bearer",
@@ -11691,8 +11788,25 @@ def create_app():
             request = Request(scope, receive)
             redirect_uri = request.query_params.get("redirect_uri", "")
             state = request.query_params.get("state", "")
+            code_challenge = request.query_params.get("code_challenge", "")
+            code_challenge_method = request.query_params.get("code_challenge_method", "S256")
             if not redirect_uri:
                 response = JSONResponse({"error": "missing redirect_uri"}, status_code=400)
+            elif _oauth_pkce_required() and not code_challenge:
+                # 3.3.6: no PKCE, no code. Blocks the interception path for
+                # clients that skip the challenge entirely.
+                logger.warning("[OAuth] rejected authorize without code_challenge")
+                response = JSONResponse(
+                    {"error": "invalid_request",
+                     "error_description": "code_challenge is required (PKCE S256)"},
+                    status_code=400)
+            elif code_challenge and code_challenge_method.upper() != "S256":
+                logger.warning("[OAuth] rejected weak code_challenge_method: %s",
+                               str(code_challenge_method)[:32])
+                response = JSONResponse(
+                    {"error": "invalid_request",
+                     "error_description": "only S256 code_challenge_method is supported"},
+                    status_code=400)
             elif not _oauth_redirect_uri_allowed(redirect_uri):
                 # Open-redirect / code-leak defence (T3-1). Do NOT
                 # echo the redirect_uri back in the body — log only,
@@ -11704,7 +11818,7 @@ def create_app():
                     status_code=400,
                 )
             else:
-                code = _oauth_issue_code(redirect_uri)
+                code = _oauth_issue_code(redirect_uri, code_challenge, code_challenge_method)
                 sep = "&" if "?" in redirect_uri else "?"
                 target = f"{redirect_uri}{sep}code={code}"
                 if state:
@@ -11735,7 +11849,9 @@ def create_app():
                     "client_secret": new_secret,
                     "client_name": body.get("client_name", "mcp-client"),
                     "redirect_uris": body.get("redirect_uris", []),
-                    "grant_types": ["authorization_code", "client_credentials"],
+                    "grant_types": (["authorization_code", "client_credentials"]
+                                    if _oauth_client_credentials_allowed()
+                                    else ["authorization_code"]),
                     "response_types": ["code"],
                     "token_endpoint_auth_method": "client_secret_post",
                 }, status_code=201)
@@ -12073,9 +12189,15 @@ def create_app():
             })
             await response(scope, receive, send)
         elif path == "/metrics" and scope["type"] == "http":
-            # Prometheus scrape endpoint (no auth by convention — bind to
-            # backend network only in production). 2.x ships the scaffold;
-            # full integration (scraping + Grafana) is 3.x.
+            # Prometheus scrape endpoint. 3.3.6: gated behind _check_auth —
+            # anonymously it leaked tool names, call counts and tenant codes
+            # (reconnaissance for an attacker). Scrapers must present the MCP
+            # secret token (or the Ollama key path) like any other client.
+            from starlette.responses import JSONResponse as _JSONResp
+            if not _check_auth(dict(scope.get("headers", []))):
+                response = _JSONResp({"error": "Unauthorized"}, status_code=401)
+                await response(scope, receive, send)
+                return
             try:
                 import metrics as _metrics
                 body, ctype, status = _metrics.render()

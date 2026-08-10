@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.6] — 2026-08-10 — close the anonymous OAuth bypass; stop leaking credentials
+
+The 2026-08-02 authN audit found a chain that worked from the bare internet with
+no credentials at all: `POST /oauth/register` is public and hands out a
+`client_id`/`client_secret`, `POST /oauth/token` with
+`grant_type=client_credentials` turns that pair into a minted Bearer, and
+`_check_auth` accepts that Bearer on `/mcp`. The strict per-tool session gate
+kept the blast radius to non-connection tools plus `identify` bootstrap — the
+attacker got the door, not the safe — but the whole class closes here.
+
+The fix is **hardening, not a kill switch**: the claude.ai native connector needs
+OAuth and must keep working. Its live flow (captured 2026-08-09) uses
+`authorization_code` with PKCE `S256` and never touches `client_credentials`, so
+both locks below leave it untouched. 30 days of logs showed zero legitimate
+`client_credentials` use. See ADR-0001 in `specs/mcp-oauth-hardening/`.
+
+- **`client_credentials` is refused by default.** `MCP_OAUTH_ALLOW_CLIENT_CREDENTIALS=1`
+  restores the old behaviour without a rebuild. This alone breaks register→token→`/mcp`.
+- **PKCE S256 is mandatory on `/oauth/authorize`.** A request with no
+  `code_challenge` is rejected (`MCP_OAUTH_REQUIRE_PKCE=0` to opt out), and
+  anything other than `S256` is refused rather than silently downgraded.
+  `/oauth/token` now verifies `code_verifier` against the challenge bound at
+  issuance, so an intercepted code is useless on its own.
+- **OAuth metadata tells the truth.** `/.well-known/oauth-authorization-server`
+  and `/oauth/register` advertise `client_credentials` only when it is actually
+  enabled, so clients negotiate correctly instead of failing at `/token`.
+- **`/metrics` now requires auth.** It was anonymously readable and exposed tool
+  names, call counts and tenant codes — free reconnaissance.
+- **`who_am_i` no longer returns live secrets.** It echoed `active_details`
+  verbatim, including the Odoo `api_key` and the nested `portainer.token` in
+  cleartext, into every caller's context, transcript and log. Secrets are masked
+  as `<set>`; an empty value stays empty, so "no key" and "key present" remain
+  distinguishable. Redaction is a deep copy — the connection store is untouched.
+
 ## [3.3.5] — 2026-07-21 — publisher isolation keyed by phone, not principal
 
 The publisher-isolation guard added in 3.3.x only protected the publisher's *own*
