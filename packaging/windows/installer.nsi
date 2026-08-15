@@ -46,7 +46,7 @@ Section "Install"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\OdooConnect" \
         "UninstallString" "$INSTDIR\Uninstall.exe"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\OdooConnect" \
-        "Publisher" "BL Consulting"
+        "Publisher" "Terraros Commerce Ltd."
 SectionEnd
 
 Section "Uninstall"

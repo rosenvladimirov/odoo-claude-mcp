@@ -1,6 +1,6 @@
 FROM python:3.12-slim-bookworm
 
-LABEL maintainer="BL Consulting"
+LABEL maintainer="Rosen Vladimirov <vladimirov.rosen@gmail.com>"
 LABEL description="EE MCP server — Odoo Enterprise module management (stdio→SSE via supergateway)"
 
 # Install system deps

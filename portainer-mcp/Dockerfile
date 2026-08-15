@@ -1,6 +1,6 @@
 FROM node:22-bookworm-slim
 
-LABEL maintainer="BL Consulting"
+LABEL maintainer="Rosen Vladimirov <vladimirov.rosen@gmail.com>"
 LABEL description="Portainer MCP server (stdio→SSE via supergateway)"
 
 # Install supergateway (wraps stdio MCP as SSE/HTTP)

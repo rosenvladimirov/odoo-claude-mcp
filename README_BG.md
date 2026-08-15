@@ -121,7 +121,7 @@ Odoo модул, който излага MCP + Claude Terminal конфигур�
 
 ### `l10n_bg_ai_billing` — SaaS билинг модул (OPL-1, платен)
 
-Odoo модул за хостинг доставчици и BL Consulting tier management.
+Odoo модул за хостинг доставчици и управление на прекупвачески нива.
 Проследява per-user MCP usage, изчислява фактури, provisions Portainer
 стакове per tenant, дистрибутира licensed memory packs.
 

@@ -1,6 +1,6 @@
 FROM node:22-bookworm-slim
 
-LABEL maintainer="BL Consulting"
+LABEL maintainer="Rosen Vladimirov <vladimirov.rosen@gmail.com>"
 LABEL description="Backup MCP server (stdio→SSE via supergateway) — stock snapshots, DB dumps, future S3 sync"
 
 # Install supergateway + official filesystem MCP server (reused as storage backend for now)

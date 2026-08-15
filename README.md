@@ -12,7 +12,7 @@ _Connect Claude, Claude Code, and any MCP-compatible client to Odoo, GitHub, fil
 [![Odoo](https://img.shields.io/badge/Odoo-15%20→%2019-714B67)](https://www.odoo.com)
 [![MCP](https://img.shields.io/badge/MCP-Protocol-black)](https://modelcontextprotocol.io)
 [![Docker](https://img.shields.io/badge/Docker-Compose%20%7C%20K3s-2496ED)](https://www.docker.com)
-[![Made by BL Consulting](https://img.shields.io/badge/Made%20by-BL%20Consulting-714B67)](https://bl-consulting.net)
+[![Made by Terraros Commerce](https://img.shields.io/badge/Made%20by-Terraros%20Commerce-714B67)](https://github.com/rosenvladimirov)
 
 [Quick Start](#-quick-start) · [Why this vs alternatives?](#-why-this-vs-alternatives) · [Use Cases](#-use-cases) · [Architecture](#-architecture) · [MCP Servers](#-mcp-servers) · [Companion Modules](#-companion-odoo-modules--theme) · [Deployment](#%EF%B8%8F-deployment)
 
@@ -317,7 +317,7 @@ major series has a dedicated branch).
 
 ### `l10n_bg_ai_billing` — SaaS billing module (OPL-1, paid)
 
-Odoo module for hosting providers and BL Consulting tier management.
+Odoo module for hosting providers and reseller tier management.
 Tracks per-user MCP usage, calculates bills, provisions Portainer
 stacks per tenant, ships licensed memory packs.
 
@@ -688,7 +688,7 @@ If this project helps you, please consider [starring the repo](https://github.co
 
 ## 👤 Maintainer
 
-**Rosen Vladimirov** — Partner, [BL Consulting](https://bl-consulting.net)
+**Rosen Vladimirov** — Terraros Commerce Ltd.
 Odoo Silver Partner · OCA `l10n-bulgaria` maintainer · 10+ years of Odoo specialization
 
 📧 Email: vladimirov.rosen@gmail.com

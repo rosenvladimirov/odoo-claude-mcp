@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-LABEL maintainer="BL Consulting"
+LABEL maintainer="Rosen Vladimirov <vladimirov.rosen@gmail.com>"
 LABEL description="Supervisor MCP — Odoo addons-topology admin (ADMIN class, stdio→SSE via supergateway)"
 
 RUN apt-get update \
