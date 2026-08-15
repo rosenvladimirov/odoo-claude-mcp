@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.7] — 2026-08-16 — the server's landing page carries the right owner
+
+Cosmetic only; no behaviour, API or auth change. The landing page served on `/`
+still introduced itself as BL Consulting in the `<title>`, the navbar brand and
+the footer, and linked to `bl-consulting.net`. BL Consulting holds no rights to
+this code — the rights holder is Терарос Комерс ЕООД — so the page now says so.
+The `Website` link is replaced by the author's GitHub profile.
+
+The hero background is still fetched from `bl-consulting.net` (the image is
+live). Replacing it needs a new address; a broken URL would silently leave the
+hero without a background.
+
+Same pass fixed the `LABEL maintainer` on nine Dockerfiles, `gateway/landing.html`,
+`tools.html`, the READMEs, the docs and the Windows installer's `Publisher`.
+
 ## [3.3.6] — 2026-08-10 — close the anonymous OAuth bypass; stop leaking credentials
 
 The 2026-08-02 authN audit found a chain that worked from the bare internet with
