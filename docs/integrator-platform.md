@@ -15,7 +15,7 @@ For the current end-user-oriented stack, see [`../README.md`](../README.md)
 
 The 2.x track ships the tools an Odoo **end-user** needs: CRUD, translations,
 snippets, reports, AI tokenizer, memory. Those are the tools that a Bulgarian
-SME, a Raytron accountant, or a bl-consulting content editor uses daily.
+SME, a Raytron accountant, or a content editor uses daily.
 
 The 3.x track adds a layer **above** that — the tools an **integrator**
 (Silver / Gold partner, OCA maintainer, agency) needs to stand up, configure,

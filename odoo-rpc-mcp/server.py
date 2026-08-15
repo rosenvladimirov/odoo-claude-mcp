@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "2.30.5"
+__version__ = "2.30.6"
 
 import asyncio
 import json
@@ -10177,7 +10177,7 @@ def create_app():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Odoo RPC MCP Server &mdash; BL Consulting</title>
+<title>Odoo RPC MCP Server &mdash; Terraros Commerce</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -10280,8 +10280,8 @@ def create_app():
 <body>
 
 <nav class="navbar">
-  <span class="brand">BL Consulting</span>
-  <a href="https://www.bl-consulting.net">Website</a>
+  <span class="brand">Terraros Commerce</span>
+  <a href="https://github.com/rosenvladimirov">Author</a>
   <a href="https://github.com/rosenvladimirov/odoo-claude-mcp">GitHub</a>
   <a href="https://{host}/health">Health</a>
 </nav>
@@ -10338,7 +10338,7 @@ def create_app():
 </div>
 
 <div class="footer">
-  <a href="https://www.bl-consulting.net">BL Consulting</a> &middot;
+  <a href="https://github.com/rosenvladimirov">Терарос Комерс ЕООД</a> &middot;
   <a href="https://github.com/rosenvladimirov/odoo-claude-mcp">GitHub</a> &middot;
   Powered by <a href="https://modelcontextprotocol.io">MCP</a> &amp;
   <a href="https://www.odoo.com">Odoo</a>

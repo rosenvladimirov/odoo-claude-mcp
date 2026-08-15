@@ -1,6 +1,6 @@
 FROM python:3.12-slim-bookworm
 
-LABEL maintainer="BL Consulting"
+LABEL maintainer="Rosen Vladimirov <vladimirov.rosen@gmail.com>"
 LABEL description="OCA MCP server — OCA addon repository management (stdio→SSE via supergateway)"
 
 # Install system deps (git, rsync for deploy, node for supergateway)

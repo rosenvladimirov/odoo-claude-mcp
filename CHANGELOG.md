@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.30.6] — 2026-08-16 — the server's landing page carries the right owner
+
+Cosmetic only; no behaviour, API or auth change. Backport of 3.3.7.
+
+The landing page served on `/` still introduced itself as BL Consulting in the
+`<title>`, the navbar brand and the footer, and linked to `bl-consulting.net`.
+BL Consulting holds no rights to this code — the rights holder is Терарос
+Комерс ЕООД — so the page now says so. The `Website` link is replaced by the
+author's GitHub profile.
+
+Cut from the released 2.30.5 commit, **not** from the tip of branch 2.0: the tip
+carries the 2.31.0 merge (strict session model, per-principal telegram_agent),
+which is a functional change and has no business riding along in a branding fix
+deployed to five production stacks. The one thing picked on top is the
+`mcp>=…,<2.0.0` pin — without it a rebuild pulls mcp 2.x, which dropped the
+low-level `Server` decorator API this file still uses, and the container dies on
+import.
+
+The hero background is still fetched from `bl-consulting.net` (the image is
+live). Replacing it needs a new address; a broken URL would silently leave the
+hero without a background. `application_id="com.blconsulting.*"` in `tools/` is
+left alone as well — it is a D-Bus identity, and changing it makes desktop
+settings look like a different application.
+
+Same pass fixed the `LABEL maintainer` on five Dockerfiles, the READMEs, the
+docs and the Windows installer's `Publisher`.
+
 ## [2.30.3] — 2026-06-13 — Telegram file transfer (v2/v3 lockstep)
 
 Backport of the v3 3.0.7 feature: the Telegram MCP could only send/read text.

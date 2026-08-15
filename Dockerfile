@@ -1,6 +1,6 @@
 FROM python:3.13-slim
 
-LABEL maintainer="BL Consulting <rosen@blconsulting.bg>"
+LABEL maintainer="Rosen Vladimirov <vladimirov.rosen@gmail.com>"
 LABEL description="Odoo RPC MCP Server (XML-RPC/JSON-RPC)"
 
 WORKDIR /app

@@ -30,11 +30,11 @@ docs/
 
 ## Custom domain (optional)
 
-To use `mcp.bl-consulting.net` or similar:
+To use `mcp.example.com` or similar:
 
 1. Create a `CNAME` file in `docs/`:
    ```
-   mcp.bl-consulting.net
+   mcp.example.com
    ```
 2. Configure DNS at your registrar:
    ```
