@@ -16,6 +16,8 @@ _Connect Claude, Claude Code, and any MCP-compatible client to Odoo, GitHub, fil
 
 [Quick Start](#-quick-start) · [Why this vs alternatives?](#-why-this-vs-alternatives) · [Use Cases](#-use-cases) · [Architecture](#-architecture) · [MCP Servers](#-mcp-servers) · [Companion Modules](#-companion-odoo-modules--theme) · [Deployment](#%EF%B8%8F-deployment)
 
+> **Two tracks.** You are on branch `3.0` — the preview track for integrators, current **v3.3.8**. The stable track is branch [`2.0`](https://github.com/rosenvladimirov/odoo-claude-mcp/tree/2.0), current **v2.31.0**. All releases: [Releases](https://github.com/rosenvladimirov/odoo-claude-mcp/releases) · details in [Two Tracks](#-two-tracks--which-branch-do-you-want).
+
 **[🇧🇬 Български README](README_BG.md)**
 
 </div>
@@ -623,7 +625,7 @@ with a single Odoo stack, content teams managing website/blog.
 - **Google / Telegram / Teams** integration
 - **Claude.ai connector** — Bearer-token HTTPS endpoint ready
 
-**Docker tags:** `:latest`, `:stable`, `:2.x.y` (current: **2.10.0**)
+**Docker tags:** `:latest`, `:stable`, `:2.x.y` (current: **2.31.0**)
 
 **Documentation:** this README
 
@@ -650,7 +652,7 @@ SaaS MSPs running multiple client instances, integrator agencies.
 tools, OAuth hardening with mandatory PKCE (3.3.6), TOTP second factor for MCP
 name-identify (3.3.0) and for the admin console (3.3.8, see *Security* above).
 
-**Docker tags:** `:next`, `:3.x.y`
+**Docker tags:** `:next`, `:3.x.y` (current: **3.3.8**)
 
 **Documentation:** [`docs/integrator-platform.md`](docs/integrator-platform.md)
 (coming soon — see project memory `roadmap_integrator_platform.md`
