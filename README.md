@@ -355,7 +355,7 @@ family (`/admin/memory/*`) added in `odoo-rpc-mcp` 2.8.0.
 
 Editorial **"paper" theme** purpose-built for the MCP Works landing
 site and any Odoo website that wants a clean, content-first
-presentation. Used in production at [mcpworks.net](https://mcpworks.net).
+presentation.
 
 **Repo:**
 [`rosenvladimirov/odoo-mcp-theme`](https://github.com/rosenvladimirov/odoo-mcp-theme)
@@ -668,7 +668,6 @@ own clients at scale.
 - [x] **Billing module** — `l10n_bg_ai_billing` 19.0.1.3.0 shipped (4 tiers, millicents precision, Portainer auto-provisioning)
 - [x] **Invoice AI integration** — `l10n_bg_ai_pipeline` + `l10n_bg_ai_invoice_glue` shipped (98.5% conf EAD OCR, Odoo 18+19, end-to-end tokenize)
 - [x] **Self-service tenant provisioning** — v3 `/provision` endpoint LIVE on `mcp.odoo-shell.space` (Apr 2026)
-- [ ] **Try-shop trial demo** — `try.mcpworks.net` with Stripe checkout for paid trial stacks (in progress, Q2 2026)
 - [ ] **Multi-tenant admin dashboard** — admin UI for managing hosted MCP instances
 - [ ] **Skills marketplace** — publish and subscribe to pre-built Odoo workflows (`ai.skill` records + memory packs)
 - [ ] **Audit log UI** — searchable web UI for MCP tool call history
