@@ -16,6 +16,8 @@ _Connect Claude, Claude Code, and any MCP-compatible client to Odoo, GitHub, fil
 
 [Quick Start](#-quick-start) · [Why this vs alternatives?](#-why-this-vs-alternatives) · [Use Cases](#-use-cases) · [Architecture](#-architecture) · [MCP Servers](#-mcp-servers) · [Companion Modules](#-companion-odoo-modules--theme) · [Deployment](#%EF%B8%8F-deployment)
 
+> **Two tracks.** You are on branch `2.0` — the stable track, current release **v2.31.0**. The preview track for integrators is branch [`3.0`](https://github.com/rosenvladimirov/odoo-claude-mcp/tree/3.0), current **v3.3.8**. All releases: [Releases](https://github.com/rosenvladimirov/odoo-claude-mcp/releases) · details in [Two Tracks](#-two-tracks--which-branch-do-you-want).
+
 **[🇧🇬 Български README](README_BG.md)**
 
 </div>
@@ -598,7 +600,7 @@ with a single Odoo stack, content teams managing website/blog.
 - **Google / Telegram / Teams** integration
 - **Claude.ai connector** — Bearer-token HTTPS endpoint ready
 
-**Docker tags:** `:latest`, `:stable`, `:2.x.y` (current: **2.10.0**)
+**Docker tags:** `:latest`, `:stable`, `:2.x.y` (current: **2.31.0**)
 
 **Documentation:** this README
 
