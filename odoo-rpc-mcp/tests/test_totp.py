@@ -147,3 +147,18 @@ def test_fail_closed_without_pepper(tmp_path, monkeypatch):
     out = server._totp_enroll("rosen")
     assert out["status"] == "error" and out["error"] == "weak_or_missing_pepper"
     assert server._totp_pepper_ok() is False
+
+
+# ── 3.3.8: математиката живее в totp_core; server.py само делегира ──
+
+def test_server_helpers_delegate_to_totp_core(srv):
+    import totp_core
+    secret = srv._totp_secret_new()
+    step = int(time.time()) // srv._TOTP_STEP
+    assert srv._totp_code(secret, step) == totp_core.code(secret, step)
+    assert srv._totp_verify_secret(secret, totp_core.code(secret, step), at=step * srv._TOTP_STEP) == (True, step)
+    # otpauth адресът е байт-в-байт същият като преди 3.3.8 — иначе всяка вече
+    # записана тайна би показвала друг запис в приложението.
+    assert srv._totp_provisioning_uri("rosen", secret) == (
+        f"otpauth://totp/OdooMCP%3Arosen?secret={secret}&issuer=OdooMCP&algorithm=SHA1&digits=6&period=30")
+    assert set(srv._totp_qr("otpauth://totp/x?secret=ABC")) == {"qr_ascii", "qr_svg"}

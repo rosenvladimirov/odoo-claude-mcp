@@ -526,8 +526,33 @@ Pre-packaged NSIS installer (`packaging/windows/`) produced automatically via Gi
 - **Connection encryption** — HTTPS/WSS everywhere in production deployments
 - **Rate limiting** — via Cloudflare AI Gateway or ingress controller
 - **Audit logging** — all MCP tool calls logged with user context
+- **Admin console behind a second factor** — TOTP (RFC 6238) with one-time recovery codes,
+  optional `MCP_ADMIN_REQUIRE_TOTP` policy, every session-issuing path gated ★ new in 3.3.8 (see below)
 
 **Reporting security issues:** please email `vladimirov.rosen@gmail.com` rather than opening a public issue.
+
+### Admin console (`/admin`)
+
+A hidden web console inside `odoo-rpc-mcp` for the people who operate a
+stack: per-user Odoo connections, user provisioning with one-time keys,
+backups and filestore. Optional and off unless configured.
+
+| Env | Meaning |
+|---|---|
+| `MCP_ADMIN_PATH_PREFIX` | Mount path, default `/admin`; empty disables the console |
+| `MCP_BOOTSTRAP_ADMIN` | Odoo login that becomes admin on first sign-in |
+| `MCP_SECRET_TOKEN` / `MCP_ADMIN_SESSION_SECRET` | Signs session cookies. **Required** — the console refuses to mount without one |
+| `MCP_KEY_PEPPER` | ≥32 chars. Encrypts TOTP secrets at rest (same pepper as `identify_totp_*`) |
+| `MCP_ADMIN_REQUIRE_TOTP` | `admins` or `all` — hold users in scope on the Security page until they enrol a second factor |
+| `MCP_ADMIN_KNOCK_TOKEN`, `MCP_ADMIN_ALLOWED_IPS` | Optional knock token (`?k=`) and IP/CIDR allowlist |
+
+**Second factor.** Each user enrols TOTP from *Security*: password → QR →
+confirming code → eight one-time recovery codes. Once enrolled, every way of
+obtaining a session (MCP password, Odoo re-auth, one-time key) asks for the
+code. Secrets live in `/data/users/<login>/totp.json`; an admin can reset a
+user's factor from *Users*, and the last admin recovers by deleting that file
+on the volume. Everything is written to `/data/admin_audit.log` — never the
+secret or a code.
 
 ---
 
@@ -620,6 +645,10 @@ SaaS MSPs running multiple client instances, integrator agencies.
   Tenant + Odoo DB + demo data + skills + memory in < 5 minutes.
 - **Module dev + test toolkit** — `odoo_module_scaffold / lint /
   test / install_from_path / explain`, `odoo_xml_validate`.
+
+**Already shipping on 3.x:** self-service provisioning (`/provision`), supervisor + fleet
+tools, OAuth hardening with mandatory PKCE (3.3.6), TOTP second factor for MCP
+name-identify (3.3.0) and for the admin console (3.3.8, see *Security* above).
 
 **Docker tags:** `:next`, `:3.x.y`
 

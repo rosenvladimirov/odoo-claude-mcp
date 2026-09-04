@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.3.7"
+__version__ = "3.3.8"
 
 import asyncio
 import hmac
@@ -52,6 +52,7 @@ import api_key_manager
 import provisioning_api
 import fleet_manager
 import secrets_registry
+import totp_core
 import module_deploy
 import supervisor_deploy
 import client_onboard
@@ -2930,92 +2931,35 @@ def _totp_pepper_ok() -> bool:
 
 
 def _totp_secret_new() -> str:
-    import base64
-    import secrets as _s
-    return base64.b32encode(_s.token_bytes(20)).decode("ascii").rstrip("=")
+    return totp_core.secret_new()
 
 
 def _totp_code(secret_b32: str, step: int) -> str:
-    """RFC 6238 TOTP code for a given 30s step (SHA1, 6 digits)."""
-    import base64
-    import hashlib
-    import struct
-    pad = "=" * (-len(secret_b32) % 8)
-    key = base64.b32decode(secret_b32.upper() + pad)
-    msg = struct.pack(">Q", int(step))
-    dig = hmac.new(key, msg, hashlib.sha1).digest()
-    off = dig[-1] & 0x0F
-    truncated = struct.unpack(">I", dig[off:off + 4])[0] & 0x7FFFFFFF
-    return str(truncated % (10 ** _TOTP_DIGITS)).zfill(_TOTP_DIGITS)
+    """RFC 6238 TOTP code for a given 30s step (SHA1, 6 digits). Maths lives in
+    totp_core (shared with admin_ui since 3.3.8)."""
+    return totp_core.code(secret_b32, step, digits=_TOTP_DIGITS)
 
 
 def _totp_verify_secret(secret_b32: str, code: str, at: float | None = None):
     """Return (ok, matched_step). Accepts ±_TOTP_WINDOW steps for clock skew."""
-    import time as _t
-    code = (code or "").strip().replace(" ", "")
-    if not code.isdigit() or len(code) != _TOTP_DIGITS:
-        return False, None
-    now = _t.time() if at is None else at
-    now_step = int(now) // _TOTP_STEP
-    for w in range(-_TOTP_WINDOW, _TOTP_WINDOW + 1):
-        st = now_step + w
-        if hmac.compare_digest(_totp_code(secret_b32, st), code):
-            return True, st
-    return False, None
+    return totp_core.verify(secret_b32, code, at=at, window=_TOTP_WINDOW,
+                            step=_TOTP_STEP, digits=_TOTP_DIGITS)
 
 
 def _totp_provisioning_uri(principal: str, secret_b32: str) -> str:
-    from urllib.parse import quote
-    label = quote(f"OdooMCP:{principal}")
-    return (f"otpauth://totp/{label}?secret={secret_b32}&issuer=OdooMCP"
-            f"&algorithm=SHA1&digits={_TOTP_DIGITS}&period={_TOTP_STEP}")
+    return totp_core.provisioning_uri(f"OdooMCP:{principal}", secret_b32,
+                                      digits=_TOTP_DIGITS, step=_TOTP_STEP)
 
 
 def _totp_qr_unicode(qr) -> str:
-    """Render a segno QR matrix as a plain-text unicode half-block QR (2 modules
-    per character row) with a quiet border. Portable text (terminal + chat);
-    scans best on a light background."""
-    rows = [list(r) for r in qr.matrix]
-    b = 2  # quiet-zone border in modules
-    width = len(rows[0]) + 2 * b
-    blank = [0] * width
-    grid = ([blank[:] for _ in range(b)]
-            + [[0] * b + list(r) + [0] * b for r in rows]
-            + [blank[:] for _ in range(b)])
-    if len(grid) % 2:
-        grid.append(blank[:])
-    lines = []
-    for y in range(0, len(grid), 2):
-        top, bot = grid[y], grid[y + 1]
-        line = []
-        for x in range(width):
-            t, d = top[x], bot[x]
-            line.append("█" if (t and d) else "▀" if t else "▄" if d else " ")
-        lines.append("".join(line))
-    return "\n".join(lines)
+    """Text QR (half-block unicode) — see totp_core.qr_unicode."""
+    return totp_core.qr_unicode(qr)
 
 
 def _totp_qr(uri: str) -> dict:
-    """Render the otpauth URI as QR: ASCII (terminal/chat) + SVG data-URI (web).
-    Returns {} when segno is unavailable — enrol still works via secret/otpauth_uri."""
-    try:
-        import segno
-    except Exception:  # noqa: BLE001
-        return {}
-    try:
-        qr = segno.make(uri, error="m")
-    except Exception:  # noqa: BLE001
-        return {}
-    out = {}
-    try:
-        out["qr_ascii"] = _totp_qr_unicode(qr)
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        out["qr_svg"] = qr.svg_data_uri(scale=6, border=4)
-    except Exception:  # noqa: BLE001
-        pass
-    return out
+    """QR of the otpauth URI: qr_ascii + qr_svg (empty when segno is missing) —
+    see totp_core.qr."""
+    return totp_core.qr(uri)
 
 
 def _totp_audit(event: str, principal: str | None, extra: dict | None = None) -> None:

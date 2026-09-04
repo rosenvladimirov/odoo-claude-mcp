@@ -14,23 +14,37 @@ Design goals (from Rosen 2026-04-19):
 - Defenses: Argon2id password hashing, CSRF tokens, rate limiting,
   account lockout, HTTP security headers, optional knock token,
   tarpit delay, audit log.
+- 3.3.8 — втори фактор (TOTP, RFC 6238) за конзолата: записване от
+  страницата „Сигурност“ (парола → QR → потвърждаващ код → 8 еднократни
+  кода за възстановяване), проверка при ВСЯКО издаване на сесия (MCP парола,
+  Odoo re-auth, еднократен API key), политика MCP_ADMIN_REQUIRE_TOTP
+  (admins|all), нулиране от админ. Тайната е във /data/users/<login>/totp.json
+  — същият файл и криптиране (Fernet през MCP_KEY_PEPPER) като MCP
+  name-identify в server.py; математиката е в totp_core.py.
+- 3.3.8 — ревизия: еднократният API key вече изтича; сесия с незавършен
+  setup не стига до API-тата; конзолата отказва да се качи с подразбиращия
+  се session secret; DATA_DIR се чете от env; смяна на парола и преглед на
+  сесиите вместо празния бутон; HTML escape на потребителските данни.
 
-Integrated into server.py via register_admin_routes(app).
+Integrated into server.py via get_asgi_app() (mounted under the prefix).
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import hmac
+import html
 import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
+import threading
 import time
 import xmlrpc.client
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +63,15 @@ try:
 except ImportError:
     _ITSDANGEROUS_AVAILABLE = False
 
+try:
+    import secrets_registry          # Fernet през MCP_KEY_PEPPER — същото като server.py
+    _SECRETS_OK = True
+except ImportError:
+    secrets_registry = None
+    _SECRETS_OK = False
+
+import totp_core                     # RFC 6238 математиката, споделена със server.py
+
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, PlainTextResponse
 from starlette.requests import Request
 from starlette.routing import Route
@@ -60,10 +83,11 @@ ADMIN_PATH_PREFIX = (os.environ.get("MCP_ADMIN_PATH_PREFIX") or "/admin").rstrip
 ADMIN_ENABLED = ADMIN_PATH_PREFIX != ""
 BOOTSTRAP_ADMIN = (os.environ.get("MCP_BOOTSTRAP_ADMIN") or "").strip().lower()
 KNOCK_TOKEN = (os.environ.get("MCP_ADMIN_KNOCK_TOKEN") or "").strip()
+_INSECURE_SECRET = "INSECURE-DEFAULT-SET-MCP_SECRET_TOKEN"
 SESSION_SECRET = (
     os.environ.get("MCP_ADMIN_SESSION_SECRET")
     or os.environ.get("MCP_SECRET_TOKEN")
-    or "INSECURE-DEFAULT-SET-MCP_SECRET_TOKEN"
+    or _INSECURE_SECRET
 )
 ALLOWED_IPS = [ip.strip() for ip in (os.environ.get("MCP_ADMIN_ALLOWED_IPS") or "").split(",") if ip.strip()]
 
@@ -78,14 +102,25 @@ LOGIN_MAX_ATTEMPTS = 5
 LOGIN_WINDOW = 15 * 60                # 15 min
 LOCKOUT_STEPS = [15 * 60, 60 * 60, 4 * 3600, 24 * 3600]   # escalating
 
-# Paths
-DATA_DIR = "/data"
+# Paths — DATA_DIR се чете от env като в server.py (3.3.8). Дотогава беше
+# зашит на /data и двете подсистеми можеха да пишат в различни корени.
+DATA_DIR = os.environ.get("DATA_DIR", "/data")
 USERS_DIR = os.path.join(DATA_DIR, "users")
 SESSIONS_DB = os.path.join(DATA_DIR, "sessions.db")
 AUDIT_LOG = os.path.join(DATA_DIR, "admin_audit.log")
 ADMIN_CONFIG = os.path.join(DATA_DIR, "admin_config.json")
 
+# Втори фактор (3.3.8)
+REQUIRE_TOTP = (os.environ.get("MCP_ADMIN_REQUIRE_TOTP") or "").strip().lower()  # "" | "admins" | "all"
+PREAUTH_TTL = 5 * 60                  # прозорецът между паролата и кода
+TOTP_MAX_FAILS = 5                    # поредни грешни кода на профил…
+TOTP_LOCKOUT_S = 300                  # …и колко секунди го заключват
+RECOVERY_CODES_N = 8
+_RECOVERY_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"   # без 0/o, 1/l/i
+_RECOVERY_LEN = 10
+
 _SIGNER = URLSafeTimedSerializer(SESSION_SECRET, salt="mcp-admin-v1") if _ITSDANGEROUS_AVAILABLE else None
+_PREAUTH_SIGNER = URLSafeTimedSerializer(SESSION_SECRET, salt="mcp-admin-preauth-v1") if _ITSDANGEROUS_AVAILABLE else None
 
 
 # ─── DB init ─────────────────────────────────────────────────
@@ -112,6 +147,19 @@ def _db():
             success INTEGER NOT NULL DEFAULT 0
         )
     """)
+    # 3.3.8: чакащ втори фактор — паролата е минала, кодът още не. Редът е
+    # еднократен и живее PREAUTH_TTL секунди; intent носи какво да се
+    # довърши след кода (dashboard / setup след Odoo re-auth / redeem на key).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS admin_preauth (
+            token TEXT PRIMARY KEY,
+            login TEXT NOT NULL,
+            intent TEXT NOT NULL,
+            ip TEXT,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        )
+    """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_attempts_ip_ts ON admin_login_attempts(ip, ts)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON admin_sessions(expires_at)")
     return conn
@@ -129,6 +177,10 @@ _init()
 # ─── Helpers ─────────────────────────────────────────────────
 def _now() -> int:
     return int(time.time())
+
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _sanitize_login(login: str) -> str:
@@ -213,7 +265,7 @@ def _hash_api_key(key: str) -> str:
 
 def _audit(actor: str, action: str, target: str = "", ip: str = "", ua: str = "", extra: dict | None = None):
     entry = {
-        "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "ts": _iso_now(),
         "actor": actor,
         "action": action,
         "target": target,
@@ -395,6 +447,90 @@ def _read_session(req: Request) -> dict | None:
     return _get_session(sid)
 
 
+# ─── Pre-auth: между паролата и втория фактор (3.3.8) ────────
+def _preauth_create(login: str, intent: dict, ip: str) -> str:
+    token = secrets.token_urlsafe(32)
+    with _db() as conn:
+        conn.execute("DELETE FROM admin_preauth WHERE expires_at < ?", (_now(),))
+        conn.execute(
+            "INSERT INTO admin_preauth(token, login, intent, ip, created_at, expires_at) VALUES (?,?,?,?,?,?)",
+            (token, login, json.dumps(intent), ip, _now(), _now() + PREAUTH_TTL),
+        )
+    return token
+
+
+def _preauth_get(token: str) -> dict | None:
+    if not token:
+        return None
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT token, login, intent, ip, expires_at FROM admin_preauth WHERE token=?", (token,)
+        ).fetchone()
+    if not row:
+        return None
+    if row["expires_at"] < _now():
+        _preauth_delete(token)
+        return None
+    out = dict(row)
+    try:
+        out["intent"] = json.loads(out.get("intent") or "{}")
+    except json.JSONDecodeError:
+        out["intent"] = {}
+    return out
+
+
+def _preauth_delete(token: str) -> None:
+    with _db() as conn:
+        conn.execute("DELETE FROM admin_preauth WHERE token=?", (token,))
+
+
+def _preauth_cookie_name() -> str:
+    return "mcp_admin_preauth"
+
+
+def _set_preauth_cookie(resp: Response, token: str) -> None:
+    resp.set_cookie(
+        _preauth_cookie_name(),
+        _PREAUTH_SIGNER.dumps(token) if _PREAUTH_SIGNER else token,
+        max_age=PREAUTH_TTL, httponly=True, secure=True, samesite="lax",
+        path=ADMIN_PATH_PREFIX or "/",
+    )
+
+
+def _clear_preauth_cookie(resp: Response) -> None:
+    resp.delete_cookie(_preauth_cookie_name(), path=ADMIN_PATH_PREFIX or "/")
+
+
+def _read_preauth(req: Request) -> dict | None:
+    cookie = req.cookies.get(_preauth_cookie_name())
+    if not cookie:
+        return None
+    if _PREAUTH_SIGNER:
+        try:
+            token = _PREAUTH_SIGNER.loads(cookie, max_age=PREAUTH_TTL)
+        except (BadSignature, SignatureExpired):
+            return None
+    else:
+        token = cookie
+    return _preauth_get(token)
+
+
+# ─── Преглед и отнемане на сесии (3.3.8) ─────────────────────
+def _list_sessions(login: str) -> list[dict]:
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT sid, ip, ua, is_admin, created_at, expires_at FROM admin_sessions "
+            "WHERE login=? AND expires_at >= ? ORDER BY created_at DESC", (login, _now()),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _delete_other_sessions(login: str, keep_sid: str) -> int:
+    with _db() as conn:
+        cur = conn.execute("DELETE FROM admin_sessions WHERE login=? AND sid<>?", (login, keep_sid))
+        return cur.rowcount or 0
+
+
 # ─── Odoo validation ─────────────────────────────────────────
 class _UATransport(xmlrpc.client.Transport):
     """xmlrpc Transport with custom User-Agent — Cloudflare Bot Fight Mode blocks
@@ -450,6 +586,263 @@ def _validate_odoo(url: str, db: str, login: str, password_or_key: str) -> int |
     except Exception as e:
         _logger.warning("Odoo auth failed (url=%s db=%s login=%s): %s", url, db, login, e)
         return None
+
+
+# ─── Втори фактор: съхранение, проверка, политика (3.3.8) ────
+# Същият файл и схема като MCP name-identify (server.py, 3.3.0):
+#   /data/users/<login>/totp.json → secret_enc (Fernet през MCP_KEY_PEPPER),
+#   algo / digits / step / last_step / last_used.
+# Конзолата добавя: pending_secret_enc (записване, което още не е потвърдено
+# с код) и recovery {hashes, generated_at} — HMAC (през същия pepper) на
+# еднократните кодове за възстановяване.
+# Директорията на конзолата пази „@“ в името, а MCP принципалът го маха ⇒ при
+# имейл-логин двата профила са различни и факторите не се смесват. Съвпадат
+# само когато логинът и принципалът са буквално една и съща дума — тогава една
+# тайна служи и за двете, което е желаното (един човек, един фактор).
+_totp_attempts: dict = {}            # login -> {"fails": int, "until": float}
+_totp_lock = threading.Lock()
+
+
+def _totp_path(login: str) -> str:
+    return os.path.join(_user_dir(login), "totp.json")
+
+
+def _totp_load(login: str) -> dict | None:
+    p = _totp_path(login)
+    if not os.path.isfile(p):
+        return None
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _totp_save(login: str, data: dict) -> None:
+    os.makedirs(_user_dir(login), exist_ok=True)
+    p = _totp_path(login)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, p)
+
+
+def _totp_remove(login: str) -> None:
+    try:
+        os.remove(_totp_path(login))
+    except OSError:
+        pass
+    with _totp_lock:
+        _totp_attempts.pop(login, None)
+
+
+def _totp_enrolled(login: str) -> bool:
+    d = _totp_load(login)
+    return bool(d and d.get("secret_enc"))
+
+
+def _totp_pepper_ok() -> bool:
+    return bool(_SECRETS_OK and secrets_registry._pepper())
+
+
+def _totp_public(login: str) -> dict:
+    """Състоянието без тайни — за страницата „Сигурност“ и за списъка на админа."""
+    d = _totp_load(login) or {}
+    rec = d.get("recovery") or {}
+    return {
+        "enrolled": bool(d.get("secret_enc")),
+        "pending": bool(d.get("pending_secret_enc")),
+        "enrolled_at": d.get("enrolled_at"),
+        "last_used": d.get("last_used"),
+        "recovery_left": len(rec.get("hashes") or []),
+        "pepper_ready": _totp_pepper_ok(),
+    }
+
+
+def _totp_begin_enroll(login: str) -> dict:
+    """Нова тайна в pending. Активната (ако има) остава валидна, докато кодът
+    не потвърди новата — така QR, който човекът не е сканирал, не го заключва."""
+    if not _totp_pepper_ok():
+        return {"error": "MCP_KEY_PEPPER не е зададен (≥32 знака) — тайната няма с какво да се криптира."}
+    secret = totp_core.secret_new()
+    enc = secrets_registry._encrypt(secret)
+    if not enc:
+        return {"error": "Криптирането не сработи (cryptography/Fernet липсва?)."}
+    d = _totp_load(login) or {}
+    d["pending_secret_enc"] = enc
+    d["pending_at"] = _iso_now()
+    _totp_save(login, d)
+    uri = totp_core.provisioning_uri(f"OdooMCP:{login}", secret)
+    out = {"ok": True, "secret": secret, "otpauth_uri": uri}
+    out.update(totp_core.qr(uri))
+    return out
+
+
+def _recovery_hash(code: str) -> str:
+    norm = re.sub(r"[^a-z0-9]", "", (code or "").lower())
+    return secrets_registry._hmac_hex("admin-recovery:" + norm) if norm and _SECRETS_OK else ""
+
+
+def _recovery_new(login: str) -> list[str]:
+    """Осем еднократни кода; пазят се само HMAC-овете им (през pepper-а).
+    Показват се веднъж — както API key-ът."""
+    codes = ["".join(secrets.choice(_RECOVERY_ALPHABET) for _ in range(_RECOVERY_LEN))
+             for _ in range(RECOVERY_CODES_N)]
+    d = _totp_load(login) or {}
+    d["recovery"] = {"hashes": [_recovery_hash(c) for c in codes], "generated_at": _iso_now()}
+    _totp_save(login, d)
+    return [c[:5] + "-" + c[5:] for c in codes]
+
+
+def _recovery_check(login: str, code: str) -> bool:
+    d = _totp_load(login)
+    hashes = list(((d or {}).get("recovery") or {}).get("hashes") or [])
+    h = _recovery_hash(code)
+    if not d or not hashes or not h:
+        return False
+    for i, stored in enumerate(hashes):
+        if hmac.compare_digest(h, stored):
+            hashes.pop(i)                      # еднократен
+            d["recovery"]["hashes"] = hashes
+            d["recovery"]["last_used"] = _iso_now()
+            _totp_save(login, d)
+            return True
+    return False
+
+
+def _totp_confirm_enroll(login: str, code: str) -> dict:
+    """Кодът от приложението доказва, че тайната е стигнала до човека — едва
+    тогава pending става активна и се раждат кодовете за възстановяване."""
+    d = _totp_load(login) or {}
+    enc = d.get("pending_secret_enc")
+    if not enc:
+        return {"error": "Няма започнато записване."}
+    secret = secrets_registry._decrypt(enc) if _totp_pepper_ok() else None
+    if not secret:
+        return {"error": "Тайната не се дешифрира — сменен MCP_KEY_PEPPER? Започнете отначало."}
+    ok, step = totp_core.verify(secret, code)
+    if not ok:
+        return {"error": "Кодът не съвпада. Проверете часовника на телефона и опитайте пак."}
+    _totp_save(login, {
+        "secret_enc": enc,
+        "enrolled_at": _iso_now(),
+        "algo": "SHA1", "digits": totp_core.DIGITS, "step": totp_core.STEP,
+        "last_step": int(step),                # потвърждаващият код не влиза повторно
+        "last_used": None,
+    })
+    with _totp_lock:
+        _totp_attempts.pop(login, None)
+    return {"ok": True, "recovery_codes": _recovery_new(login)}
+
+
+def _totp_check(login: str, code: str) -> dict:
+    """Проверка при вход: заключване след TOTP_MAX_FAILS поредни грешки, replay
+    guard по стъпка. Връща {"ok", "reason"?, "retry_after"?}."""
+    with _totp_lock:
+        st = _totp_attempts.get(login)
+        if st and st.get("until", 0) > time.time():
+            return {"ok": False, "reason": "locked", "retry_after": int(st["until"] - time.time())}
+    d = _totp_load(login)
+    if not d or not d.get("secret_enc"):
+        return {"ok": False, "reason": "not_enrolled"}
+    if not _totp_pepper_ok():
+        return {"ok": False, "reason": "weak_or_missing_pepper"}
+    secret = secrets_registry._decrypt(d["secret_enc"])
+    if not secret:
+        return {"ok": False, "reason": "decrypt_failed"}
+    ok, step = totp_core.verify(secret, code)
+    replay = False
+    if ok and d.get("last_step") is not None and step is not None and int(step) <= int(d["last_step"]):
+        ok, replay = False, True
+    with _totp_lock:
+        if ok:
+            _totp_attempts.pop(login, None)
+        else:
+            a = _totp_attempts.get(login, {"fails": 0, "until": 0})
+            a["fails"] = a.get("fails", 0) + 1
+            if a["fails"] >= TOTP_MAX_FAILS:
+                a["until"] = time.time() + TOTP_LOCKOUT_S
+                a["fails"] = 0
+            _totp_attempts[login] = a
+    if ok:
+        d["last_step"] = int(step)
+        d["last_used"] = _iso_now()
+        _totp_save(login, d)
+        return {"ok": True}
+    return {"ok": False, "reason": "replay" if replay else "invalid_code"}
+
+
+def _totp_policy_applies(au: dict) -> bool:
+    if REQUIRE_TOTP == "all":
+        return True
+    if REQUIRE_TOTP == "admins":
+        return bool(au.get("admin"))
+    return False
+
+
+def _enrollment_required(login: str, au: dict) -> bool:
+    return _totp_policy_applies(au) and not _totp_enrolled(login)
+
+
+def _password_ok(login: str, pw: str) -> bool:
+    au = _load_user_auth(login)
+    return bool(au and pw and _verify_password(pw, au.get("password_hash", "")))
+
+
+def _autosave_default_connection(login: str, url: str, db: str, api_key: str, ip: str, ua: str) -> None:
+    """Първата проверена Odoo връзка влиза като alias 'default', за да има
+    потребителят поне една веднага след setup. Не презаписва съществуващ."""
+    try:
+        data = _load_connections(login)
+        if "default" in data:
+            return
+        data["default"] = {
+            "url": url.rstrip("/"), "db": db, "user": login, "api_key": api_key,
+            "protocol": "xmlrpc", "verify_ssl": True,
+        }
+        _save_connections(login, data)
+        _audit(login, "connection_autosave", "default", ip, ua)
+    except Exception as _e:  # noqa: BLE001
+        _logger.warning("auto-save connection failed: %s", _e)
+
+
+# ─── Издаване на сесия — единствената врата (3.3.8) ──────────
+# Всеки път, който доказва първия фактор (MCP парола, Odoo re-auth, еднократен
+# API key), минава оттук. Записан втори фактор ⇒ сесия НЕ се издава; вместо
+# това pre-auth ред + бисквитка, а страничните ефекти на intent-а (setup флаг,
+# изгаряне на key-а) чакат кода. Иначе Odoo паролата сама би заобиколила TOTP-а
+# през „забравена парола“.
+def _complete_login(login: str, au: dict, intent: dict, ip: str, ua: str,
+                    second_factor: str | None) -> Response:
+    kind = intent.get("kind", "dashboard")
+    if kind == "setup":
+        if intent.get("redeem"):
+            au["api_key_hash"] = ""
+            _save_user_auth(login, au)
+            _audit(login, "setup_api_key_redeemed", "", ip, ua)
+        if intent.get("odoo"):
+            au["setup_pending"] = True
+            au.setdefault("odoo", {}).update(intent["odoo"])
+            _save_user_auth(login, au)
+            _audit(login, "user_reauth_via_odoo", "", ip, ua)
+    is_admin = bool(au.get("admin", False))
+    sid, _csrf = _create_session(login, is_admin, ip, ua)
+    _audit(login, "login_ok", "", ip, ua, {"admin": is_admin, "second_factor": second_factor})
+    nxt = f"{ADMIN_PATH_PREFIX}/setup" if au.get("setup_pending") else f"{ADMIN_PATH_PREFIX}/dashboard"
+    resp = JSONResponse({"ok": True, "next": nxt})
+    _set_session_cookie(resp, sid, is_admin)
+    return _apply_sec_headers(resp)
+
+
+def _finish_login(login: str, au: dict, intent: dict, ip: str, ua: str) -> Response:
+    if _totp_enrolled(login):
+        token = _preauth_create(login, intent, ip)
+        _audit(login, "login_totp_pending", "", ip, ua, {"intent": intent.get("kind", "dashboard")})
+        resp = JSONResponse({"ok": True, "totp_required": True, "next": f"{ADMIN_PATH_PREFIX}/totp"})
+        _set_preauth_cookie(resp, token)
+        return _apply_sec_headers(resp)
+    return _complete_login(login, au, intent, ip, ua, second_factor=None)
 
 
 # ─── HTTP security headers middleware ────────────────────────
@@ -579,6 +972,7 @@ def _nav(sess: dict | None) -> str:
       <ul class="navbar-nav me-auto">
         <li class="nav-item"><a class="nav-link" href="{ADMIN_PATH_PREFIX}/dashboard">Dashboard</a></li>
         <li class="nav-item"><a class="nav-link" href="{ADMIN_PATH_PREFIX}/connections">Odoo връзки</a></li>
+        <li class="nav-item"><a class="nav-link" href="{ADMIN_PATH_PREFIX}/security">Сигурност</a></li>
         <li class="nav-item"><a class="nav-link" href="{ADMIN_PATH_PREFIX}/backups">Backups</a></li>
         <li class="nav-item"><a class="nav-link" href="{ADMIN_PATH_PREFIX}/filestore">Filestore</a></li>
         {admin_link}
@@ -756,10 +1150,11 @@ async def _api_login_mcp(req: Request):
     if not login or not password:
         return JSONResponse({"error":"Въведете login и парола"}, status_code=400)
 
-    # Lockout check
-    rem = _lockout_remaining(ip)
+    # Lockout check — по IP И по профил (3.3.8): зад общ NAT/прокси един
+    # нападател заключваше всички, а с редуване на адреси не се заключваше никой.
+    rem = max(_lockout_remaining(ip), _lockout_remaining(ip, login))
     if rem > 0:
-        return JSONResponse({"error": f"Твърде много опити. Изчакайте {rem // 60}м."}, status_code=429)
+        return JSONResponse({"error": f"Твърде много опити. Изчакайте {max(1, rem // 60)}м."}, status_code=429)
 
     au = _load_user_auth(login)
     fail, _ = _recent_failures(ip)
@@ -770,12 +1165,7 @@ async def _api_login_mcp(req: Request):
         return JSONResponse({"error":"Грешен login или парола"}, status_code=401)
 
     _record_attempt(ip, login, True)
-    is_admin = bool(au.get("admin", False))
-    sid, _csrf = _create_session(login, is_admin, ip, ua)
-    _audit(login, "login_ok", "", ip, ua, {"admin": is_admin})
-    resp = JSONResponse({"ok": True, "next": f"{ADMIN_PATH_PREFIX}/dashboard"})
-    _set_session_cookie(resp, sid, is_admin)
-    return _apply_sec_headers(resp)
+    return _finish_login(login, au, {"kind": "dashboard"}, ip, ua)
 
 
 async def _api_login_odoo(req: Request):
@@ -795,30 +1185,29 @@ async def _api_login_odoo(req: Request):
     if not all([url, db, login, password]):
         return JSONResponse({"error":"Всички полета са задължителни"}, status_code=400)
 
-    rem = _lockout_remaining(ip)
+    rem = max(_lockout_remaining(ip), _lockout_remaining(ip, login))
     if rem > 0:
-        return JSONResponse({"error": f"Твърде много опити. Изчакайте {rem // 60}м."}, status_code=429)
+        return JSONResponse({"error": f"Твърде много опити. Изчакайте {max(1, rem // 60)}м."}, status_code=429)
 
     au = _load_user_auth(login)
     fail, _ = _recent_failures(ip)
 
     # Case 1: user has pending api_key_hash → password == API key issued by admin
     if au and au.get("setup_pending") and au.get("api_key_hash"):
-        if hmac.compare_digest(_hash_api_key(password), au["api_key_hash"]):
-            # API key redeemed — allow setup password form
-            # Clear the api_key, keep setup_pending until password is set
-            au["api_key_hash"] = ""
-            _save_user_auth(login, au)
-            _record_attempt(ip, login, True)
-            sid, _c = _create_session(login, bool(au.get("admin", False)), ip, ua)
-            _audit(login, "setup_api_key_redeemed", "", ip, ua)
-            resp = JSONResponse({"ok": True, "next": f"{ADMIN_PATH_PREFIX}/setup"})
-            _set_session_cookie(resp, sid, bool(au.get("admin", False)))
-            return _apply_sec_headers(resp)
-        else:
+        expires = int(au.get("api_key_expires") or 0)
+        if expires and expires < _now():
+            # 3.3.8: срокът се записваше, но никой не го четеше — ключът беше вечен.
             _record_attempt(ip, login, False)
             await _tarpit_delay(fail + 1)
-            return JSONResponse({"error":"Невалиден API key"}, status_code=401)
+            _audit(login, "setup_api_key_expired", "", ip, ua)
+            return JSONResponse({"error":"API key-ят е изтекъл. Поискайте нов от админа."}, status_code=401)
+        if hmac.compare_digest(_hash_api_key(password), au["api_key_hash"]):
+            _record_attempt(ip, login, True)
+            # Изгарянето на key-а е в intent-а: при записан втори фактор чака кода.
+            return _finish_login(login, au, {"kind": "setup", "redeem": True}, ip, ua)
+        _record_attempt(ip, login, False)
+        await _tarpit_delay(fail + 1)
+        return JSONResponse({"error":"Невалиден API key"}, status_code=401)
 
     # Case 2: Odoo validation (new user OR existing user changing password)
     uid = _validate_odoo(url, db, login, password)
@@ -833,7 +1222,7 @@ async def _api_login_odoo(req: Request):
     is_admin = (BOOTSTRAP_ADMIN and login == _sanitize_login(BOOTSTRAP_ADMIN))
 
     if not au:
-        # New user
+        # New user — няма как да има втори фактор; сесията се издава веднага.
         au = {
             "login": login,
             "admin": is_admin,
@@ -845,45 +1234,17 @@ async def _api_login_odoo(req: Request):
         }
         _save_user_auth(login, au)
         _audit(login, "user_created_via_odoo", "", ip, ua, {"admin": is_admin, "db": db})
-    else:
-        # Existing user re-authenticating with Odoo (e.g. password reset flow)
-        au["setup_pending"] = True
-        au.setdefault("odoo", {})["url"] = url.rstrip("/")
-        au["odoo"]["db"] = db
-        au["odoo"]["uid"] = uid
-        _save_user_auth(login, au)
-        _audit(login, "user_reauth_via_odoo", "", ip, ua)
+        _autosave_default_connection(login, url, db, password, ip, ua)
+        return _finish_login(login, au, {"kind": "setup"}, ip, ua)
 
-    # Auto-save the credentials as 'default' alias in user's connections.json
-    # so they see at least one connection immediately after setup
-    try:
-        conn_file = os.path.join(_user_dir(login), "connections.json")
-        data = {}
-        if os.path.isfile(conn_file):
-            try:
-                with open(conn_file) as _f: data = json.load(_f)
-            except (json.JSONDecodeError, OSError):
-                data = {}
-        if "default" not in data:
-            data["default"] = {
-                "url": url.rstrip("/"),
-                "db": db,
-                "user": login,
-                "api_key": password,
-                "protocol": "xmlrpc",
-                "verify_ssl": True,
-            }
-            with open(conn_file, "w") as _f:
-                json.dump(data, _f, indent=2)
-            os.chmod(conn_file, 0o600)
-            _audit(login, "connection_autosave", "default", ip, ua)
-    except Exception as _e:
-        _logger.warning("auto-save connection failed: %s", _e)
-
-    sid, _c = _create_session(login, bool(au.get("admin", False)), ip, ua)
-    resp = JSONResponse({"ok": True, "next": f"{ADMIN_PATH_PREFIX}/setup"})
-    _set_session_cookie(resp, sid, bool(au.get("admin", False)))
-    return _apply_sec_headers(resp)
+    # Existing user re-authenticating with Odoo (password reset flow). С записан
+    # втори фактор setup флагът се вдига ЕДВА след кода — иначе Odoo паролата
+    # сама би нулирала MCP паролата и би прескочила TOTP-а. Автозаписът на
+    # 'default' също чака: до кода никой не пише в профила.
+    odoo = {"url": url.rstrip("/"), "db": db, "uid": uid}
+    if not _totp_enrolled(login):
+        _autosave_default_connection(login, url, db, password, ip, ua)
+    return _finish_login(login, au, {"kind": "setup", "odoo": odoo}, ip, ua)
 
 
 async def _handle_setup_page(req: Request):
@@ -996,6 +1357,9 @@ async def _handle_dashboard(req: Request):
 
     is_admin = bool(sess["is_admin"])
     users_count = len(_list_users()) if is_admin else 0
+    tp = _totp_public(sess["login"])
+    totp_badge = ('<span class="badge bg-success">включен</span>' if tp["enrolled"]
+                  else '<span class="badge bg-secondary">изключен</span>')
 
     conns_html = ""
     if conns:
@@ -1013,13 +1377,17 @@ async def _handle_dashboard(req: Request):
         rows = []
         for alias, cfg in sorted(conns.items()):
             badges = _sec_badges(cfg)
+            # 3.3.8: escape — стойностите идват от connections.json (import от GUI).
+            a_e = html.escape(str(alias))
+            url_e = html.escape(str(cfg.get('url', '') or ''))
+            db_e = html.escape(str(cfg.get('db', '') or ''))
             rows.append(f"""
 <tr>
-  <td class="text-nowrap"><code>{alias}</code>{(' ' + badges) if badges else ''}</td>
-  <td class="small text-muted text-truncate" style="max-width: 260px;" title="{cfg.get('url','')}">{cfg.get('url','')}</td>
-  <td class="small text-truncate" style="max-width: 140px;" title="{cfg.get('db','')}">{cfg.get('db','')}</td>
+  <td class="text-nowrap"><code>{a_e}</code>{(' ' + badges) if badges else ''}</td>
+  <td class="small text-muted text-truncate" style="max-width: 260px;" title="{url_e}">{url_e}</td>
+  <td class="small text-truncate" style="max-width: 140px;" title="{db_e}">{db_e}</td>
   <td class="text-end text-nowrap">
-    <a href="{ADMIN_PATH_PREFIX}/connections#{alias}" class="btn btn-sm btn-outline-primary" title="Редакция"><i class="bi bi-pencil"></i></a>
+    <a href="{ADMIN_PATH_PREFIX}/connections#{a_e}" class="btn btn-sm btn-outline-primary" title="Редакция"><i class="bi bi-pencil"></i></a>
   </td>
 </tr>""")
         conns_html = f"""
@@ -1088,9 +1456,10 @@ async def _handle_dashboard(req: Request):
               <p class="mb-0"><strong>Session до:</strong> <span class="text-muted small">{datetime.fromtimestamp(sess['expires_at']).strftime('%Y-%m-%d %H:%M')}</span></p>
             </div>
             <div class="col-md-6">
-              <button class="btn btn-outline-primary btn-sm" onclick="alert('Change password: влез през Odoo отново, ще изисква нова setup парола')">
-                <i class="bi bi-key"></i> Смени парола
-              </button>
+              <p class="mb-2"><strong>Втори фактор:</strong> {totp_badge}</p>
+              <a href="{ADMIN_PATH_PREFIX}/security" class="btn btn-outline-primary btn-sm">
+                <i class="bi bi-shield-lock"></i> Сигурност: парола, 2FA, сесии
+              </a>
               <a href="{ADMIN_PATH_PREFIX}/logout" class="btn btn-outline-secondary btn-sm">
                 <i class="bi bi-box-arrow-right"></i> Изход
               </a>
@@ -1304,6 +1673,10 @@ function hasSection(cfg, name) {{
   return Object.values(s).some(v => v !== '' && v !== false && v != null);
 }}
 
+function esc(s) {{
+  return String(s ?? '').replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
+}}
+
 function sectionBadges(cfg) {{
   const badges = [];
   if (hasSection(cfg, 'ssh')) badges.push('<span class="badge bg-info text-dark"><i class="bi bi-terminal"></i> SSH</span>');
@@ -1324,13 +1697,14 @@ async function loadConns() {{
   let rows = '';
   for (const [alias, cfg] of Object.entries(j.connections)) {{
     const badges = sectionBadges(cfg);
+    const a = esc(alias);
     rows += `
       <tr>
-        <td><code class="fs-6">${{alias}}</code><div class="mt-1">${{badges}}</div></td>
-        <td class="small text-muted"><div>${{cfg.url||''}}</div><div>${{cfg.db||''}} · ${{cfg.user||''}}</div></td>
+        <td><code class="fs-6">${{a}}</code><div class="mt-1">${{badges}}</div></td>
+        <td class="small text-muted"><div>${{esc(cfg.url||'')}}</div><div>${{esc(cfg.db||'')}} · ${{esc(cfg.user||'')}}</div></td>
         <td class="text-end">
-          <button class="btn btn-sm btn-outline-primary" onclick="openEditor('${{alias}}','edit')"><i class="bi bi-pencil"></i> Редакция</button>
-          <button class="btn btn-sm btn-outline-danger" onclick="delConn('${{alias}}')"><i class="bi bi-trash"></i></button>
+          <button class="btn btn-sm btn-outline-primary" onclick="openEditor('${{a}}','edit')"><i class="bi bi-pencil"></i> Редакция</button>
+          <button class="btn btn-sm btn-outline-danger" onclick="delConn('${{a}}')"><i class="bi bi-trash"></i></button>
         </td>
       </tr>`;
   }}
@@ -1857,22 +2231,35 @@ async function loadUsers() {{
     const bg = u.admin ? 'bg-warning text-dark' : 'bg-primary';
     const badge = u.admin ? 'admin' : 'user';
     const state = u.setup_pending ? '<span class="badge bg-secondary">чака setup</span>' : '<span class="badge bg-success">активен</span>';
+    const totp = u.totp ? '<span class="badge bg-success" title="TOTP включен">2FA</span>' : '<span class="badge bg-light text-muted border">—</span>';
+    const reset = u.totp ? `<button class="btn btn-sm btn-outline-danger ms-1" onclick="resetTotp('${{u.login}}')" title="Нулирай втория фактор"><i class="bi bi-shield-x"></i> 2FA</button>` : '';
     rows += `
       <tr>
         <td><code>${{u.login}}</code></td>
         <td><span class="badge ${{bg}}">${{badge}}</span></td>
         <td>${{state}}</td>
+        <td>${{totp}}</td>
         <td class="small text-muted">${{u.created}}</td>
-        <td class="text-end">
-          <button class="btn btn-sm btn-outline-warning" onclick="regenKey('${{u.login}}')"><i class="bi bi-key"></i> Нов key</button>
+        <td class="text-end text-nowrap">
+          <button class="btn btn-sm btn-outline-warning" onclick="regenKey('${{u.login}}')"><i class="bi bi-key"></i> Нов key</button>${{reset}}
         </td>
       </tr>`;
   }}
-  list.innerHTML = `<div class="table-responsive"><table class="table table-sm table-mono"><thead><tr><th>Login</th><th>Role</th><th>Status</th><th>Created</th><th></th></tr></thead><tbody>${{rows}}</tbody></table></div>`;
+  list.innerHTML = `<div class="table-responsive"><table class="table table-sm table-mono"><thead><tr><th>Login</th><th>Role</th><th>Status</th><th>2FA</th><th>Created</th><th></th></tr></thead><tbody>${{rows}}</tbody></table></div>`;
+}}
+
+async function resetTotp(login) {{
+  if (!confirm('Нулирай втория фактор на ' + login + '? Следващият вход ще е само с парола, докато не го включи отново.')) return;
+  const csrf = await fetch('{ADMIN_PATH_PREFIX}/api/csrf', {{credentials:'include'}}).then(r => r.json());
+  const r = await fetch('{ADMIN_PATH_PREFIX}/api/users/' + encodeURIComponent(login) + '/totp-reset', {{
+    method:'POST', credentials:'include', headers: {{'X-CSRF-Token': csrf.token}},
+  }});
+  const j = await r.json();
+  if (r.ok) loadUsers(); else alert(j.error || 'Грешка');
 }}
 
 async function regenKey(login) {{
-  if (!confirm('Генерирай нов API key за ' + login + '? Потребителят ще трябва да го въведе при следващо влизане през Odoo таба.')) return;
+  if (!confirm('Генерирай нов API key за ' + login + '? Старата парола се анулира; потребителят въвежда key-а при следващо влизане през Odoo таба.')) return;
   const csrf = await fetch('{ADMIN_PATH_PREFIX}/api/csrf', {{credentials:'include'}}).then(r => r.json());
   const r = await fetch('{ADMIN_PATH_PREFIX}/api/users/' + encodeURIComponent(login) + '/genkey', {{
     method:'POST', credentials:'include',
@@ -1934,6 +2321,7 @@ async def _api_users(req: Request):
                 "login": login,
                 "admin": bool(au.get("admin")),
                 "setup_pending": bool(au.get("setup_pending")),
+                "totp": _totp_enrolled(login),
                 "created": datetime.fromtimestamp(au.get("created_at", 0)).strftime("%Y-%m-%d") if au.get("created_at") else "",
             })
         return _apply_sec_headers(JSONResponse({"users": out}))
@@ -1989,6 +2377,603 @@ async def _api_user_genkey(req: Request):
     return _apply_sec_headers(JSONResponse({"ok": True, "api_key": api_key}))
 
 
+# ─── Общи парчета за JSON API-тата (3.3.8) ───────────────────
+def _api_session(req: Request, csrf: bool = False, admin: bool = False) -> tuple[dict | None, Response | None]:
+    """(сесия, None) или (None, отговор за връщане)."""
+    gate = _gate(req)
+    if gate:
+        return None, gate
+    sess = _read_session(req)
+    if not sess:
+        return None, JSONResponse({"error": "Unauthenticated"}, status_code=401)
+    if admin and not sess["is_admin"]:
+        return None, JSONResponse({"error": "Admin only"}, status_code=403)
+    if csrf and not _check_csrf(req, sess):
+        return None, JSONResponse({"error": "CSRF failure"}, status_code=403)
+    return sess, None
+
+
+async def _json_body(req: Request) -> dict:
+    try:
+        data = await req.json()
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _req_meta(req: Request) -> tuple[str, str]:
+    return _client_ip(req), req.headers.get("user-agent", "")
+
+
+# ─── Втори фактор при вход (3.3.8) ───────────────────────────
+async def _handle_totp_page(req: Request):
+    gate = _gate(req)
+    if gate: return gate
+    if _read_session(req):
+        return RedirectResponse(f"{ADMIN_PATH_PREFIX}/dashboard", status_code=302)
+    pre = _read_preauth(req)
+    if not pre:
+        return RedirectResponse(f"{ADMIN_PATH_PREFIX}/login", status_code=302)
+    login_e = html.escape(pre["login"])
+    body = f"""
+<div class="gradient-bg d-flex align-items-center py-5">
+  <div class="container">
+    <div class="text-center text-white mb-4">
+      <i class="bi bi-shield-lock-fill" style="font-size:3rem;"></i>
+      <h1 class="mt-2 mb-1">Втори фактор</h1>
+      <p class="opacity-75">{login_e} · кодът от authenticator приложението</p>
+    </div>
+    <div class="login-card card shadow-lg border-0">
+      <div class="card-body p-4 p-md-5">
+        <form id="totpForm">
+          <div class="mb-3" id="codeBox">
+            <label class="form-label small fw-semibold">6-цифрен код</label>
+            <input name="code" type="text" class="form-control form-control-lg text-center" inputmode="numeric"
+                   pattern="[0-9 ]*" maxlength="7" autocomplete="one-time-code" autofocus>
+          </div>
+          <div class="mb-3 d-none" id="recBox">
+            <label class="form-label small fw-semibold">Код за възстановяване</label>
+            <input name="recovery_code" type="text" class="form-control form-control-lg text-center"
+                   placeholder="xxxxx-xxxxx" autocomplete="off">
+            <div class="form-text">Еднократен. След влизане си генерирайте нови от „Сигурност“.</div>
+          </div>
+          <button class="btn btn-brand w-100 py-2">Потвърди</button>
+        </form>
+        <div class="text-center mt-3">
+          <a href="#" id="toggleRec" class="small">Нямам телефона — ще ползвам код за възстановяване</a>
+        </div>
+        <div id="msg" class="mt-3"></div>
+      </div>
+    </div>
+    <p class="text-center text-white-50 small mt-4">
+      Прозорецът е {PREAUTH_TTL // 60} минути. <a class="text-white" href="{ADMIN_PATH_PREFIX}/login">Назад към входа</a>
+    </p>
+  </div>
+</div>
+<script>
+let useRec = false;
+function setMsg(txt, type) {{
+  const m = document.getElementById('msg');
+  m.className = 'alert alert-' + (type || 'info') + ' small';
+  m.textContent = txt;
+}}
+document.getElementById('toggleRec').addEventListener('click', (e) => {{
+  e.preventDefault();
+  useRec = !useRec;
+  document.getElementById('codeBox').classList.toggle('d-none', useRec);
+  document.getElementById('recBox').classList.toggle('d-none', !useRec);
+  e.target.textContent = useRec ? 'Обратно към кода от приложението' : 'Нямам телефона — ще ползвам код за възстановяване';
+  document.querySelector(useRec ? '[name=recovery_code]' : '[name=code]').focus();
+}});
+document.getElementById('totpForm').addEventListener('submit', async (e) => {{
+  e.preventDefault();
+  const d = Object.fromEntries(new FormData(e.target));
+  const payload = useRec ? {{recovery_code: d.recovery_code}} : {{code: d.code}};
+  setMsg('Проверявам...', 'secondary');
+  try {{
+    const r = await fetch('{ADMIN_PATH_PREFIX}/api/login/totp', {{
+      method: 'POST', headers: {{'Content-Type':'application/json'}},
+      body: JSON.stringify(payload), credentials: 'include',
+    }});
+    const j = await r.json();
+    if (r.ok) {{ window.location.href = j.next || '{ADMIN_PATH_PREFIX}/dashboard'; return; }}
+    setMsg(j.error || 'Грешка', 'danger');
+    if (j.next) setTimeout(() => {{ window.location.href = j.next; }}, 2500);
+  }} catch (err) {{ setMsg('Мрежова грешка: ' + err, 'danger'); }}
+}});
+</script>
+"""
+    return _apply_sec_headers(HTMLResponse(_html_shell("MCP Admin · Втори фактор", body)))
+
+
+async def _api_login_totp(req: Request):
+    gate = _gate(req)
+    if gate: return gate
+    ip, ua = _req_meta(req)
+    pre = _read_preauth(req)
+    if not pre:
+        return JSONResponse({"error": "Прозорецът за втория фактор изтече. Влезте отново.",
+                             "next": f"{ADMIN_PATH_PREFIX}/login"}, status_code=401)
+    data = await _json_body(req)
+    login = pre["login"]
+    au = _load_user_auth(login)
+    if not au:
+        _preauth_delete(pre["token"])
+        return JSONResponse({"error": "User not found"}, status_code=401)
+    rem = max(_lockout_remaining(ip), _lockout_remaining(ip, login))
+    if rem > 0:
+        return JSONResponse({"error": f"Твърде много опити. Изчакайте {max(1, rem // 60)}м."}, status_code=429)
+    fail, _ = _recent_failures(ip)
+
+    recovery = (data.get("recovery_code") or "").strip()
+    extra: dict = {}
+    if recovery:
+        ok = _recovery_check(login, recovery)
+        factor, reason = "recovery", ("" if ok else "invalid_recovery_code")
+    else:
+        res = _totp_check(login, (data.get("code") or "").strip())
+        ok = bool(res.get("ok"))
+        factor, reason = "totp", (res.get("reason") or "")
+        if res.get("retry_after"):
+            extra["retry_after"] = res["retry_after"]
+    if not ok:
+        _record_attempt(ip, login, False)
+        await _tarpit_delay(fail + 1)
+        _audit(login, "totp_fail", "", ip, ua, {"factor": factor, "reason": reason})
+        msg = {
+            "locked": "Твърде много грешни кодове. Изчакайте няколко минути.",
+            "replay": "Този код вече е използван. Изчакайте следващия.",
+            "invalid_recovery_code": "Невалиден или вече използван код за възстановяване.",
+            "weak_or_missing_pepper": "Сървърът няма MCP_KEY_PEPPER — обърнете се към админа.",
+            "decrypt_failed": "Тайната не се дешифрира (сменен MCP_KEY_PEPPER?) — обърнете се към админа.",
+        }.get(reason, "Грешен код.")
+        return JSONResponse({"error": msg, **extra}, status_code=401)
+
+    _preauth_delete(pre["token"])
+    _record_attempt(ip, login, True)
+    if factor == "recovery":
+        _audit(login, "recovery_code_used", "", ip, ua, {"left": _totp_public(login)["recovery_left"]})
+    resp = _complete_login(login, au, pre.get("intent") or {}, ip, ua, second_factor=factor)
+    _clear_preauth_cookie(resp)
+    return resp
+
+
+# ─── „Сигурност“: 2FA, парола, сесии (3.3.8) ─────────────────
+async def _handle_security_page(req: Request):
+    gate = _gate(req)
+    if gate: return gate
+    sess = _read_session(req)
+    if not sess:
+        return RedirectResponse(f"{ADMIN_PATH_PREFIX}/login", status_code=302)
+    au = _load_user_auth(sess["login"])
+    if not au or au.get("setup_pending"):
+        return RedirectResponse(f"{ADMIN_PATH_PREFIX}/setup", status_code=302)
+    must_enroll = _enrollment_required(sess["login"], au)
+    policy_on = _totp_policy_applies(au)
+    policy_alert = ""
+    if must_enroll:
+        policy_alert = """
+<div class="alert alert-warning"><i class="bi bi-exclamation-triangle"></i>
+  Политиката на сървъра изисква втори фактор за вашия профил. Останалите страници се отключват след записването.</div>"""
+    body = f"""
+{_nav(sess)}
+<div class="container py-4">
+  <h2 class="mb-1"><i class="bi bi-shield-lock text-brand"></i> Сигурност</h2>
+  <p class="text-muted">Втори фактор, парола и активни сесии на <code>{html.escape(sess['login'])}</code>.</p>
+  {policy_alert}
+  <div class="row">
+    <div class="col-lg-6 mb-4">
+      <div class="card shadow-sm h-100">
+        <div class="card-header brand-bg"><h5 class="mb-0"><i class="bi bi-phone"></i> Двуфакторна защита (TOTP)</h5></div>
+        <div class="card-body">
+          <div id="totpStatus" class="mb-3">Зареждам…</div>
+          <div class="d-flex flex-wrap gap-2">
+            <button class="btn btn-brand btn-sm" id="btnEnroll"><i class="bi bi-qr-code"></i> Включи</button>
+            <button class="btn btn-outline-accent btn-sm" id="btnRecovery"><i class="bi bi-life-preserver"></i> Нови кодове за възстановяване</button>
+            <button class="btn btn-outline-danger btn-sm" id="btnDisable"><i class="bi bi-shield-x"></i> Изключи</button>
+          </div>
+          <p class="small text-muted mt-3 mb-0">Google Authenticator, Aegis, 1Password, Bitwarden — всяко приложение с TOTP (RFC 6238).
+          {'Политиката не позволява изключване за този профил; повторното записване заменя тайната.' if policy_on else ''}</p>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-6 mb-4">
+      <div class="card shadow-sm h-100">
+        <div class="card-header brand-bg"><h5 class="mb-0"><i class="bi bi-key-fill"></i> Смяна на парола</h5></div>
+        <div class="card-body">
+          <form id="pwForm" autocomplete="off">
+            <div class="mb-2"><label class="form-label small">Текуща парола</label>
+              <input name="current" type="password" class="form-control" required autocomplete="current-password"></div>
+            <div class="mb-2"><label class="form-label small">Нова парола (мин. 12 символа)</label>
+              <input name="new" type="password" class="form-control" required minlength="12" autocomplete="new-password"></div>
+            <div class="mb-2"><label class="form-label small">Повторете новата</label>
+              <input name="new2" type="password" class="form-control" required minlength="12" autocomplete="new-password"></div>
+            <div class="mb-3 d-none" id="pwCodeBox"><label class="form-label small">Код от приложението</label>
+              <input name="code" type="text" class="form-control" inputmode="numeric" maxlength="7" autocomplete="one-time-code"></div>
+            <button class="btn btn-brand btn-sm"><i class="bi bi-save"></i> Смени</button>
+            <span class="small text-muted ms-2">Останалите ви сесии се затварят.</span>
+          </form>
+          <div id="pwMsg" class="mt-3"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="card shadow-sm mb-4">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h5 class="fw-bold mb-0"><i class="bi bi-laptop"></i> Активни сесии</h5>
+        <button class="btn btn-outline-danger btn-sm" id="btnRevoke"><i class="bi bi-x-circle"></i> Затвори останалите</button>
+      </div>
+      <div id="sessList">Зареждам…</div>
+    </div>
+  </div>
+</div>
+
+<!-- Enrol modal: парола → QR → код → кодове за възстановяване -->
+<div class="modal fade" id="enrollModal" tabindex="-1" data-bs-backdrop="static">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header brand-bg text-white">
+        <h5 class="modal-title"><i class="bi bi-qr-code"></i> Включване на втори фактор</h5>
+        <button class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div id="enStep1">
+          <p class="small text-muted">Потвърдете с текущата си парола.</p>
+          <input id="enPw" type="password" class="form-control" autocomplete="current-password" placeholder="Парола">
+        </div>
+        <div id="enStep2" class="d-none">
+          <p class="small text-muted mb-2">Сканирайте QR кода или въведете тайната ръчно, после напишете кода, който приложението показва.</p>
+          <div class="text-center mb-2"><img id="enQr" alt="QR" style="max-width:220px;"></div>
+          <code class="apikey mb-2" id="enSecret"></code>
+          <input id="enCode" type="text" class="form-control form-control-lg text-center" inputmode="numeric" maxlength="7"
+                 autocomplete="one-time-code" placeholder="6-цифрен код">
+        </div>
+        <div id="enStep3" class="d-none">
+          <div class="alert alert-warning small mb-2"><strong>Кодове за възстановяване — показват се ВЕДНЪЖ.</strong>
+            Всеки влиза еднократно вместо кода от приложението. Пазете ги извън телефона.</div>
+          <code class="apikey" id="enRecovery" style="white-space:pre-line;"></code>
+        </div>
+        <div id="enMsg" class="mt-3"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline-secondary" data-bs-dismiss="modal" id="enCancel">Откажи</button>
+        <button class="btn btn-brand" id="enNext">Напред</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Rechallenge modal (парола + код) за изключване / нови кодове -->
+<div class="modal fade" id="rcModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header brand-bg text-white">
+        <h5 class="modal-title" id="rcTitle">Потвърждение</h5>
+        <button class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small text-muted" id="rcText"></p>
+        <input id="rcPw" type="password" class="form-control mb-2" autocomplete="current-password" placeholder="Парола">
+        <input id="rcCode" type="text" class="form-control text-center" inputmode="numeric" maxlength="7"
+               autocomplete="one-time-code" placeholder="Код от приложението">
+        <code class="apikey mt-3 d-none" id="rcOut" style="white-space:pre-line;"></code>
+        <div id="rcMsg" class="mt-3"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Затвори</button>
+        <button class="btn btn-brand" id="rcGo">Потвърди</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const PATH = '{ADMIN_PATH_PREFIX}';
+let _csrf = null;
+async function csrf() {{
+  if (_csrf) return _csrf;
+  const j = await fetch(PATH + '/api/csrf', {{credentials:'include'}}).then(r => r.json());
+  _csrf = j.token; return _csrf;
+}}
+function esc(s) {{
+  return String(s ?? '').replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
+}}
+function say(id, txt, type) {{
+  const m = document.getElementById(id);
+  m.className = txt ? ('alert alert-' + (type || 'info') + ' small') : '';
+  m.textContent = txt || '';
+}}
+async function api(path, body) {{
+  const t = await csrf();
+  const r = await fetch(PATH + path, {{
+    method: 'POST', credentials: 'include',
+    headers: {{'Content-Type': 'application/json', 'X-CSRF-Token': t}},
+    body: JSON.stringify(body || {{}}),
+  }});
+  const j = await r.json().catch(() => ({{}}));
+  return [r, j];
+}}
+
+let status = {{}};
+async function loadStatus() {{
+  status = await fetch(PATH + '/api/totp/status', {{credentials:'include'}}).then(r => r.json());
+  const box = document.getElementById('totpStatus');
+  if (!status.pepper_ready) {{
+    box.innerHTML = '<div class="alert alert-danger small mb-0"><strong>MCP_KEY_PEPPER</strong> не е зададен на сървъра (≥32 знака). Без него тайната няма с какво да се криптира и 2FA не може да се включи.</div>';
+  }} else if (status.enrolled) {{
+    box.innerHTML = '<span class="badge bg-success fs-6">включен</span> <span class="small text-muted ms-2">от ' + esc((status.enrolled_at||'').slice(0,16).replace('T',' ')) +
+      (status.last_used ? ' · последно ' + esc(status.last_used.slice(0,16).replace('T',' ')) : ' · още не е ползван') +
+      ' · кодове за възстановяване: <strong>' + status.recovery_left + '</strong></span>' +
+      (status.recovery_left === 0 ? '<div class="text-danger small mt-1">Нямате кодове за възстановяване — генерирайте нови.</div>' : '');
+  }} else {{
+    box.innerHTML = '<span class="badge bg-secondary fs-6">изключен</span> <span class="small text-muted ms-2">Входът е само с парола.</span>';
+  }}
+  const en = !!status.enrolled, ok = !!status.pepper_ready;
+  document.getElementById('btnEnroll').disabled = !ok;
+  document.getElementById('btnEnroll').innerHTML = en ? '<i class="bi bi-arrow-repeat"></i> Запиши наново' : '<i class="bi bi-qr-code"></i> Включи';
+  document.getElementById('btnRecovery').classList.toggle('d-none', !en);
+  document.getElementById('btnDisable').classList.toggle('d-none', !en || {str(policy_on).lower()});
+  document.getElementById('pwCodeBox').classList.toggle('d-none', !en);
+}}
+
+// ── enrol ──
+let enStep = 1;
+const enModal = () => bootstrap.Modal.getOrCreateInstance(document.getElementById('enrollModal'));
+document.getElementById('btnEnroll').addEventListener('click', () => {{
+  enStep = 1;
+  for (const s of [1,2,3]) document.getElementById('enStep' + s).classList.toggle('d-none', s !== 1);
+  document.getElementById('enPw').value = ''; document.getElementById('enCode').value = '';
+  document.getElementById('enNext').textContent = 'Напред'; document.getElementById('enCancel').classList.remove('d-none');
+  say('enMsg', '');
+  enModal().show();
+  setTimeout(() => document.getElementById('enPw').focus(), 300);
+}});
+document.getElementById('enNext').addEventListener('click', async () => {{
+  say('enMsg', '');
+  if (enStep === 1) {{
+    const [r, j] = await api('/api/totp/enroll', {{password: document.getElementById('enPw').value}});
+    if (!r.ok) {{ say('enMsg', j.error || 'Грешка', 'danger'); return; }}
+    document.getElementById('enQr').src = j.qr_svg || '';
+    document.getElementById('enQr').classList.toggle('d-none', !j.qr_svg);
+    document.getElementById('enSecret').textContent = j.secret;
+    enStep = 2;
+    document.getElementById('enStep1').classList.add('d-none'); document.getElementById('enStep2').classList.remove('d-none');
+    document.getElementById('enNext').textContent = 'Потвърди кода';
+    setTimeout(() => document.getElementById('enCode').focus(), 100);
+  }} else if (enStep === 2) {{
+    const [r, j] = await api('/api/totp/confirm', {{code: document.getElementById('enCode').value}});
+    if (!r.ok) {{ say('enMsg', j.error || 'Грешка', 'danger'); return; }}
+    document.getElementById('enRecovery').textContent = (j.recovery_codes || []).join('\\n');
+    enStep = 3;
+    document.getElementById('enStep2').classList.add('d-none'); document.getElementById('enStep3').classList.remove('d-none');
+    document.getElementById('enNext').textContent = 'Записах ги';
+    document.getElementById('enCancel').classList.add('d-none');
+  }} else {{
+    enModal().hide();
+    loadStatus();
+    {"window.location.href = PATH + '/dashboard';" if must_enroll else ""}
+  }}
+}});
+
+// ── rechallenge (disable / recovery) ──
+let rcAction = null;
+const rcModal = () => bootstrap.Modal.getOrCreateInstance(document.getElementById('rcModal'));
+function openRc(action, title, text) {{
+  rcAction = action;
+  document.getElementById('rcTitle').textContent = title;
+  document.getElementById('rcText').textContent = text;
+  document.getElementById('rcPw').value = ''; document.getElementById('rcCode').value = '';
+  document.getElementById('rcOut').classList.add('d-none'); document.getElementById('rcOut').textContent = '';
+  document.getElementById('rcGo').classList.remove('d-none');
+  say('rcMsg', '');
+  rcModal().show();
+  setTimeout(() => document.getElementById('rcPw').focus(), 300);
+}}
+document.getElementById('btnDisable').addEventListener('click', () =>
+  openRc('/api/totp/disable', 'Изключване на втория фактор', 'Входът ще е само с парола. Потвърдете с паролата и текущия код.'));
+document.getElementById('btnRecovery').addEventListener('click', () =>
+  openRc('/api/totp/recovery', 'Нови кодове за възстановяване', 'Старите кодове спират да важат. Потвърдете с паролата и текущия код.'));
+document.getElementById('rcGo').addEventListener('click', async () => {{
+  say('rcMsg', '');
+  const [r, j] = await api(rcAction, {{password: document.getElementById('rcPw').value, code: document.getElementById('rcCode').value}});
+  if (!r.ok) {{ say('rcMsg', j.error || 'Грешка', 'danger'); return; }}
+  if (j.recovery_codes) {{
+    document.getElementById('rcOut').textContent = j.recovery_codes.join('\\n');
+    document.getElementById('rcOut').classList.remove('d-none');
+    document.getElementById('rcGo').classList.add('d-none');
+    say('rcMsg', 'Показват се веднъж — запишете ги.', 'warning');
+  }} else {{
+    rcModal().hide();
+  }}
+  loadStatus();
+}});
+
+// ── password ──
+document.getElementById('pwForm').addEventListener('submit', async (e) => {{
+  e.preventDefault();
+  const d = Object.fromEntries(new FormData(e.target));
+  if (d.new !== d.new2) {{ say('pwMsg', 'Паролите не съвпадат', 'danger'); return; }}
+  const [r, j] = await api('/api/password', {{current: d.current, new: d.new, code: d.code}});
+  if (r.ok) {{ say('pwMsg', 'Паролата е сменена. Затворени сесии: ' + (j.sessions_revoked || 0), 'success'); e.target.reset(); loadSessions(); }}
+  else say('pwMsg', j.error || 'Грешка', 'danger');
+}});
+
+// ── sessions ──
+async function loadSessions() {{
+  const j = await fetch(PATH + '/api/sessions', {{credentials:'include'}}).then(r => r.json());
+  let rows = '';
+  for (const s of (j.sessions || [])) {{
+    rows += `<tr class="${{s.current ? 'table-success' : ''}}">
+      <td>${{s.current ? '<span class="badge bg-success">тази</span>' : ''}}</td>
+      <td><code>${{esc(s.ip)}}</code></td>
+      <td class="small text-muted text-truncate" style="max-width:320px" title="${{esc(s.ua)}}">${{esc(s.ua)}}</td>
+      <td class="small">${{esc(s.created)}}</td><td class="small">${{esc(s.expires)}}</td></tr>`;
+  }}
+  document.getElementById('sessList').innerHTML =
+    `<div class="table-responsive"><table class="table table-sm align-middle mb-0"><thead class="small text-muted"><tr><th></th><th>IP</th><th>Браузър</th><th>Създадена</th><th>Изтича</th></tr></thead><tbody>${{rows}}</tbody></table></div>`;
+}}
+document.getElementById('btnRevoke').addEventListener('click', async () => {{
+  if (!confirm('Затвори всички други сесии на профила?')) return;
+  const [r, j] = await api('/api/sessions/revoke-others', {{}});
+  if (r.ok) loadSessions(); else alert(j.error || 'Грешка');
+}});
+
+loadStatus(); loadSessions();
+{"document.getElementById('btnEnroll').click();" if must_enroll else ""}
+</script>
+"""
+    return _apply_sec_headers(HTMLResponse(_html_shell("MCP Admin · Сигурност", body)))
+
+
+async def _api_totp_status(req: Request):
+    sess, err = _api_session(req)
+    if err: return err
+    return _apply_sec_headers(JSONResponse(_totp_public(sess["login"])))
+
+
+async def _api_totp_enroll(req: Request):
+    sess, err = _api_session(req, csrf=True)
+    if err: return err
+    ip, ua = _req_meta(req)
+    data = await _json_body(req)
+    if not _password_ok(sess["login"], data.get("password") or ""):
+        _audit(sess["login"], "totp_enroll_denied", "", ip, ua)
+        return JSONResponse({"error": "Грешна парола"}, status_code=403)
+    out = _totp_begin_enroll(sess["login"])
+    if "error" in out:
+        return JSONResponse({"error": out["error"]}, status_code=400)
+    _audit(sess["login"], "totp_enroll_begin", "", ip, ua)
+    return _apply_sec_headers(JSONResponse(out))
+
+
+async def _api_totp_confirm(req: Request):
+    sess, err = _api_session(req, csrf=True)
+    if err: return err
+    ip, ua = _req_meta(req)
+    data = await _json_body(req)
+    out = _totp_confirm_enroll(sess["login"], data.get("code") or "")
+    if "error" in out:
+        _audit(sess["login"], "totp_enroll_confirm_fail", "", ip, ua)
+        return JSONResponse({"error": out["error"]}, status_code=400)
+    _audit(sess["login"], "totp_enroll", "", ip, ua)
+    return _apply_sec_headers(JSONResponse(out))
+
+
+async def _rechallenge(req: Request, sess: dict, data: dict) -> Response | None:
+    """Парола + текущ код — за изключване и за нови кодове. None = минава."""
+    ip, ua = _req_meta(req)
+    if not _password_ok(sess["login"], data.get("password") or ""):
+        _audit(sess["login"], "totp_rechallenge_denied", "", ip, ua, {"reason": "password"})
+        return JSONResponse({"error": "Грешна парола"}, status_code=403)
+    if not _totp_enrolled(sess["login"]):
+        return JSONResponse({"error": "Вторият фактор не е включен"}, status_code=400)
+    res = _totp_check(sess["login"], data.get("code") or "")
+    if not res.get("ok"):
+        _audit(sess["login"], "totp_rechallenge_denied", "", ip, ua, {"reason": res.get("reason")})
+        return JSONResponse({"error": "Грешен код" if res.get("reason") != "locked"
+                             else "Твърде много грешни кодове. Изчакайте няколко минути."}, status_code=401)
+    return None
+
+
+async def _api_totp_disable(req: Request):
+    sess, err = _api_session(req, csrf=True)
+    if err: return err
+    ip, ua = _req_meta(req)
+    au = _load_user_auth(sess["login"]) or {}
+    if _totp_policy_applies(au):
+        return JSONResponse({"error": "Политиката на сървъра изисква втори фактор за този профил."}, status_code=403)
+    data = await _json_body(req)
+    denied = await _rechallenge(req, sess, data)
+    if denied: return denied
+    _totp_remove(sess["login"])
+    _audit(sess["login"], "totp_disable", "", ip, ua)
+    return _apply_sec_headers(JSONResponse({"ok": True}))
+
+
+async def _api_totp_recovery(req: Request):
+    sess, err = _api_session(req, csrf=True)
+    if err: return err
+    ip, ua = _req_meta(req)
+    data = await _json_body(req)
+    denied = await _rechallenge(req, sess, data)
+    if denied: return denied
+    codes = _recovery_new(sess["login"])
+    _audit(sess["login"], "recovery_codes_regenerated", "", ip, ua)
+    return _apply_sec_headers(JSONResponse({"ok": True, "recovery_codes": codes}))
+
+
+async def _api_password(req: Request):
+    sess, err = _api_session(req, csrf=True)
+    if err: return err
+    ip, ua = _req_meta(req)
+    data = await _json_body(req)
+    login = sess["login"]
+    current = data.get("current") or ""
+    new = (data.get("new") or "").strip()
+    if not _password_ok(login, current):
+        _audit(login, "password_change_denied", "", ip, ua, {"reason": "password"})
+        return JSONResponse({"error": "Грешна текуща парола"}, status_code=403)
+    if len(new) < 12:
+        return JSONResponse({"error": "Новата парола трябва да е минимум 12 символа"}, status_code=400)
+    if new == current:
+        return JSONResponse({"error": "Новата парола съвпада с текущата"}, status_code=400)
+    if _totp_enrolled(login):
+        res = _totp_check(login, data.get("code") or "")
+        if not res.get("ok"):
+            _audit(login, "password_change_denied", "", ip, ua, {"reason": res.get("reason")})
+            return JSONResponse({"error": "Грешен код от приложението"}, status_code=401)
+    au = _load_user_auth(login)
+    if not au:
+        return JSONResponse({"error": "User not found"}, status_code=404)
+    au["password_hash"] = _hash_password(new)
+    au["password_updated_at"] = _now()
+    _save_user_auth(login, au)
+    revoked = _delete_other_sessions(login, sess["sid"])
+    _audit(login, "password_change", "", ip, ua, {"sessions_revoked": revoked})
+    return _apply_sec_headers(JSONResponse({"ok": True, "sessions_revoked": revoked}))
+
+
+async def _api_sessions(req: Request):
+    sess, err = _api_session(req)
+    if err: return err
+    out = []
+    for s in _list_sessions(sess["login"]):
+        out.append({
+            "current": s["sid"] == sess["sid"],
+            "ip": s.get("ip") or "", "ua": s.get("ua") or "",
+            "admin": bool(s.get("is_admin")),
+            "created": datetime.fromtimestamp(s["created_at"]).strftime("%Y-%m-%d %H:%M"),
+            "expires": datetime.fromtimestamp(s["expires_at"]).strftime("%Y-%m-%d %H:%M"),
+        })
+    return _apply_sec_headers(JSONResponse({"sessions": out}))
+
+
+async def _api_sessions_revoke_others(req: Request):
+    sess, err = _api_session(req, csrf=True)
+    if err: return err
+    ip, ua = _req_meta(req)
+    n = _delete_other_sessions(sess["login"], sess["sid"])
+    _audit(sess["login"], "sessions_revoke_others", "", ip, ua, {"revoked": n})
+    return _apply_sec_headers(JSONResponse({"ok": True, "revoked": n}))
+
+
+async def _api_user_totp_reset(req: Request):
+    """Админът нулира втория фактор на потребител (загубен телефон, без кодове
+    за възстановяване). Сесиите на потребителя не се пипат."""
+    sess, err = _api_session(req, csrf=True, admin=True)
+    if err: return err
+    ip, ua = _req_meta(req)
+    target = _sanitize_login(req.path_params.get("login", ""))
+    if not _load_user_auth(target):
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    if not _totp_enrolled(target) and not (_totp_load(target) or {}).get("pending_secret_enc"):
+        return JSONResponse({"error": "Потребителят няма включен втори фактор"}, status_code=400)
+    _totp_remove(target)
+    _audit(sess["login"], "user_totp_reset", target, ip, ua)
+    return _apply_sec_headers(JSONResponse({"ok": True}))
+
+
 async def _handle_logout(req: Request):
     gate = _gate(req)
     if gate: return gate
@@ -2005,6 +2990,52 @@ async def _handle_robots(req: Request):
     return PlainTextResponse("User-agent: *\nDisallow: /\n")
 
 
+# ─── Политика над всички маршрути (3.3.8) ────────────────────
+_POLICY_EXEMPT = {
+    "", "/", "/login", "/totp", "/setup", "/logout", "/robots.txt", "/security",
+    "/api/login/mcp", "/api/login/odoo", "/api/login/totp", "/api/setup-password",
+    "/api/csrf", "/api/password", "/api/sessions", "/api/sessions/revoke-others",
+}
+
+
+def _policy_exempt(path: str) -> bool:
+    rel = path[len(ADMIN_PATH_PREFIX):] if ADMIN_PATH_PREFIX and path.startswith(ADMIN_PATH_PREFIX) else path
+    return rel in _POLICY_EXEMPT or rel.startswith("/api/totp/")
+
+
+class _PolicyMiddleware:
+    """Един гард за ВСИЧКИ маршрути под префикса, включително разширенията
+    (backups, filestore), които admin_ui не вижда при писане:
+    - сесия с незавършен setup не стига до API-тата и страниците — дотогава
+      редeem-нат API key даваше достъп до връзките преди изобщо да има парола;
+    - при MCP_ADMIN_REQUIRE_TOTP профил в обхвата без записан фактор вижда само
+      „Сигурност“, докато не го запише."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            req = Request(scope)
+            path = req.url.path
+            if not _policy_exempt(path):
+                sess = _read_session(req)
+                if sess:
+                    au = _load_user_auth(sess["login"]) or {}
+                    is_api = path.startswith(f"{ADMIN_PATH_PREFIX}/api/")
+                    resp = None
+                    if au.get("setup_pending"):
+                        resp = (JSONResponse({"error": "setup_required", "next": f"{ADMIN_PATH_PREFIX}/setup"}, status_code=403)
+                                if is_api else RedirectResponse(f"{ADMIN_PATH_PREFIX}/setup", status_code=302))
+                    elif _enrollment_required(sess["login"], au):
+                        resp = (JSONResponse({"error": "totp_enrollment_required", "next": f"{ADMIN_PATH_PREFIX}/security"}, status_code=403)
+                                if is_api else RedirectResponse(f"{ADMIN_PATH_PREFIX}/security?enroll=1", status_code=302))
+                    if resp is not None:
+                        await _apply_sec_headers(resp)(scope, receive, send)
+                        return
+        await self.app(scope, receive, send)
+
+
 # ─── Route registration ──────────────────────────────────────
 def get_asgi_app():
     """Return a Starlette sub-app with all admin routes, or None if disabled."""
@@ -2012,7 +3043,7 @@ def get_asgi_app():
     if not routes:
         return None
     from starlette.applications import Starlette
-    return Starlette(routes=routes)
+    return _PolicyMiddleware(Starlette(routes=routes))
 
 
 def path_matches(path: str) -> bool:
@@ -2032,30 +3063,54 @@ def get_routes() -> list:
     if not _ITSDANGEROUS_AVAILABLE:
         _logger.error("itsdangerous missing — admin UI will not be registered")
         return []
+    if SESSION_SECRET == _INSECURE_SECRET:
+        # 3.3.8: дотук конзолата се качваше с публичен подпис на бисквитката —
+        # всеки, който знае низа, си подписва сесия. Fail-closed.
+        _logger.error("MCP_SECRET_TOKEN / MCP_ADMIN_SESSION_SECRET not set — "
+                      "admin UI will not be registered (session cookies would be signed with a public default)")
+        return []
     if not BOOTSTRAP_ADMIN:
         _logger.warning("MCP_BOOTSTRAP_ADMIN not set — no user will be auto-promoted to admin")
+    if REQUIRE_TOTP and REQUIRE_TOTP not in ("admins", "all"):
+        _logger.error("MCP_ADMIN_REQUIRE_TOTP=%r is not 'admins' or 'all' — policy ignored", REQUIRE_TOTP)
+    if REQUIRE_TOTP in ("admins", "all") and not _totp_pepper_ok():
+        _logger.error("MCP_ADMIN_REQUIRE_TOTP=%s but MCP_KEY_PEPPER is unset/weak — users in scope "
+                      "cannot enrol and will be held on /security until the pepper is set", REQUIRE_TOTP)
     p = ADMIN_PATH_PREFIX
-    _logger.info("Admin UI mounted at %s (admin: %s, knock: %s)",
-                 p, BOOTSTRAP_ADMIN or "(none)", "enabled" if KNOCK_TOKEN else "disabled")
+    _logger.info("Admin UI mounted at %s (admin: %s, knock: %s, require_totp: %s)",
+                 p, BOOTSTRAP_ADMIN or "(none)", "enabled" if KNOCK_TOKEN else "disabled",
+                 REQUIRE_TOTP or "off")
     return [
         Route(f"{p}", _handle_root),
         Route(f"{p}/", _handle_root),
         Route(f"{p}/login", _handle_login_page),
+        Route(f"{p}/totp", _handle_totp_page),
         Route(f"{p}/setup", _handle_setup_page),
         Route(f"{p}/dashboard", _handle_dashboard),
         Route(f"{p}/connections", _handle_connections_page),
+        Route(f"{p}/security", _handle_security_page),
         Route(f"{p}/users", _handle_users_page),
         Route(f"{p}/logout", _handle_logout),
         Route(f"{p}/robots.txt", _handle_robots),
         Route(f"{p}/api/login/mcp", _api_login_mcp, methods=["POST"]),
         Route(f"{p}/api/login/odoo", _api_login_odoo, methods=["POST"]),
+        Route(f"{p}/api/login/totp", _api_login_totp, methods=["POST"]),
         Route(f"{p}/api/setup-password", _api_setup_password, methods=["POST"]),
         Route(f"{p}/api/csrf", _api_csrf, methods=["GET"]),
+        Route(f"{p}/api/totp/status", _api_totp_status, methods=["GET"]),
+        Route(f"{p}/api/totp/enroll", _api_totp_enroll, methods=["POST"]),
+        Route(f"{p}/api/totp/confirm", _api_totp_confirm, methods=["POST"]),
+        Route(f"{p}/api/totp/disable", _api_totp_disable, methods=["POST"]),
+        Route(f"{p}/api/totp/recovery", _api_totp_recovery, methods=["POST"]),
+        Route(f"{p}/api/password", _api_password, methods=["POST"]),
+        Route(f"{p}/api/sessions", _api_sessions, methods=["GET"]),
+        Route(f"{p}/api/sessions/revoke-others", _api_sessions_revoke_others, methods=["POST"]),
         Route(f"{p}/api/connections", _api_connections, methods=["GET","POST"]),
         Route(f"{p}/api/connections/import", _api_connections_import, methods=["POST"]),
         Route(f"{p}/api/connections/{{alias}}", _api_connection_crud, methods=["GET","PUT","DELETE"]),
         Route(f"{p}/api/users", _api_users, methods=["GET","POST"]),
         Route(f"{p}/api/users/{{login}}/genkey", _api_user_genkey, methods=["POST"]),
+        Route(f"{p}/api/users/{{login}}/totp-reset", _api_user_totp_reset, methods=["POST"]),
     ] + _extension_routes()
 
 

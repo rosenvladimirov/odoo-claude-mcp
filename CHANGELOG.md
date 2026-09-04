@@ -7,6 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.8] — 2026-09-04 — the admin console gets a second factor, and the revision it forced
+
+Decisions and the alternatives they beat are in ADR-0001…0004 under
+`specs/mcp-admin-totp/adr/`.
+
+### Added — TOTP for the admin console (`admin_ui.py`, `totp_core.py`)
+- A user enrols from the new **Security** page (`/admin/security`): password
+  re-challenge → QR / secret → confirming code → eight one-time recovery codes.
+  The secret becomes active only once a code from the phone has proven it
+  arrived — an unscanned QR cannot lock anyone out.
+- Every path that issues a session now goes through one door (`_finish_login`):
+  MCP password, Odoo re-authentication (the "forgot password" route) and
+  one-time API-key redemption. With a factor enrolled the password alone
+  yields a 5-minute pre-auth cookie and `/admin/totp`; the intent's side
+  effects (setup flag, burning the key, the `default` connection autosave)
+  wait for the code. Without that gate the Odoo password by itself would have
+  reset the MCP password and walked around TOTP.
+- Storage is the same file and encryption as MCP name-identify (3.3.0):
+  `/data/users/<login>/totp.json`, Fernet off `MCP_KEY_PEPPER`. The RFC 6238
+  maths moved into `totp_core.py`; `server.py` delegates to it with
+  byte-for-byte identical output, so already-enrolled MCP secrets keep
+  working. Recovery codes are stored as HMACs off the same pepper. The
+  console's user directory keeps `@` in the name while the MCP principal
+  drops it, so an e-mail login and a principal are separate profiles.
+- Replay guard per step, lockout after 5 wrong codes (300 s); failed codes
+  also count toward the login lockout.
+- `MCP_ADMIN_REQUIRE_TOTP=admins|all` — users in scope without a factor are
+  held on the Security page (pages redirect, APIs answer 403
+  `totp_enrollment_required`) until they enrol; disabling is refused. Off by
+  default. Enforced by a middleware over **all** routes under the prefix,
+  including the backup and filestore extensions.
+- Users page: 2FA column; an admin can reset a user's factor (lost phone, no
+  recovery codes). Recovery for the last admin is server-side: delete
+  `/data/users/<login>/totp.json` on the volume.
+- New audit events (`admin_audit.log`): `login_totp_pending`, `totp_fail`,
+  `totp_enroll_begin`, `totp_enroll`, `totp_disable`, `recovery_code_used`,
+  `recovery_codes_regenerated`, `user_totp_reset`, `password_change`,
+  `sessions_revoke_others`; `login_ok` now carries `second_factor`. Never the
+  secret or a code.
+
+### Fixed — admin console revision
+- One-time API keys claimed "valid 7 days" but `api_key_expires` was written
+  and never read — they were valid forever. Refused after expiry now (the
+  failed attempt does not burn the key; the admin issues a new one).
+- A session obtained by redeeming a key could already use `/api/connections`
+  before any password was set. `setup_pending` sessions now reach only the
+  setup page and its API (403 `setup_required` elsewhere).
+- The console mounted with the built-in placeholder session secret when
+  neither `MCP_SECRET_TOKEN` nor `MCP_ADMIN_SESSION_SECRET` was set — anyone
+  who read the source could sign a session cookie. It now refuses to register
+  its routes and logs why.
+- `DATA_DIR` was hard-coded to `/data` while `server.py` honours the env var;
+  the two could write to different roots. Same env var now.
+- Login lockout counted only per IP: behind a shared NAT/proxy one attacker
+  locked everybody, while rotating addresses locked nobody. The per-account
+  lockout is checked alongside.
+- Connection URL / DB / alias were injected into the dashboard and the
+  connections page unescaped (self-XSS via an imported `connections.json`).
+  Escaped on both sides.
+- "Change password" was an `alert()` stub. Real change now (current password,
+  plus the code when enrolled) that revokes the other sessions; active sessions
+  are listed on the Security page with "close the others".
+- `datetime.utcnow()` deprecation in the audit writer.
+
+### Changed
+- `Dockerfile` copies `totp_core.py`. No new dependencies — `cryptography`,
+  `segno`, `itsdangerous` and `argon2-cffi` were already required.
+- 21 new tests: `tests/test_admin_ui_totp.py` (20) drives the console through
+  Starlette's TestClient on a frozen clock; `tests/test_totp.py` pins the
+  server helpers to `totp_core`.
+
+### Found, not changed
+- `_client_ip` trusts `X-Forwarded-For` unconditionally. Behind cloudflared
+  that is the only source, but a caller reaching port 8084 directly can spoof
+  it to dodge the IP lockout / allowlist. Needs a trusted-proxy list.
+- `admin_backup` / `admin_filestore` accept `MCP_ADMIN_TOKEN` in place of the
+  password for the destructive re-challenge, compared with `==`.
+- `_validate_odoo` disables TLS verification (the documented TOFU gap).
+- `is_admin` is frozen in the session at login for up to 7 days.
+
+
 ## [3.3.7] — 2026-08-16 — the server's landing page carries the right owner
 
 Cosmetic only; no behaviour, API or auth change. The landing page served on `/`
