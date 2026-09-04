@@ -12,7 +12,7 @@ _Connect Claude, Claude Code, and any MCP-compatible client to Odoo, GitHub, fil
 [![Odoo](https://img.shields.io/badge/Odoo-15%20→%2019-714B67)](https://www.odoo.com)
 [![MCP](https://img.shields.io/badge/MCP-Protocol-black)](https://modelcontextprotocol.io)
 [![Docker](https://img.shields.io/badge/Docker-Compose%20%7C%20K3s-2496ED)](https://www.docker.com)
-[![Made by BL Consulting](https://img.shields.io/badge/Made%20by-BL%20Consulting-714B67)](https://bl-consulting.net)
+[![Made by Terraros Commerce](https://img.shields.io/badge/Made%20by-Terraros%20Commerce-714B67)](https://github.com/rosenvladimirov)
 
 [Quick Start](#-quick-start) · [Why this vs alternatives?](#-why-this-vs-alternatives) · [Use Cases](#-use-cases) · [Architecture](#-architecture) · [MCP Servers](#-mcp-servers) · [Companion Modules](#-companion-odoo-modules--theme) · [Deployment](#%EF%B8%8F-deployment)
 
@@ -317,7 +317,7 @@ major series has a dedicated branch).
 
 ### `l10n_bg_ai_billing` — SaaS billing module (OPL-1, paid)
 
-Odoo module for hosting providers and BL Consulting tier management.
+Odoo module for hosting providers and tier management.
 Tracks per-user MCP usage, calculates bills, provisions Portainer
 stacks per tenant, ships licensed memory packs.
 
@@ -355,7 +355,7 @@ family (`/admin/memory/*`) added in `odoo-rpc-mcp` 2.8.0.
 
 Editorial **"paper" theme** purpose-built for the MCP Works landing
 site and any Odoo website that wants a clean, content-first
-presentation. Used in production at [mcpworks.net](https://mcpworks.net).
+presentation.
 
 **Repo:**
 [`rosenvladimirov/odoo-mcp-theme`](https://github.com/rosenvladimirov/odoo-mcp-theme)
@@ -639,7 +639,6 @@ own clients at scale.
 - [x] **Billing module** — `l10n_bg_ai_billing` 19.0.1.3.0 shipped (4 tiers, millicents precision, Portainer auto-provisioning)
 - [x] **Invoice AI integration** — `l10n_bg_ai_pipeline` + `l10n_bg_ai_invoice_glue` shipped (98.5% conf EAD OCR, Odoo 18+19, end-to-end tokenize)
 - [x] **Self-service tenant provisioning** — v3 `/provision` endpoint LIVE on `mcp.odoo-shell.space` (Apr 2026)
-- [ ] **Try-shop trial demo** — `try.mcpworks.net` with Stripe checkout for paid trial stacks (in progress, Q2 2026)
 - [ ] **Multi-tenant admin dashboard** — admin UI for managing hosted MCP instances
 - [ ] **Skills marketplace** — publish and subscribe to pre-built Odoo workflows (`ai.skill` records + memory packs)
 - [ ] **Audit log UI** — searchable web UI for MCP tool call history
@@ -688,7 +687,7 @@ If this project helps you, please consider [starring the repo](https://github.co
 
 ## 👤 Maintainer
 
-**Rosen Vladimirov** — Partner, [BL Consulting](https://bl-consulting.net)
+**Rosen Vladimirov** — Terraros Commerce Ltd.
 Odoo Silver Partner · OCA `l10n-bulgaria` maintainer · 10+ years of Odoo specialization
 
 📧 Email: vladimirov.rosen@gmail.com
