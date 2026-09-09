@@ -83,6 +83,19 @@ _FEATURE_PREFIXES: dict[str, tuple] = {
     "totp":      ("identify_totp_", "identify_verify_totp"),
 }
 
+def _sql_lit(value) -> str:
+    """SQL string literal in SINGLE quotes, for embedding in generated ir.actions.server code.
+
+    Never use json.dumps() for this: it emits DOUBLE quotes, and the generated code wraps
+    every statement in env.cr.execute("..."), so a double-quoted value closes that string
+    early. A date then becomes a bare Python literal and raises
+    "leading zeros in decimal integer literals are not permitted" — before anything runs.
+    """
+    if value is None:
+        return "NULL"
+    return "'" + str(value).replace("'", "''") + "'"
+
+
 def _tool_disabled(tool_name: str) -> bool:
     """Return True if this tool belongs to a disabled feature group."""
     for feature, prefixes in _FEATURE_PREFIXES.items():
@@ -9114,7 +9127,7 @@ def _execute_tool(name: str, args: dict) -> Any:
             f"(product_id, location_id, quantity, reserved_quantity, company_id, in_date, "
             f"create_uid, write_uid, create_date, write_date) "
             f"VALUES ({product_id}, {location_id}, {quantity}, 0, {company_id}, "
-            f"{json.dumps(in_date_sql)}, {uid}, {uid}, NOW(), NOW()) RETURNING id\"); "
+            f"{_sql_lit(in_date_sql)}, {uid}, {uid}, NOW(), NOW()) RETURNING id\"); "
             f"new_quant_id = env.cr.fetchone()[0]; "
             f"env['product.template'].browse({tmpl_id}).invalidate_recordset(); "
             f"env['product.product'].browse({product_id}).invalidate_recordset(); "
@@ -10022,8 +10035,8 @@ def _execute_tool(name: str, args: dict) -> Any:
             return {"error": "Could not resolve ir.model id for stock.move"}
 
         uid = conn.uid if hasattr(conn, "uid") else 1
-        date_lit = json.dumps(utc_sql)
-        ref_lit = json.dumps(ref_label)
+        date_lit = _sql_lit(utc_sql)
+        ref_lit = _sql_lit(ref_label)
 
         stmts = []
         # Remove any zero-qty stock_quant rows to avoid UNIQUE clashes on re-insert.
