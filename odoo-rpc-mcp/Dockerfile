@@ -6,8 +6,8 @@ LABEL description="Odoo RPC MCP Server (XML-RPC/JSON-RPC)"
 # Tag convention (Docker Hub / registry):
 #   :latest  → :stable  → last 2.x build  (production across all tiers)
 #   :2.x.y   → semver of end-user track (maintained on branch 2.0)
-#              Current: 2.19.0 — AI OCR gap-closure set (P0+P1+P2+P3 Trust
-#              Foundation, Budget, RAG, BG validators, reviewer dashboard)
+#              Current: 2.31.0 — per-session connections, telegram_agent
+#              per principal, security audit fixes
 #   :next    → last 3.x build (integrator platform — preview, not production)
 #   :3.x.y   → semver of integrator track (maintained on branch 3.0)
 # Branch 2.0 is the default repo branch and source of :latest/:stable.

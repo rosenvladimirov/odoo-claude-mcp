@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Odoo · Claude · MCP — Production-grade MCP server suite</title>
+<title>Odoo · Claude · MCP — Production-grade MCP server suite for Odoo 19</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -96,7 +96,7 @@ const TWEAKS = /*EDITMODE-BEGIN*/{
   .nav-cta{display:flex;gap:10px;align-items:center}
   @media(max-width:820px){.navlinks{display:none}}
 
-  .btn{display:inline-flex;align-items:center;gap:8px;padding:9px 14px;border:1px solid var(--rule-strong);border-radius:999px;background:transparent;color:var(--ink);font:500 12.5px/1 "Geist";letter-spacing:.01em;cursor:pointer;transition:.15s}
+  .btn{display:inline-flex;align-items:center;gap:8px;padding:9px 14px;border:1px solid var(--rule-strong);border-radius:999px;background:transparent;color:var(--ink);font:500 12.5px/1 "Geist";letter-spacing:.01em;cursor:pointer;text-decoration:none;transition:.15s}
   .btn:hover{background:var(--ink);color:var(--paper);border-color:var(--ink)}
   .btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
   .btn.primary:hover{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
@@ -351,18 +351,20 @@ const TWEAKS = /*EDITMODE-BEGIN*/{
 <!-- Ticker -->
 <div class="ticker">
   <div class="ticker-inner mono">
-    <span><b>v2.10.0</b> · shipped 2026-04-19</span>
+    <span><b>v2.31.0</b> · shipped 2026-09-04</span>
+    <span><b>v3.3.8</b> · preview track</span>
     <span><b>197+</b> MCP tools</span>
-    <span>Odoo 15 → 19</span>
+    <span><b>Odoo 19</b> · back to 15</span>
     <span><b>AGPL-3</b> · self-hosted</span>
     <span><b>9</b> MCP servers</span>
     <span>Production-grade</span>
     <span><b>Claude.ai</b> connector ready</span>
     <span>l10n_bg native</span>
     <span>Qdrant · Ollama</span>
-    <span><b>v2.10.0</b> · shipped 2026-04-19</span>
+    <span><b>v2.31.0</b> · shipped 2026-09-04</span>
+    <span><b>v3.3.8</b> · preview track</span>
     <span><b>197+</b> MCP tools</span>
-    <span>Odoo 15 → 19</span>
+    <span><b>Odoo 19</b> · back to 15</span>
     <span><b>AGPL-3</b> · self-hosted</span>
     <span><b>9</b> MCP servers</span>
     <span>Production-grade</span>
@@ -389,7 +391,7 @@ const TWEAKS = /*EDITMODE-BEGIN*/{
     </div>
     <div class="nav-cta">
       <button class="btn" onclick="document.getElementById('watch').scrollIntoView({behavior:'smooth'})">Watch demo</button>
-      <button class="btn primary"><span class="dot"></span> GitHub</button>
+      <a class="btn primary" href="https://github.com/rosenvladimirov/odoo-claude-mcp" target="_blank" rel="noopener"><span class="dot"></span> GitHub</a>
     </div>
   </nav>
 
@@ -398,23 +400,23 @@ const TWEAKS = /*EDITMODE-BEGIN*/{
     <div class="hero-meta mono">
       <span>Production-grade</span>
       <span>MCP server suite</span>
-      <span>v2.10.0</span>
+      <span>v2.31.0 · preview 3.3.8</span>
       <span>Sofia · БГ</span>
     </div>
     <h1>
       Turn your Odoo<br>
       into a <em>Claude</em><br>
       native citizen.
-      <span class="sub">A self-hosted Model Context Protocol server suite that connects Claude, Claude Code, and any MCP-compatible client to Odoo ERP, GitHub, filesystems, Kubernetes, Microsoft Teams, and a browser-based terminal — all through a unified, authenticated gateway.</span>
+      <span class="sub">A self-hosted Model Context Protocol server suite that connects Claude, Claude Code, and any MCP-compatible client to Odoo ERP — 19 first, and every series back to 15 — GitHub, filesystems, Kubernetes, Microsoft Teams, and a browser-based terminal — all through a unified, authenticated gateway.</span>
     </h1>
 
     <div class="hero-grid">
       <div>
         <p class="hero-para">Single-purpose MCP wrappers don't scale. This one is built for <b>real production</b>: token-based auth across all endpoints, one identity / all servers, per-user profile isolation, and multi-tenant switching between dozens of Odoo databases on the fly.</p>
         <div class="hero-cta">
-          <button class="btn primary"><span class="dot"></span> Clone the stack</button>
-          <button class="btn">Read the spec →</button>
-          <button class="btn">197+ tools ref</button>
+          <a class="btn primary" href="https://github.com/rosenvladimirov/odoo-claude-mcp" target="_blank" rel="noopener"><span class="dot"></span> Clone the stack</a>
+          <a class="btn" href="https://github.com/rosenvladimirov/odoo-claude-mcp/blob/2.0/README.md" target="_blank" rel="noopener">Read the spec →</a>
+          <a class="btn" href="#tools">197+ tools ref</a>
         </div>
       </div>
 
@@ -442,7 +444,7 @@ const TWEAKS = /*EDITMODE-BEGIN*/{
     <div class="kpis">
       <div class="kpi"><div class="n">9<sup>★</sup></div><div class="l">MCP servers</div></div>
       <div class="kpi"><div class="n">197<sup>+</sup></div><div class="l">MCP tools</div></div>
-      <div class="kpi"><div class="n">15→19</div><div class="l">Odoo versions</div></div>
+      <div class="kpi"><div class="n">19</div><div class="l">Odoo · back to 15</div></div>
       <div class="kpi"><div class="n">AGPL-3</div><div class="l">Open source</div></div>
     </div>
   </header>
@@ -507,7 +509,7 @@ const TWEAKS = /*EDITMODE-BEGIN*/{
     <a class="video-card" href="https://www.youtube.com/watch?v=_byxP646vSE" target="_blank" rel="noopener" style="background-image:url(https://i.ytimg.com/vi/_byxP646vSE/hqdefault.jpg);background-size:cover;background-position:center;text-decoration:none">
       <span class="label mono" style="background:var(--paper);padding:4px 8px;border-radius:4px">FEATURED · YOUTUBE</span>
       <div class="play"><div class="btn-play"><div class="tri"></div></div></div>
-      <div class="caption" style="background:linear-gradient(transparent,oklch(0 0 0 / .6));color:#fff;padding:18px"><span>@DavidRosen8424-Gaming</span><span>▶ Watch</span></div>
+      <div class="caption" style="background:linear-gradient(transparent,oklch(0 0 0 / .6));color:#fff;padding:18px"><span>Part 1 · End-to-end MCP session</span><span>▶ Watch</span></div>
     </a>
     <div>
       <p class="mono" style="font-size:11px;letter-spacing:.1em;color:var(--accent);margin-bottom:14px">FEATURED DEMO</p>
@@ -517,7 +519,7 @@ const TWEAKS = /*EDITMODE-BEGIN*/{
         <a class="link mono" style="font-size:12.5px" href="https://www.youtube.com/watch?v=_byxP646vSE" target="_blank" rel="noopener">▶ Part 1 · End-to-end MCP session</a>
         <a class="link mono" style="font-size:12.5px" href="https://www.youtube.com/watch?v=2sOAN3kbw9I" target="_blank" rel="noopener">▶ Part 2 · Extended walkthrough</a>
       </div>
-      <a class="btn" href="https://www.youtube.com/@DavidRosen8424-Gaming" target="_blank" rel="noopener">Subscribe to channel →</a>
+      <a class="btn" href="https://www.youtube.com/channel/UCpSQZAKiz_tT_G_WjGqnS8Q" target="_blank" rel="noopener">Subscribe to channel →</a>
     </div>
   </div>
 </section>
@@ -564,7 +566,7 @@ const TWEAKS = /*EDITMODE-BEGIN*/{
       <div class="arch-node flagship"><span class="n">claude-terminal</span><span class="t">Browser shell</span></div>
     </div>
     <div class="arch-connectors">
-      <div class="arch-conn">Odoo 15 · 16 · 17 · 18 · 19</div>
+      <div class="arch-conn">Odoo 19 · 18 · 17 · 16 · 15</div>
       <div class="arch-conn">Qdrant · vector DB</div>
       <div class="arch-conn">Ollama · local LLMs</div>
       <div class="arch-conn">Postgres · state · memory</div>
@@ -577,36 +579,40 @@ const TWEAKS = /*EDITMODE-BEGIN*/{
 <div class="shell">
 <section class="block" id="whats-new">
   <div class="eyebrow mono"><span class="num">04</span><span>What's new</span><span class="line"></span></div>
-  <h2 class="display">Released 2026-04-19.<br><em>2.10.0</em> ships multi-language<br>and snippet mutation.</h2>
+  <h2 class="display">Released 2026-09-04.<br><em>2.31.0</em> binds a connection<br>to its own session.</h2>
 
   <div class="changelog">
     <div class="meta">
-      <b>2.10.0</b>
-      Nine new tools<br>
-      Multi-language content<br>
-      Website snippet mutation<br><br>
-      For marketing teams that translate blog posts and swap banners without leaving Claude.
+      <b>2.31.0</b>
+      Stable track · branch 2.0<br>
+      First tag since 2.10.0<br>
+      202 tests green<br><br>
+      Everything below had been running on client stacks since June; this is the tag that names it.<br><br>
+      <b>3.3.8</b>
+      Preview track · branch 3.0<br>
+      A second factor on the console<br><br>
+      <a class="link" href="https://github.com/rosenvladimirov/odoo-claude-mcp/releases" target="_blank" rel="noopener">All releases →</a>
     </div>
     <div class="items">
       <div class="ci">
-        <div class="k">NEW · tool</div>
-        <h4>odoo_translate_field</h4>
-        <p>Simple <span class="mono" style="background:var(--chip);padding:1px 5px;border-radius:3px;font-size:11.5px">translate=True</span> field writer — blog.post.name / subtitle / teaser, product.name, partner.name.</p>
+        <div class="k">2.31.0 · session model</div>
+        <h4>Per-session connections</h4>
+        <p>The active Odoo connection belongs to the MCP session, not to the process. Two connected Claudes never overwrite each other’s connection — <span class="mono" style="background:var(--chip);padding:1px 5px;border-radius:3px;font-size:11.5px">odoo_connect</span>, <span class="mono" style="background:var(--chip);padding:1px 5px;border-radius:3px;font-size:11.5px">identify</span> and connection activation each write into their own slot.</p>
       </div>
       <div class="ci">
-        <div class="k">NEW · tool</div>
-        <h4>odoo_translate_html</h4>
-        <p>HTML/XML translate — blog.post.content, product.website_description, ir.ui.view.arch_db. Three modes: extract / terms / replace.</p>
+        <div class="k">2.31.0 · per principal</div>
+        <h4>telegram_agent enrolment</h4>
+        <p>Enrolments live next to the principal’s own data, like Telegram subscriptions. A principal without a file imports the old global one once on first read; writes never go back to it.</p>
       </div>
       <div class="ci">
-        <div class="k">NEW · tool</div>
-        <h4>odoo_website_add_snippet</h4>
-        <p>Insert Odoo snippets (CTA cards, banners, content blocks) into blog posts and pages with xpath substitutions.</p>
+        <div class="k">2.31.0 · hardened</div>
+        <h4>Security audit fixes</h4>
+        <p>Header debug logging off by default and redacted when on. <span class="mono" style="background:var(--chip);padding:1px 5px;border-radius:3px;font-size:11.5px">/api/user/connections</span> requires ownership proof and returns no keys. The OAuth flow never hands out the master token. Plus Telegram file transfer, confined to the download root.</p>
       </div>
       <div class="ci">
-        <div class="k">NEW · tool</div>
-        <h4>odoo_website_update_snippet</h4>
-        <p>Swap banner backgrounds, change titles, edit CTAs — all via xpath + CSS-property substitutions.</p>
+        <div class="k">3.3.8 · preview track</div>
+        <h4>TOTP on the admin console</h4>
+        <p>Enrol from the Security page: password re-challenge → QR → confirming code → eight recovery codes. Every path that issues a session goes through one door, so an unscanned QR cannot lock anyone out. Preceded by 3.3.6, which put PKCE S256 and an authenticated <span class="mono" style="background:var(--chip);padding:1px 5px;border-radius:3px;font-size:11.5px">/metrics</span> on the OAuth surface.</p>
       </div>
     </div>
   </div>
@@ -624,8 +630,8 @@ const TWEAKS = /*EDITMODE-BEGIN*/{
     <div class="track stable">
       <span class="tag mono">Production stable</span>
       <h3>Track <em>2.x</em><br>End Users</h3>
-      <div class="branch-meta">branch 2.0 · docker :latest · :stable · :2.x.y</div>
-      <p class="for">Odoo end-users, accountants, Bulgarian SMEs, developers working with a single Odoo stack, content teams managing website and blog content.</p>
+      <div class="branch-meta">branch 2.0 · v2.31.0 · docker :2.x.y</div>
+      <p class="for">Odoo 19 end-users, accountants, Bulgarian SMEs, developers working with a single Odoo stack, content teams managing website and blog content. Every series back to 15 is supported.</p>
       <ul>
         <li>All 197+ MCP tools for day-to-day Odoo work</li>
         <li>Multi-language field management (auto-ZWSP)</li>
@@ -638,7 +644,7 @@ const TWEAKS = /*EDITMODE-BEGIN*/{
     <div class="track preview">
       <span class="tag mono">Preview · 3.x in development</span>
       <h3>Track <em>3.x</em><br>Integrators</h3>
-      <div class="branch-meta">branch 3.0 · docker :next · :3.x.y</div>
+      <div class="branch-meta">branch 3.0 · v3.3.8 · docker :3.x.y</div>
       <p class="for">Odoo implementation partners, OCA community contributors, SaaS MSPs running multiple client instances, integrator agencies deploying AI workflows.</p>
       <ul>
         <li>Admin lifecycle (install / upgrade / health-check)</li>
@@ -690,7 +696,7 @@ const TWEAKS = /*EDITMODE-BEGIN*/{
         </div>
         <span class="lic paid mono">OPL-1 · PAID</span>
       </div>
-      <p class="caption">Enterprise billing module for hosting providers and reseller tier management. Tracks per-user MCP usage, calculates bills, provisions Portainer stacks per tenant.</p>
+      <p class="caption">Enterprise billing module for hosting providers and tier management. Tracks per-user MCP usage, calculates bills, provisions Portainer stacks per tenant.</p>
       <ul>
         <li>8 models: bundle / tenant / usage / invoice / skills</li>
         <li>Bundle pricing €49–599, millicents precision</li>
@@ -1030,7 +1036,7 @@ $ <span class="g">kubectl apply</span> -k .
       <div style="display:flex;gap:10px;flex-wrap:wrap">
         <a class="btn" href="mailto:vladimirov.rosen@gmail.com">vladimirov.rosen@gmail.com</a>
         <a class="btn" href="https://github.com/rosenvladimirov">@rosenvladimirov</a>
-        <a class="btn" href="https://www.youtube.com/@DavidRosen8424-Gaming">YouTube</a>
+        <a class="btn" href="https://www.youtube.com/channel/UCpSQZAKiz_tT_G_WjGqnS8Q">YouTube</a>
         <a class="btn" href="https://github.com/rosenvladimirov">github.com/rosenvladimirov</a>
       </div>
     </div>
@@ -1045,39 +1051,39 @@ $ <span class="g">kubectl apply</span> -k .
     <div>
       <div class="brand mono" style="margin-bottom:14px"><span class="mark"></span><span>odoo<span class="slash">/</span>claude<span class="slash">/</span><span class="accent">mcp</span></span></div>
       <p style="font-size:13px;line-height:1.55;color:var(--ink-2);max-width:36ch">Production-grade MCP server suite for Odoo ERP. Self-hosted, multi-tenant, Claude.ai connector ready.</p>
-      <p style="font-size:12px;color:var(--ink-3);margin-top:20px" class="mono">🇧🇬 Made in Bulgaria · AGPL-3.0 · © 2026</p>
+      <p style="font-size:12px;color:var(--ink-3);margin-top:20px" class="mono">🇧🇬 Made in Bulgaria · AGPL-3.0 · © 2026 Terraros Commerce Ltd.</p>
     </div>
     <div>
       <h5>Project</h5>
       <ul>
-        <li><a href="#">GitHub</a></li>
-        <li><a href="#">YouTube demos</a></li>
-        <li><a href="#">Changelog</a></li>
-        <li><a href="#">README (BG)</a></li>
-        <li><a href="#">Issues</a></li>
+        <li><a href="https://github.com/rosenvladimirov/odoo-claude-mcp" target="_blank" rel="noopener">GitHub</a></li>
+        <li><a href="https://www.youtube.com/channel/UCpSQZAKiz_tT_G_WjGqnS8Q" target="_blank" rel="noopener">YouTube demos</a></li>
+        <li><a href="https://github.com/rosenvladimirov/odoo-claude-mcp/blob/2.0/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a></li>
+        <li><a href="https://github.com/rosenvladimirov/odoo-claude-mcp/blob/2.0/README_BG.md" target="_blank" rel="noopener">README (BG)</a></li>
+        <li><a href="https://github.com/rosenvladimirov/odoo-claude-mcp/issues" target="_blank" rel="noopener">Issues</a></li>
       </ul>
     </div>
     <div>
       <h5>Ecosystem</h5>
       <ul>
-        <li><a href="#">Odoo</a></li>
-        <li><a href="#">OCA</a></li>
-        <li><a href="#">l10n-bulgaria</a></li>
-        <li><a href="#">MCP Protocol</a></li>
+        <li><a href="https://www.odoo.com" target="_blank" rel="noopener">Odoo</a></li>
+        <li><a href="https://github.com/OCA" target="_blank" rel="noopener">OCA</a></li>
+        <li><a href="https://github.com/OCA/l10n-bulgaria" target="_blank" rel="noopener">l10n-bulgaria</a></li>
+        <li><a href="https://modelcontextprotocol.io" target="_blank" rel="noopener">MCP Protocol</a></li>
       </ul>
     </div>
     <div>
       <h5>Powered by</h5>
       <ul>
-        <li><a href="#">Anthropic · Claude</a></li>
-        <li><a href="#">Qdrant</a></li>
-        <li><a href="#">Ollama</a></li>
-        <li><a href="#">xterm.js</a></li>
+        <li><a href="https://www.anthropic.com/claude" target="_blank" rel="noopener">Anthropic · Claude</a></li>
+        <li><a href="https://qdrant.tech" target="_blank" rel="noopener">Qdrant</a></li>
+        <li><a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a></li>
+        <li><a href="https://xtermjs.org" target="_blank" rel="noopener">xterm.js</a></li>
       </ul>
     </div>
   </div>
   <div class="foot-bot">
-    <span>odoo-claude-mcp · v2.10.0 · released 2026-04-19</span>
+    <span>odoo-claude-mcp · v2.31.0 · released 2026-09-04</span>
     <span>Sofia 42.698°N · 23.319°E</span>
   </div>
 </footer>

@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.31.0] — 2026-09-04 — the connection belongs to the session, not to the process
+
+Stable track. First tagged release since 2.10.0; everything here had been
+running on client stacks since June, and this is the tag that names it.
+
+### Changed — per-session connections
+
+- The active Odoo connection is bound to the MCP session, not to the process.
+  Two connected Claudes never share or overwrite each other's connection:
+  `odoo_connect`, `identify` and `user_connection_activate` write into the
+  session's own slot. A reconnecting client gets a fresh session and
+  re-identifies — clean by design.
+- Backward compatible: a single connected Claude and `SINGLE_CONNECTION=true`
+  are unaffected, and an explicit `connection=` still overrides.
+
+### Changed — `telegram_agent` is per principal
+
+Enrolments live next to the principal's other data, like Telegram
+subscriptions. On first read a principal without its own file imports the old
+global `telegram_agent/enroll.json` once; writes never go back to it. Because
+that file was global, every principal inherits its content on first read —
+delete it by hand once you have checked who should keep what.
+
+### Tests
+
+202 tests green in a clean venv.
+
 ## [2.30.6] — 2026-08-16 — the server's landing page carries the right owner
 
 Cosmetic only; no behaviour, API or auth change. Backport of 3.3.7.
