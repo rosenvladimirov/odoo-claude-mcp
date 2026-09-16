@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.3.8"
+__version__ = "3.3.9"
 
 import asyncio
 import hmac
@@ -598,6 +598,98 @@ def _oauth_consume_code(code: str, redirect_uri: str | None,
         logger.warning("[OAuth] PKCE verification failed for a redeemed code")
         return False
     return True
+
+
+# ── OAuth refresh tokens (3.3.9) ────────────────────────────────────────────
+# Until 3.3.9 the 24h access token WAS the session: once it expired the client
+# had to walk the whole authorize flow again — every day (mcp.ussmed.com: 401 +
+# /oauth/register + /oauth/token on 11.09, 12.09, 13.09 and three times on
+# 15.09). A pod restart did the same, because issued tokens only ever lived in
+# memory. A refresh token closes both: single-use, rotated on every exchange,
+# and only its sha256 reaches the disk, so a restart no longer logs anyone out
+# while no usable credential is stored at rest.
+_oauth_refresh: dict[str, float] = {}
+_oauth_refresh_lock = _threading_mod.Lock()
+
+
+def _oauth_refresh_ttl() -> int:
+    """Refresh token lifetime in seconds (default 90 days)."""
+    try:
+        return max(60, int(os.environ.get("MCP_OAUTH_REFRESH_TTL", str(90 * 86400))))
+    except (TypeError, ValueError):
+        return 90 * 86400
+
+
+def _oauth_refresh_store_path() -> str:
+    """Where the hashes live; /data is the pod's only persistent mount."""
+    return os.environ.get("MCP_OAUTH_REFRESH_STORE", "/data/oauth_refresh.json")
+
+
+def _oauth_refresh_hash(token: str) -> str:
+    """Only this ever touches the disk — the token itself stays with the client."""
+    import hashlib as _hl
+    return _hl.sha256((token or "").encode("utf-8")).hexdigest()
+
+
+def _oauth_refresh_load() -> dict:
+    """Persisted {sha256: expires_at}, expired entries dropped.
+
+    A missing or unreadable file is not an error: the server then behaves as it
+    did before 3.3.9 — refresh works until the process restarts.
+    """
+    now = _time_mod.time()
+    try:
+        with open(_oauth_refresh_store_path(), encoding="utf-8") as fh:
+            data = json.load(fh)
+        return {str(k): float(v) for k, v in data.items() if float(v) > now}
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:  # corrupt file must not take the OAuth flow down
+        logger.warning("[OAuth] refresh store unreadable (%s) — memory only", exc)
+        return {}
+
+
+def _oauth_refresh_save(store: dict) -> None:
+    """Atomic 0600 write; a failure degrades to memory-only, never to an error."""
+    path = _oauth_refresh_store_path()
+    tmp = f"{path}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(store, fh)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception as exc:
+        logger.warning("[OAuth] refresh store not written (%s) — memory only", exc)
+
+
+def _oauth_refresh_issue() -> str:
+    """Mint a refresh token; memory and disk keep only its hash."""
+    token = _secrets_mod.token_urlsafe(32)
+    with _oauth_refresh_lock:
+        now = _time_mod.time()
+        store = _oauth_refresh_load()
+        store.update({k: v for k, v in _oauth_refresh.items() if v > now})
+        store[_oauth_refresh_hash(token)] = now + _oauth_refresh_ttl()
+        _oauth_refresh.clear()
+        _oauth_refresh.update(store)
+        _oauth_refresh_save(store)
+    return token
+
+
+def _oauth_refresh_consume(token: str) -> bool:
+    """Single-use redemption: True iff known and unexpired. Burns it either way."""
+    if not token:
+        return False
+    digest = _oauth_refresh_hash(token)
+    with _oauth_refresh_lock:
+        now = _time_mod.time()
+        store = _oauth_refresh_load()
+        store.update({k: v for k, v in _oauth_refresh.items() if v > now})
+        expires_at = store.pop(digest, None)
+        _oauth_refresh.clear()
+        _oauth_refresh.update(store)
+        _oauth_refresh_save(store)
+    return expires_at is not None and float(expires_at) >= now
 
 
 _SECRET_CONN_KEYS = ("api_key", "password", "token", "secret", "api_token",
@@ -11652,9 +11744,12 @@ def create_app():
                 "response_types_supported": ["code"],
                 # 3.3.6: advertise only what the server actually accepts, so
                 # clients negotiate correctly instead of failing at /token.
-                "grant_types_supported": (["authorization_code", "client_credentials"]
-                                          if _oauth_client_credentials_allowed()
-                                          else ["authorization_code"]),
+                # 3.3.9: refresh_token is advertised so the client renews silently
+                # instead of re-running the authorize flow every 24 hours.
+                "grant_types_supported": (
+                    ["authorization_code", "refresh_token", "client_credentials"]
+                    if _oauth_client_credentials_allowed()
+                    else ["authorization_code", "refresh_token"]),
                 "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
                 "code_challenge_methods_supported": ["S256"],
             })
@@ -11724,8 +11819,29 @@ def create_app():
                             "access_token": _oauth_mint(_oauth_tokens, _OAUTH_TOKEN_TTL),
                             "token_type": "Bearer",
                             "expires_in": _OAUTH_TOKEN_TTL,
+                            # 3.3.9: hand out a renewal key too, otherwise the 24h
+                            # access token is the whole session.
+                            "refresh_token": _oauth_refresh_issue(),
                         })
                     else:
+                        response = JSONResponse(
+                            {"error": "invalid_grant"}, status_code=400)
+                elif grant_type == "refresh_token":
+                    # The refresh token IS the credential here: single-use and
+                    # rotated on every exchange. The client registry is deliberately
+                    # not consulted — it lives in memory and is empty exactly after a
+                    # restart, which is when refresh has to work.
+                    supplied = params.get("refresh_token", [None])[0]
+                    if supplied and _oauth_refresh_consume(supplied):
+                        response = JSONResponse({
+                            "access_token": _oauth_mint(_oauth_tokens, _OAUTH_TOKEN_TTL),
+                            "token_type": "Bearer",
+                            "expires_in": _OAUTH_TOKEN_TTL,
+                            "refresh_token": _oauth_refresh_issue(),
+                        })
+                    else:
+                        logger.warning(
+                            "[OAuth] refresh_token refused (unknown, expired or reused)")
                         response = JSONResponse(
                             {"error": "invalid_grant"}, status_code=400)
                 else:
@@ -11806,9 +11922,10 @@ def create_app():
                     "client_secret": new_secret,
                     "client_name": body.get("client_name", "mcp-client"),
                     "redirect_uris": body.get("redirect_uris", []),
-                    "grant_types": (["authorization_code", "client_credentials"]
-                                    if _oauth_client_credentials_allowed()
-                                    else ["authorization_code"]),
+                    "grant_types": (
+                        ["authorization_code", "refresh_token", "client_credentials"]
+                        if _oauth_client_credentials_allowed()
+                        else ["authorization_code", "refresh_token"]),
                     "response_types": ["code"],
                     "token_endpoint_auth_method": "client_secret_post",
                 }, status_code=201)
