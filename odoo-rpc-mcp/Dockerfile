@@ -60,6 +60,7 @@ COPY --chmod=644 session_handoff.py .
 COPY --chmod=644 tenant_migrate.py .
 COPY --chmod=644 tg_listen_helper.py .
 COPY --chmod=644 timesheet_engine.py .
+COPY --chmod=644 timesheet_timer.py .
 COPY --chmod=644 client_stack.template.yml .
 COPY --chmod=755 migrate_legacy_keys.py .
 

@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.3.9"
+__version__ = "3.3.10"
 
 import asyncio
 import hmac
@@ -6117,6 +6117,50 @@ TOOLS = [
             },
         },
     ),
+    Tool(
+        name="odoo_timesheet_timer",
+        description=(
+            "Drive Odoo's native timesheet timer (Enterprise timesheet_grid, Odoo 17-19) — the same "
+            "timer shown in the Odoo web and mobile app. action='start' starts a timer on a new "
+            "timesheet line for task_id (or project_id); action='status' lists your running/paused "
+            "timers with elapsed and rounded time; action='stop' PROPOSES the rounded hours "
+            "(company rounding settings) and writes only with confirm=true; action='cancel' discards "
+            "a timer without logging time (confirm=true). Starting while another timer runs needs "
+            "confirm=true, because Odoo then stops (and logs) or pauses the running one."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection": {"type": "string", "default": "default"},
+                "action": {
+                    "type": "string",
+                    "enum": ["start", "status", "stop", "cancel"],
+                },
+                "task_id": {
+                    "type": "integer",
+                    "description": "project.task ID. start: the task to work on; stop/cancel: pick the timer of this task.",
+                },
+                "project_id": {
+                    "type": "integer",
+                    "description": "project.project ID for start without a task.",
+                },
+                "timesheet_id": {
+                    "type": "integer",
+                    "description": "stop/cancel: account.analytic.line ID carrying the timer (from status).",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Timesheet line description (start, or overwrite on stop).",
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "stop/cancel: actually write. start: allow interrupting a running timer.",
+                    "default": False,
+                },
+            },
+            "required": ["action"],
+        },
+    ),
 ]
 
 
@@ -7595,6 +7639,10 @@ def _execute_tool(name: str, args: dict) -> Any:
         if not args.get("dry_run", True) and proposals:
             result["created"] = _ts.create_entries(conn, emp_id, proposals)
         return result
+
+    elif name == "odoo_timesheet_timer":
+        import timesheet_timer as _tt
+        return _tt.run(conn, args.get("action", ""), args)
 
     elif name == "odoo_timesheet_weekly_report":
         import timesheet_engine as _ts

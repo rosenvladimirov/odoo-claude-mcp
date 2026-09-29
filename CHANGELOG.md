@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.10] — 2026-09-29 — the timesheet timer is Odoo's own
+
+Decision and rejected alternatives: `specs/mcp-timesheet-timer/adr/0001`.
+
+### Added — `odoo_timesheet_timer` (`timesheet_timer.py`)
+- One tool, `action` = `start` / `status` / `stop` / `cancel`, driving the native
+  Enterprise timer (`timer.timer`, `timesheet_grid`, Odoo 17–19). The MCP keeps no
+  timer state: a timer started here is the one Odoo's web and mobile clients show.
+- `start` creates a timesheet line for `task_id` (or `project_id`) and calls the
+  native `action_timer_start`. If a timer already runs it returns what Odoo would
+  stop or pause and asks for `confirm=true`.
+- `stop` proposes the hours rounded by the company settings, measured on the
+  server clock; it writes only with `confirm=true`. Odoo 18 task timers are closed
+  through the native `project.task.create.timesheet` wizard.
+- `cancel` discards a timer (and its empty line) without logging time, `confirm=true`.
+- Availability is detected by `timer_start` on `account.analytic.line`: Community
+  and Odoo 20 get a clear error, not a fallback.
+- Methods returning `None`/a recordset fail over XML-RPC *after* commit
+  ("cannot marshal"); only that fault is tolerated and the state is re-read.
+- `Dockerfile` copies `timesheet_timer.py`.
+
 ## [3.3.8] — 2026-09-04 — the admin console gets a second factor, and the revision it forced
 
 Decisions and the alternatives they beat are in ADR-0001…0004 under
