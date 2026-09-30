@@ -409,6 +409,69 @@ class TelegramServiceManager:
                            if saved and os.path.exists(saved) else 0),
         }
 
+    def create_group(self, title: str, members: list[str], bot_username: str = "",
+                     about: str = "") -> dict:
+        """Create a supergroup from the user's account, add the bot as admin and
+        the members, and export an invite link.
+
+        Bot API cannot create groups — only a user (MTProto) account can.
+        A supergroup (megagroup) is used because its id is stable for the bot
+        (``-100<id>``) and it has invite links and admin rights.
+
+        Members that cannot be added (privacy settings, unknown username) do
+        not fail the call: they are returned in ``failed`` and get the invite
+        link instead.
+        """
+        if not self.is_authenticated:
+            raise Exception("Not authenticated.")
+        from telethon.errors import RPCError
+        from telethon.tl.functions.channels import (
+            CreateChannelRequest, InviteToChannelRequest,
+        )
+        from telethon.tl.functions.messages import ExportChatInviteRequest
+
+        created = self._run(self._client(CreateChannelRequest(
+            title=title, about=about, megagroup=True)))
+        channel = created.chats[0]
+
+        bot_added = False
+        if bot_username:
+            bot = self._resolve_entity(bot_username)
+            self._run(self._client(InviteToChannelRequest(channel, [bot])))
+            # Ботът трябва да е админ, за да праща линкове и да управлява групата
+            self._run(self._client.edit_admin(
+                channel, bot, is_admin=True, invite_users=True,
+                delete_messages=True, ban_users=True, pin_messages=True,
+                title="bot",
+            ))
+            bot_added = True
+
+        added, failed = [], []
+        for member in members:
+            try:
+                entity = self._resolve_entity(member)
+                result = self._run(self._client(
+                    InviteToChannelRequest(channel, [entity])))
+            except (RPCError, ValueError) as exc:
+                failed.append({"member": member, "reason": type(exc).__name__})
+                continue
+            # telethon ≥ 1.36: забранилите покани идват в missing_invitees, без грешка
+            if getattr(result, "missing_invitees", None):
+                failed.append({"member": member, "reason": "privacy_restricted"})
+            else:
+                added.append(member)
+
+        link = self._run(self._client(ExportChatInviteRequest(channel))).link
+        return {
+            "status": "created",
+            "chat_id": f"-100{channel.id}",
+            "title": title,
+            "invite_link": link,
+            "bot_added": bot_added,
+            "added": added,
+            "failed": failed,
+        }
+
     def _resolve_entity(self, chat: str | int):
         """Resolve a chat by username, phone, or ID."""
         if isinstance(chat, int) or (isinstance(chat, str) and chat.lstrip("-").isdigit()):

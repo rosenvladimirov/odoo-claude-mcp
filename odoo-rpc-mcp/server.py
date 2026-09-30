@@ -5007,6 +5007,35 @@ TOOLS = [
         },
     ),
     Tool(
+        name="telegram_create_group",
+        description=(
+            "Create a Telegram supergroup FROM YOUR ACCOUNT (Bot API cannot create groups), "
+            "add a bot as admin and the members, and return the chat id (-100…) and an "
+            "invite link. Members whose privacy blocks adding are returned in 'failed' — send "
+            "them the link. With request_id it serves an Odoo consultation request "
+            "(l10n_bg_telegram_consult): title, bot and members come from the request, Odoo "
+            "refuses a request that is not approved BEFORE the group exists, and the group "
+            "is linked back so the bot sends the invitation to the client."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "request_id": {
+                    "type": "integer",
+                    "description": "l10n.bg.telegram.consult.request id (uses the active Odoo connection).",
+                },
+                "title": {"type": "string", "description": "Group title (overrides the request's)."},
+                "members": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "@usernames, +phones or ids to add (overrides the request's).",
+                },
+                "bot_username": {"type": "string", "description": "Bot to add as admin, e.g. OdooShellConsultBot."},
+                "about": {"type": "string", "description": "Group description.", "default": ""},
+                "connection": {"type": "string", "default": "default"},
+            },
+        },
+    ),
+    Tool(
         name="telegram_send_file",
         description=(
             "Send a file/document to a Telegram chat. The file must live under the "
@@ -11368,6 +11397,12 @@ def _execute_tool(name: str, args: dict) -> Any:
             chat=chat, message=args["message"],
             reply_to=args.get("reply_to", 0),
         )
+
+    elif name == "telegram_create_group":
+        import telegram_group as _tgg
+        # telegram_* минават без Odoo връзка; тя трябва само при заявка от Odoo
+        group_conn = _conn(args) if args.get("request_id") else None
+        return _tgg.run(_tg(), group_conn, args)
 
     elif name == "telegram_send_file":
         chat = args["chat"]

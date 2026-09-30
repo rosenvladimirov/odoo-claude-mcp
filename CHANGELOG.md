@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.11] — 2026-09-30 — Telegram groups from the human's account
+
+Decision: `specs/mcp-telegram-create-group/adr/0001`.
+
+### Added — `telegram_create_group` (`telegram_group.py`)
+- Creates a supergroup from the identified principal's Telegram account (Bot API cannot
+  create groups), adds a bot as admin and the members, exports an invite link and returns
+  the Bot API chat id (`-100…`). Members blocked by privacy are returned in `failed`
+  (error or `missing_invitees`) instead of failing the call.
+- `request_id` serves `l10n_bg_telegram_consult`: title, bot and members come from
+  `l10n_bg_consult_payload`; Odoo is asked first, so a request that is not approved fails
+  before any group exists; the group is linked back with `l10n_bg_set_group` and the bot
+  sends the invitation to the client.
+- `telegram_*` tools stay connection-free; the Odoo connection is resolved only for
+  `request_id`. `Dockerfile` copies `telegram_group.py`.
+
 ## [3.3.10] — 2026-09-29 — the timesheet timer is Odoo's own
 
 Decision and rejected alternatives: `specs/mcp-timesheet-timer/adr/0001`.
