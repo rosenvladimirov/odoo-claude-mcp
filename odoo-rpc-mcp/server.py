@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.3.11"
+__version__ = "3.3.12"
 
 import asyncio
 import hmac
@@ -6235,6 +6235,10 @@ async def list_tools() -> list[Tool]:
     base.extend(backup_manager.get_admin_tools())
     base.extend(health_monitor.get_admin_tools())
     base.extend(tenant_migrate.get_admin_tools())
+    # Агент (Клаудчо): само белият му списък — без елевация, сесии, инфраструктура
+    _agent_mode = tool_security.get_agent_mode(_principal)
+    if _agent_mode:
+        return tool_security.filter_tools_for_agent(base, _agent_mode)
     # v3 security: filter destructive tools for USER role (admin/legacy keep all).
     _role = tool_security.get_role(
         principal=_principal, admin_principals=_admin_principals())
@@ -6276,6 +6280,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         sc = await resolve_session_context()
         _ctx_token = _session_ctx.set(sc)
         try:
+            # ── Агент (Клаудчо): бял списък ПРЕДИ всички контролни инструменти —
+            # елевацията, сесиите и останалите не могат да го заобиколят ──
+            _agent_mode = tool_security.get_agent_mode(sc.principal)
+            if _agent_mode:
+                allowed, sec_info = tool_security.check_agent_call(name, arguments, _agent_mode)
+                if not allowed:
+                    try:
+                        import metrics
+                        metrics.observe_tool_call(name, "denied")
+                    except Exception:
+                        pass
+                    return [TextContent(type="text", text=json.dumps(
+                        {"error": "denied", **sec_info}, ensure_ascii=False, indent=2))]
             # ── v3 admin-principal-only tool groups (ADMIN PRINCIPAL ONLY) ──
             # SECURITY: provisioning (mints admin API keys), fleet management
             # (mutates live stacks), and secrets registry (rotates tokens) all
@@ -6401,10 +6418,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # ── v3 security gate (USER role: refuse destructive + protected unlink) ──
             _role = tool_security.get_role(
                 principal=sc.principal, admin_principals=_admin_principals())
-            allowed, sec_info = tool_security.check_call(
-                name, arguments, role=_role,
-                elevated=elevation.is_elevated(sc.session_key)
-            )
+            if _agent_mode:
+                # Агентът е минал check_agent_call; ролевата проверка би спряла собствените му методи
+                allowed, sec_info = True, {"agent_mode": _agent_mode}
+            else:
+                allowed, sec_info = tool_security.check_call(
+                    name, arguments, role=_role,
+                    elevated=elevation.is_elevated(sc.session_key)
+                )
             if not allowed:
                 try:
                     import metrics

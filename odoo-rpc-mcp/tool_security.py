@@ -426,3 +426,100 @@ def filter_tools_for_role(tools: list, role: str | None = None,
     if role in ("admin", "legacy") or elevated:
         return tools
     return [t for t in tools if not is_destructive(t.name)]
+
+
+# ─── Агенти (Клаудчо): принципали с фиксиран профил ───────────────────────
+# Агентът е продуктов потребител (наш бот или ключът на клиента), не човек:
+# бял списък вместо списък на забраненото, без елевация (mcp_elevate не е в
+# списъка), и `res.*` се чете, но не се пише. ADR telegram-consult-bot/0008, т. 5.
+#
+#   MCP_AGENT_PRINCIPALS="klaudcho-bot:read,client-acme:full"
+#
+# read — само четене + собствените методи на агента в Odoo (klaudcho.agent);
+# full — и запис/бизнес методи (платеният режим с ключа на клиента).
+
+AGENT_MODES: tuple = ("read", "full")
+
+AGENT_READ_TOOLS: set = {
+    "odoo_fields_get", "odoo_search", "odoo_read", "odoo_search_read",
+    "odoo_search_count", "odoo_read_group", "odoo_report",
+    "odoo_attachment_download", "odoo_list_models", "odoo_module_info",
+    "odoo_version", "who_am_i", "ai_usage_budget_status",
+}
+AGENT_WRITE_TOOLS: set = {
+    "odoo_create", "odoo_write", "odoo_unlink", "odoo_message_post",
+    "odoo_attachment_upload",
+}
+# Транспортът на агента (шина, Discuss) — методи на модула klaudcho_console/_discuss
+AGENT_OWN_METHODS: set = {
+    ("klaudcho.agent", m) for m in (
+        "klaudcho_push", "klaudcho_inbox_pull", "klaudcho_inbox_ack",
+        "klaudcho_post", "klaudcho_notify",
+    )
+}
+# Модели, които агентът чете, но не пише: партньори/потребители/фирми и
+# системните настройки, правата и ключовете (не са бизнес данни)
+AGENT_NO_WRITE_PREFIXES: tuple = ("res.", "ir.", "auth.", "base.", "fetchmail.")
+
+
+def agent_principals() -> dict:
+    """MCP_AGENT_PRINCIPALS → {принципал: режим}. Непознат режим = read (по-тесният)."""
+    out = {}
+    for part in os.environ.get("MCP_AGENT_PRINCIPALS", "").split(","):
+        name, _, mode = part.strip().partition(":")
+        if name:
+            out[name.strip()] = mode.strip().lower() if mode.strip().lower() in AGENT_MODES else "read"
+    return out
+
+
+def get_agent_mode(principal: str | None) -> str | None:
+    if not principal:
+        return None
+    return agent_principals().get(principal)
+
+
+def _agent_deny(reason: str, tool: str, mode: str, **extra) -> tuple[bool, dict]:
+    return False, {"reason": f"agent_{reason}", "tool": tool, "agent_mode": mode, **extra,
+                   "hint": "This principal is an agent with a fixed allowlist; it cannot elevate."}
+
+
+def check_agent_call(tool_name: str, arguments: dict | None, mode: str) -> tuple[bool, dict]:
+    """Проверката за агент — замества check_call за принципал от MCP_AGENT_PRINCIPALS."""
+    args = arguments or {}
+    model = (args.get("model") or args.get("res_model") or "").strip().lower()
+    if tool_name in AGENT_READ_TOOLS:
+        blocked, cmodel = is_protected_credential_read(tool_name, args)
+        if blocked:
+            return _agent_deny("credential_read", tool_name, mode, model=cmodel)
+        return True, {"agent_mode": mode}
+    if tool_name == "odoo_execute":
+        method = (args.get("method") or "").strip().lower()
+        if (model, method) in AGENT_OWN_METHODS:
+            return True, {"agent_mode": mode, "own_method": True}
+        if not method or method.startswith("_") or method in DANGEROUS_METHOD_EXACT:
+            return _agent_deny("dangerous_method", tool_name, mode, model=model, method=method)
+        if model == "res.config.settings" and method.startswith("execute"):
+            return _agent_deny("config_settings_execute", tool_name, mode, model=model, method=method)
+        if method in SAFE_EXECUTE_METHODS:
+            blocked, cmodel = is_protected_credential_read(tool_name, args)
+            if blocked:
+                return _agent_deny("credential_read", tool_name, mode, model=cmodel)
+            return True, {"agent_mode": mode}
+        if mode != "full":
+            return _agent_deny("read_only", tool_name, mode, model=model, method=method)
+        if model.startswith(AGENT_NO_WRITE_PREFIXES):
+            return _agent_deny("no_write_model", tool_name, mode, model=model, method=method)
+        return True, {"agent_mode": mode}
+    if tool_name in AGENT_WRITE_TOOLS:
+        if mode != "full":
+            return _agent_deny("read_only", tool_name, mode, model=model)
+        if model.startswith(AGENT_NO_WRITE_PREFIXES):
+            return _agent_deny("no_write_model", tool_name, mode, model=model)
+        return True, {"agent_mode": mode}
+    return _agent_deny("not_in_allowlist", tool_name, mode)
+
+
+def filter_tools_for_agent(tools: list, mode: str) -> list:
+    """Списъкът за агента — само белият му списък (без елевация, сесии, инфраструктура)."""
+    allowed = AGENT_READ_TOOLS | {"odoo_execute"} | (AGENT_WRITE_TOOLS if mode == "full" else set())
+    return [t for t in tools if t.name in allowed]

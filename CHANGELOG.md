@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.12] — 2026-10-01 — Agent principals (Klaudcho): fixed allowlist, no elevation
+
+Decision: ADR `telegram-consult-bot/0008` (claude.ai/specs), item 5.
+
+### Added — agent profile per principal (`tool_security.py`)
+- `MCP_AGENT_PRINCIPALS="klaudcho-bot:read,client-x:full"` marks principals as agents. An agent
+  gets an allowlist instead of the USER denylist, and cannot elevate (`mcp_elevate` is not in it).
+- `read`: data read tools + `odoo_execute` with read-only methods. `full`: also
+  `odoo_create/write/unlink/message_post/attachment_upload` and business methods through
+  `odoo_execute`. Both: the agent's own transport methods on `klaudcho.agent`
+  (`klaudcho_push`, `klaudcho_inbox_pull/ack`, `klaudcho_post`, `klaudcho_notify`).
+- Never for agents: writing `res.*` (partners, users, companies — read stays allowed) or the
+  system/credential models (`ir.*`, `auth.*`, `base.*`, `fetchmail.*`); reading shared credential
+  stores; SQL, shell, infrastructure, sessions, proxies; private and dangerous methods.
+- `server.py`: the agent gate runs right after the session is resolved — before the elevation,
+  session and other control tools, so none of them can bypass it; `list_tools` shows an agent
+  only its allowlist. Non-agent principals are unchanged.
+- Tests: `tests/test_agent_security.py` (15); 5 mutations, each caught.
+
 ## [3.3.11] — 2026-09-30 — Telegram groups from the human's account
 
 Decision: `specs/mcp-telegram-create-group/adr/0001`.
