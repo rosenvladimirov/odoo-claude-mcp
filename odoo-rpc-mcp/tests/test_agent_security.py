@@ -80,6 +80,14 @@ def test_full_mode_writes_business_data_but_not_res_or_system():
         assert not ok and info["reason"] == "agent_no_write_model", (tool, args)
 
 
+@pytest.mark.parametrize("mode", ["read", "full"])
+def test_agent_activates_only_its_own_connection(mode):
+    # Сървърът (user_connection_activate) активира само запазените връзки на принципала
+    assert allowed("user_connection_activate", {"alias": "odoo-shell-dev"}, mode)
+    for tool in ("user_connection_add", "user_connection_delete", "odoo_connect", "identify"):
+        assert not allowed(tool, {}, mode), tool
+
+
 def test_tool_list_for_agents():
     class T:
         def __init__(self, name):
@@ -87,6 +95,7 @@ def test_tool_list_for_agents():
     tools = [T(n) for n in ("odoo_search_read", "odoo_write", "odoo_execute", "odoo_sql_query",
                             "mcp_elevate", "ssh_execute", "who_am_i")]
     assert [t.name for t in ts.filter_tools_for_agent(tools, "read")] == ["odoo_search_read", "odoo_execute", "who_am_i"]
+    assert "user_connection_activate" in [t.name for t in ts.filter_tools_for_agent(tools + [T("user_connection_activate")], "read")]
     assert "odoo_write" in [t.name for t in ts.filter_tools_for_agent(tools, "full")]
 
 

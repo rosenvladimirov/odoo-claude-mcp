@@ -450,6 +450,9 @@ AGENT_WRITE_TOOLS: set = {
     "odoo_create", "odoo_write", "odoo_unlink", "odoo_message_post",
     "odoo_attachment_upload",
 }
+# Сесията на агента: при unified auth odoo-rpc закача принципала, но не активира връзка
+# към Odoo — агентът активира СОБСТВЕНАТА си запазена връзка (сървърът пуска само неговите)
+AGENT_SESSION_TOOLS: set = {"user_connection_activate"}
 # Транспортът на агента (шина, Discuss) — методи на модула klaudcho_console/_discuss
 AGENT_OWN_METHODS: set = {
     ("klaudcho.agent", m) for m in (
@@ -487,6 +490,8 @@ def check_agent_call(tool_name: str, arguments: dict | None, mode: str) -> tuple
     """Проверката за агент — замества check_call за принципал от MCP_AGENT_PRINCIPALS."""
     args = arguments or {}
     model = (args.get("model") or args.get("res_model") or "").strip().lower()
+    if tool_name in AGENT_SESSION_TOOLS:
+        return True, {"agent_mode": mode, "session_tool": True}
     if tool_name in AGENT_READ_TOOLS:
         blocked, cmodel = is_protected_credential_read(tool_name, args)
         if blocked:
@@ -521,5 +526,6 @@ def check_agent_call(tool_name: str, arguments: dict | None, mode: str) -> tuple
 
 def filter_tools_for_agent(tools: list, mode: str) -> list:
     """Списъкът за агента — само белият му списък (без елевация, сесии, инфраструктура)."""
-    allowed = AGENT_READ_TOOLS | {"odoo_execute"} | (AGENT_WRITE_TOOLS if mode == "full" else set())
+    allowed = (AGENT_READ_TOOLS | AGENT_SESSION_TOOLS | {"odoo_execute"}
+               | (AGENT_WRITE_TOOLS if mode == "full" else set()))
     return [t for t in tools if t.name in allowed]

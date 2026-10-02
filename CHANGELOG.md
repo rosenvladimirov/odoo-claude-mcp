@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.13] — 2026-10-02 — Agents activate their own connection
+
+### Fixed — agent sessions had no Odoo connection
+- With unified auth the session gets the principal but no active Odoo connection
+  (`_conn` → `MCP_NO_CONNECTION`); a client activates it with `user_connection_activate`.
+  That tool was not in the agent allowlist, so an agent could not reach Odoo at all.
+- `tool_security.AGENT_SESSION_TOOLS = {"user_connection_activate"}` — allowed in both agent
+  modes. The server activates only the principal's own saved connections. Found on the first
+  live run of the Klaudcho agent (www.odoo-shell.dev).
+
 ## [3.3.12] — 2026-10-01 — Agent principals (Klaudcho): fixed allowlist, no elevation
 
 Decision: ADR `telegram-consult-bot/0008` (claude.ai/specs), item 5.
