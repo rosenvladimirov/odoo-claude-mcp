@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import klaudcho_provisioner as kp  # noqa: E402
 
 ENV = {"IMAGE": "klaudcho-agent:0.8.3", "NETWORK": "terraros-v19_terraros-v19-net",
-       "KNOWLEDGE_DIR": "/opt/claude-knowledge/out", "ODOO_API_KEY": "bot-key", "ANTHROPIC_API_KEY": "sk-ant-x",
+       "KNOWLEDGE_DIR": "/opt/claude-knowledge/out", "AGENT_ODOO_API_KEY": "bot-key", "ANTHROPIC_API_KEY": "sk-ant-x",
        "START_TIMEOUT": "20"}
 
 
@@ -236,3 +236,20 @@ def test_dollar_is_unsafe_in_values():
     job["read_token"] = "abc${HOME}"
     with pytest.raises(ValueError, match="unsafe"):
         kp.render_stack(job, ENV)
+
+
+def test_the_agent_gets_the_bot_key_not_the_provisioner_key(monkeypatch):
+    monkeypatch.setenv("KLAUDCHO_PROV_ODOO_URL", "https://odoo.example")
+    monkeypatch.setenv("KLAUDCHO_PROV_ODOO_API_KEY", "provisioner-key")
+    monkeypatch.setenv("KLAUDCHO_PROV_AGENT_ODOO_API_KEY", "bot-key")
+    for k in ("IMAGE", "NETWORK", "KNOWLEDGE_DIR"):
+        monkeypatch.setenv(f"KLAUDCHO_PROV_{k}", ENV[k])
+
+    class Conn:
+        def __init__(self, **kw):
+            self.kw = kw
+
+    p = kp.build_from_env(Conn, lambda: None, engine=None)
+    assert p.odoo.kw["api_key"] == "provisioner-key"
+    compose = kp.render_stack(container_job(), p.env)
+    assert "KLAUDCHO_ODOO_API_KEY: bot-key" in compose and "provisioner-key" not in compose

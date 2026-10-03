@@ -34,8 +34,10 @@ logger = logging.getLogger("klaudcho_provisioner")
 
 TEMPLATE_FILE = Path(__file__).parent / "klaudcho_stack.template.yml"
 MODEL = "klaudcho.service"
+# AGENT_ODOO_API_KEY е ключът на БОТА на агентите (влиза в контейнера) — различен от
+# KLAUDCHO_PROV_ODOO_API_KEY, с който самият изпълнител говори с Odoo
 ENV_KEYS = (
-    "IMAGE", "NETWORK", "KNOWLEDGE_DIR", "ODOO_API_KEY", "ANTHROPIC_API_KEY",
+    "IMAGE", "NETWORK", "KNOWLEDGE_DIR", "AGENT_ODOO_API_KEY", "ANTHROPIC_API_KEY",
 )
 # Без API ключ агентът върви с фалшивия модел (fake_llm в agent.toml от Odoo) — ключът не е задължителен
 OPTIONAL_KEYS = {"ANTHROPIC_API_KEY"}
