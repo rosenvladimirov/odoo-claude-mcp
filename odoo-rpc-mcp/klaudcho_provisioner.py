@@ -24,6 +24,8 @@ import hmac
 import json
 import logging
 import os
+import re
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -35,6 +37,10 @@ MODEL = "klaudcho.service"
 ENV_KEYS = (
     "IMAGE", "NETWORK", "KNOWLEDGE_DIR", "ODOO_API_KEY", "ANTHROPIC_API_KEY",
 )
+# Без API ключ агентът върви с фалшивия модел (fake_llm в agent.toml от Odoo) — ключът не е задължителен
+OPTIONAL_KEYS = {"ANTHROPIC_API_KEY"}
+ALL_STEPS = ("telegram", "container", "teardown")
+SLUG_RE = re.compile(r"^klaudcho-[a-z0-9][a-z0-9-]{0,50}$")
 
 
 def render_stack(job: dict, env: dict) -> str:
@@ -46,13 +52,15 @@ def render_stack(job: dict, env: dict) -> str:
         "READ_TOKEN": job["read_token"],
         **{k: env.get(k, "") for k in ENV_KEYS},
     }
-    missing = sorted(k for k, v in values.items() if not v)
+    if not SLUG_RE.match(values["SLUG"]):
+        raise ValueError(f"refusing stack name {values['SLUG']!r}: only klaudcho-*")
+    missing = sorted(k for k, v in values.items() if not v and k not in OPTIONAL_KEYS)
     if missing:
         raise ValueError(f"missing values for the stack: {missing}")
     text = TEMPLATE_FILE.read_text(encoding="utf-8")
     for key, value in values.items():
         # Стойностите отиват в YAML; кавички и нов ред биха го счупили — токените ги нямат
-        if any(c in value for c in "\n\"'"):
+        if any(c in value for c in "\n\"'$"):
             raise ValueError(f"unsafe value for {key}")
         text = text.replace("${" + key + "}", value)
     if "${" in text:
@@ -90,7 +98,7 @@ class Provisioner:
     """Един цикъл: чакащите задачи от Odoo → външната стъпка → отчет."""
 
     def __init__(self, odoo, tg=None, portainer=None, journal: Journal | None = None,
-                 env: dict | None = None, live: bool = False, clock=time.sleep):
+                 env: dict | None = None, live: bool = False, clock=time.sleep, steps=ALL_STEPS):
         self.odoo = odoo                  # .execute_kw(model, method, args, kwargs)
         self.tg = tg                      # callable → TelegramServiceManager или None
         self.portainer = portainer        # обект с create_stack / delete_stack / container_running
@@ -99,11 +107,12 @@ class Provisioner:
         self.live = live
         self.sleep = clock
         self.last_run: dict = {}
+        self.steps = tuple(steps)          # кои стъпки взима ТОЗИ изпълнител
         self._lock = threading.Lock()      # нишката и ръчното пускане не вървят едновременно
 
     # -- Odoo -----------------------------------------------------------
     def _pending(self) -> list:
-        return self.odoo.execute_kw(MODEL, "klaudcho_provision_pending", [], {}) or []
+        return self.odoo.execute_kw(MODEL, "klaudcho_provision_pending", [], {"steps": list(self.steps)}) or []
 
     def _report(self, job: dict, ok: bool, data=None, error=None):
         return self.odoo.execute_kw(MODEL, "klaudcho_provision_report", [[job["service_id"]], job["step"], ok],
@@ -212,6 +221,90 @@ class Portainer:
         return bool(state.get("Running")) and not state.get("Restarting")
 
 
+class DockerRuntime:
+    """Временният изпълнител при Docker (до клъстера, ADR mcp-supervisor-remote/0003): docker compose локално.
+
+    Пипа само проекти klaudcho-*; името минава през SLUG_RE преди всяка команда.
+    """
+
+    def __init__(self, run=subprocess.run):
+        self.run = run
+
+    def _check(self, name):
+        if not SLUG_RE.match(name):
+            raise ValueError(f"refusing {name!r}: only klaudcho-*")
+
+    def create_stack(self, name, compose):
+        self._check(name)
+        r = self.run(["docker", "compose", "-p", name, "-f", "-", "up", "-d", "--remove-orphans"],
+                     input=compose, text=True, capture_output=True, timeout=600)
+        if r.returncode != 0:
+            return {"error": "compose_up_failed", "detail": (r.stderr or r.stdout)[-800:]}
+        return {"ok": True}
+
+    def delete_stack(self, name):
+        self._check(name)
+        # Без -v: томът с дневника на агента остава
+        r = self.run(["docker", "compose", "-p", name, "down"], text=True, capture_output=True, timeout=300)
+        if r.returncode != 0:
+            return {"error": "compose_down_failed", "detail": (r.stderr or r.stdout)[-800:]}
+        return {"ok": True}
+
+    def container_running(self, name) -> bool:
+        self._check(name)
+        r = self.run(["docker", "inspect", "-f", "{{.State.Running}} {{.State.Restarting}}", name],
+                     text=True, capture_output=True, timeout=30)
+        return r.returncode == 0 and r.stdout.split() == ["true", "false"]
+
+
+class XmlRpcOdoo:
+    """Самостоятелният изпълнител не внася server.py — прост XML-RPC клиент с API ключ."""
+
+    def __init__(self, url, db, login, api_key):
+        import xmlrpc.client
+        self.url, self.db, self.key = url.rstrip("/"), db, api_key
+        self._xc = xmlrpc.client
+        self.uid = xmlrpc.client.ServerProxy(f"{self.url}/xmlrpc/2/common").authenticate(db, login, api_key, {})
+        if not self.uid:
+            raise RuntimeError("Odoo authentication failed for the provisioner")
+
+    def execute_kw(self, model, method, args, kwargs):
+        proxy = self._xc.ServerProxy(f"{self.url}/xmlrpc/2/object", allow_none=True)
+        return proxy.execute_kw(self.db, self.uid, self.key, model, method, args, kwargs)
+
+
+def _env_steps(default=ALL_STEPS):
+    raw = os.environ.get("KLAUDCHO_PROV_STEPS", "")
+    steps = tuple(s.strip() for s in raw.split(",") if s.strip()) or default
+    bad = [s for s in steps if s not in ALL_STEPS]
+    if bad:
+        raise ValueError(f"unknown KLAUDCHO_PROV_STEPS: {bad}")
+    return steps
+
+
+def main() -> None:
+    """Самостоятелно: `python klaudcho_provisioner.py` — изпълнителят при Docker (container/teardown)."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    e = os.environ
+    odoo = XmlRpcOdoo(e["KLAUDCHO_PROV_ODOO_URL"], e["KLAUDCHO_PROV_ODOO_DB"],
+                      e["KLAUDCHO_PROV_ODOO_LOGIN"], e["KLAUDCHO_PROV_ODOO_API_KEY"])
+    env = {k: e.get(f"KLAUDCHO_PROV_{k}", "") for k in ENV_KEYS}
+    env["START_TIMEOUT"] = e.get("KLAUDCHO_PROV_START_TIMEOUT", "120")
+    p = Provisioner(odoo, portainer=DockerRuntime(),
+                    journal=Journal(e.get("KLAUDCHO_PROV_JOURNAL", "/data/klaudcho_provision.jsonl")),
+                    env=env, live=e.get("KLAUDCHO_PROV_LIVE", "0") == "1",
+                    steps=_env_steps(("container", "teardown")))
+    poll = int(e.get("KLAUDCHO_PROV_POLL", "20"))
+    logger.info("klaudcho docker provisioner: steps=%s live=%s poll=%ss", p.steps, p.live, poll)
+    while True:
+        try:
+            for r in p.run_once():
+                logger.info("job %s ok=%s state=%s %s", r["key"], r["ok"], r["state"], r.get("error", ""))
+        except Exception as ex:  # noqa: BLE001 — Odoo може да е паднал; пак след малко
+            logger.warning("cycle failed: %s", ex)
+        time.sleep(poll)
+
+
 # ----------------------------------------------------------------------
 # Връзка със server.py: нишката, будилникът, админ инструментът
 # ----------------------------------------------------------------------
@@ -238,7 +331,7 @@ def build_from_env(odoo_connection_cls, tg_getter, engine) -> Provisioner | None
     env["START_TIMEOUT"] = e.get("KLAUDCHO_PROV_START_TIMEOUT", "120")
     return Provisioner(odoo, tg=tg_getter, portainer=portainer,
                        journal=Journal(e.get("KLAUDCHO_PROV_JOURNAL", "/data/klaudcho_provision.jsonl")),
-                       env=env, live=e.get("KLAUDCHO_PROV_LIVE", "0") == "1")
+                       env=env, live=e.get("KLAUDCHO_PROV_LIVE", "0") == "1", steps=_env_steps())
 
 
 def start(provisioner: Provisioner, poll: int | None = None) -> None:
@@ -301,3 +394,7 @@ def handle(name: str, arguments: dict | None) -> dict:
     if (arguments or {}).get("run"):
         _instance.run_once()
     return {"enabled": True, "live": _instance.live, "last_run": _instance.last_run}
+
+
+if __name__ == "__main__":
+    main()

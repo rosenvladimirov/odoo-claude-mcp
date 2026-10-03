@@ -41,7 +41,8 @@ class FakeOdoo:
     def execute_kw(self, model, method, args, kwargs):
         assert model == "klaudcho.service"
         if method == "klaudcho_provision_pending":
-            return list(self.jobs)
+            self.asked_steps = kwargs.get("steps")
+            return [j for j in self.jobs if j["step"] in kwargs.get("steps", [j["step"]])]
         assert method == "klaudcho_provision_report"
         if self.lose_reports:
             self.lose_reports -= 1
@@ -142,9 +143,9 @@ def test_a_container_that_does_not_start_is_reported(tmp_path):
 
 def test_missing_settings_stop_before_portainer(tmp_path):
     p, odoo, _, port = make(tmp_path, [container_job()])
-    p.env["ANTHROPIC_API_KEY"] = ""
+    p.env["IMAGE"] = ""
     p.run_once()
-    assert port.created == [] and "ANTHROPIC_API_KEY" in odoo.reports[0][4]
+    assert port.created == [] and "IMAGE" in odoo.reports[0][4]
 
 
 def test_unsafe_values_do_not_reach_the_yaml():
@@ -182,3 +183,56 @@ def test_wake_needs_the_secret(monkeypatch, tmp_path):
 
     assert call("wrong") == 401 and not kp._wake.is_set()
     assert call("s3cret") == 200 and kp._wake.is_set()
+
+
+def test_without_an_api_key_the_agent_runs_on_the_fake_model(tmp_path):
+    p, odoo, _, port = make(tmp_path, [container_job()])
+    p.env["ANTHROPIC_API_KEY"] = ""
+    p.run_once()
+    assert port.created and odoo.reports[0][2] is True
+
+
+def test_a_provisioner_asks_only_for_its_steps(tmp_path):
+    p, odoo, tg, port = make(tmp_path, [tg_job(), container_job()])
+    p.steps = ("container", "teardown")
+    p.run_once()
+    assert odoo.asked_steps == ["container", "teardown"]
+    assert tg.calls == [] and len(port.created) == 1
+
+
+def test_only_klaudcho_stacks_are_touched():
+    job = dict(container_job(), slug="terraros-v19")
+    with pytest.raises(ValueError, match="only klaudcho"):
+        kp.render_stack(job, ENV)
+    rt = kp.DockerRuntime(run=lambda *a, **k: pytest.fail("docker must not be called"))
+    for call in (lambda: rt.delete_stack("terraros-v19-odoo"), lambda: rt.container_running("x; rm -rf /"),
+                 lambda: rt.create_stack("../klaudcho-x", "")):
+        with pytest.raises(ValueError):
+            call()
+
+
+def test_docker_runtime_commands():
+    calls = []
+
+    class R:
+        def __init__(self, rc=0, out=""):
+            self.returncode, self.stdout, self.stderr = rc, out, ""
+
+    def run(cmd, **kw):
+        calls.append((cmd, kw.get("input")))
+        return R(out="true false\n") if cmd[1] == "inspect" else R()
+
+    rt = kp.DockerRuntime(run=run)
+    assert rt.create_stack("klaudcho-s00002", "services: {}") == {"ok": True}
+    assert rt.container_running("klaudcho-s00002") is True
+    assert rt.delete_stack("klaudcho-s00002") == {"ok": True}
+    assert calls[0] == (["docker", "compose", "-p", "klaudcho-s00002", "-f", "-", "up", "-d", "--remove-orphans"],
+                        "services: {}")
+    assert calls[2][0] == ["docker", "compose", "-p", "klaudcho-s00002", "down"]      # без -v: томът остава
+
+
+def test_dollar_is_unsafe_in_values():
+    job = container_job()
+    job["read_token"] = "abc${HOME}"
+    with pytest.raises(ValueError, match="unsafe"):
+        kp.render_stack(job, ENV)
