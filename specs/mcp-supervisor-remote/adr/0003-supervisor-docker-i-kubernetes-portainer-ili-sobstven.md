@@ -1,6 +1,6 @@
 # ADR-0003: Супервайзорът управлява Docker и Kubernetes — през Portainer или собствен на Python
 
-- **Статус:** **предложен** (03.10.2026) — анализ по искане на Росен; чака решение
+- **Статус:** **приет** (Росен, 03.10.2026) — собствен енджин; виж „Решения на Росен“. Хибридът от предложението отпада.
 - **Свързани:**
   - ADR-0001 (транспорт през Portainer exec);
   - ADR-0002 (sidecar exec зад Cloudflare);
@@ -102,14 +102,36 @@ Runtime: apply(spec) · status(name) · logs(name) · exec(name, cmd) · delete(
 - при клиентите често имаме само Portainer;
 - Portainer е добър интерфейс за човека.
 
-## Отворени въпроси (за Росен)
+## Решения на Росен (03.10.2026)
 
-1. Хибридът ли, или чист собствен — с изискване всеки клиент да пусне агента?
-2. Kubernetes — само srv03 k3s, или и клиентски клъстери?
-3. Агентите на поръчките в Kubernetes или в Docker — къде трябва да живеят в бъдеще?
-4. Portainer BE — има ли лиценз или интерес? Тогава правата и одитът от Portainer стават реални.
-5. Нов образ `vladimirovrosen/supervisor-agent` с отделен ADR за договора „задача ↔ агент“?
+1. **Собствен агент, без Portainer в пътя на автоматиката.**
+   - Клиентът го качва сам, както качва агента на Portainer.
+   - `PortainerRuntime` отпада от плана.
+2. **Целта е клиентски Kubernetes клъстер.**
+   - Пилотен проект и нова виртуална машина.
+   - Докерите се реорганизират в Kubernetes по образеца на MEC и ussmed.
+   - Всеки клиент има **собствен namespace със staging и тестова среда, с отделни бази**.
+   - В Kubernetes се местят сървърът на Росен (odoo-dev-server) и poligroup и се добавят новите клиенти.
+   - Целта е максимална стабилност и изолация. Затова трябва **собствен енджин за управление, насочен към Odoo инсталации**, не общ инструмент.
+3. **Агентите на поръчките (Клаудчо) отиват в Kubernetes.**
+4. **Portainer BE не е нужен.** Portainer CE остава за човешки преглед на процесите в Kubernetes и Docker.
 
+## Следствия
+
+- Енджинът е **Odoo-ориентиран**. Обектите му не са „контейнер“ и „стек“, а:
+  - клиент → namespace;
+  - среда (prod / staging / test) → Odoo + база + filestore;
+  - модули (`supervisor.py`, addons.conf);
+  - бекъп и възстановяване;
+  - клониране на прод в staging;
+  - агент Клаудчо.
+- Основният драйвер е `KubernetesRuntime`. `DockerRuntime` е само за прехода, докато poligroup и odoo-dev-server се преместят.
+- Отделен ADR за договора „задача ↔ агент“ и за модела на клиента и средите (namespace, staging, test, отделни бази).
+
+## Отворени въпроси
+
+1. Къде е анализът за клъстера (какво е нужно)? — да се свърже тук.
+2. Агентите на поръчките до пилотния клъстер: временно в Docker на poligroup (`DockerRuntime`), или чакат клъстера?
 ## Източници
 
 - Portainer CE срещу BE (права, одит, Edge async): https://www.portainer.io/blog/portainer-community-edition-ce-vs-portainer-business-edition-be-which-should-you-install · https://docs.portainer.io/admin/user/roles · https://docs.portainer.io/2.27/admin/environments/add/kubernetes/edge-async
