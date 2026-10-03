@@ -1,6 +1,6 @@
 {
   "uid": "logs-hosts-vpn",
-  "title": "Логове — Odoo, машини и VPN",
+  "title": "Логове — машини и VPN",
   "tags": [
     "logs",
     "loki",
@@ -16,20 +16,12 @@
   "templating": {
     "list": [
       {
-        "name": "ds",
-        "label": "Източник",
-        "type": "datasource",
-        "query": "loki",
-        "current": {},
-        "hide": 0
-      },
-      {
         "name": "host",
         "label": "Машина",
         "type": "query",
         "datasource": {
           "type": "loki",
-          "uid": "${ds}"
+          "uid": "P8E80F9AEF21F6940"
         },
         "query": {
           "label": "host",
@@ -52,7 +44,7 @@
         "type": "query",
         "datasource": {
           "type": "loki",
-          "uid": "${ds}"
+          "uid": "P8E80F9AEF21F6940"
         },
         "query": {
           "label": "app",
@@ -83,113 +75,16 @@
   },
   "panels": [
     {
-      "id": 10,
-      "type": "timeseries",
-      "title": "Odoo — ERROR/CRITICAL по инстанция (5 мин)",
-      "datasource": {
-        "type": "loki",
-        "uid": "${ds}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 0,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${ds}"
-          },
-          "legendFormat": "{{app}}",
-          "expr": "sum by (app) (count_over_time({app=~\".*odoo.*|try-shop\"} | regexp \"^\\\\S+ \\\\S+ \\\\d+ (?P<odoo_level>[A-Z]+) (?P<db>\\\\S+) (?P<logger>[^:]+):\" | odoo_level=~\"ERROR|CRITICAL\" [5m]))"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "bars",
-            "fillOpacity": 70
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 11,
-      "type": "logs",
-      "title": "Odoo — грешки (всички инстанции)",
-      "datasource": {
-        "type": "loki",
-        "uid": "${ds}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 0,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${ds}"
-          },
-          "expr": "{app=~\".*odoo.*|try-shop\"} | regexp \"^\\\\S+ \\\\S+ \\\\d+ (?P<odoo_level>[A-Z]+) (?P<db>\\\\S+) (?P<logger>[^:]+):\" | odoo_level=~\"ERROR|CRITICAL\""
-        }
-      ],
-      "options": {
-        "showTime": true,
-        "wrapLogMessage": true,
-        "sortOrder": "Descending",
-        "enableLogDetails": true
-      }
-    },
-    {
-      "id": 12,
-      "type": "logs",
-      "title": "Odoo — избраната програма/контейнер ($app), с търсене",
-      "datasource": {
-        "type": "loki",
-        "uid": "${ds}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 8,
-        "w": 24,
-        "h": 10
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${ds}"
-          },
-          "expr": "{host=~\"$host\", app=~\"$app\"} |~ \"(?i)$text\""
-        }
-      ],
-      "options": {
-        "showTime": true,
-        "wrapLogMessage": true,
-        "sortOrder": "Descending",
-        "enableLogDetails": true
-      }
-    },
-    {
       "id": 1,
       "type": "timeseries",
       "title": "Логове по машина (на минута) — odoo-dev-server идва през WireGuard 10.88.0.2 → 10.88.0.1",
       "datasource": {
         "type": "loki",
-        "uid": "${ds}"
+        "uid": "P8E80F9AEF21F6940"
       },
       "gridPos": {
         "x": 0,
-        "y": 18,
+        "y": 0,
         "w": 12,
         "h": 8
       },
@@ -198,7 +93,7 @@
           "refId": "A",
           "datasource": {
             "type": "loki",
-            "uid": "${ds}"
+            "uid": "P8E80F9AEF21F6940"
           },
           "expr": "sum by (host) (count_over_time({host=~\"$host\", app=~\"$app\"}[1m]))",
           "legendFormat": "{{host}}"
@@ -229,11 +124,11 @@
       "title": "Логове по програма / контейнер",
       "datasource": {
         "type": "loki",
-        "uid": "${ds}"
+        "uid": "P8E80F9AEF21F6940"
       },
       "gridPos": {
         "x": 12,
-        "y": 18,
+        "y": 0,
         "w": 12,
         "h": 8
       },
@@ -242,7 +137,7 @@
           "refId": "A",
           "datasource": {
             "type": "loki",
-            "uid": "${ds}"
+            "uid": "P8E80F9AEF21F6940"
           },
           "expr": "sum by (app) (count_over_time({host=~\"$host\", app=~\"$app\"}[1m]))",
           "legendFormat": "{{app}}"
@@ -273,11 +168,11 @@
       "title": "Грешки и предупреждения по машина",
       "datasource": {
         "type": "loki",
-        "uid": "${ds}"
+        "uid": "P8E80F9AEF21F6940"
       },
       "gridPos": {
         "x": 0,
-        "y": 26,
+        "y": 8,
         "w": 24,
         "h": 6
       },
@@ -286,7 +181,7 @@
           "refId": "A",
           "datasource": {
             "type": "loki",
-            "uid": "${ds}"
+            "uid": "P8E80F9AEF21F6940"
           },
           "expr": "sum by (host) (count_over_time({host=~\"$host\", app=~\"$app\"} |~ \"(?i)error|fail|critical|denied|traceback\" [5m]))",
           "legendFormat": "{{host}}"
@@ -317,11 +212,11 @@
       "title": "poligroup (10.88.0.1, тук е Loki)",
       "datasource": {
         "type": "loki",
-        "uid": "${ds}"
+        "uid": "P8E80F9AEF21F6940"
       },
       "gridPos": {
         "x": 0,
-        "y": 32,
+        "y": 14,
         "w": 12,
         "h": 14
       },
@@ -330,7 +225,7 @@
           "refId": "A",
           "datasource": {
             "type": "loki",
-            "uid": "${ds}"
+            "uid": "P8E80F9AEF21F6940"
           },
           "expr": "{host=\"poligroup\", app=~\"$app\"} |~ \"(?i)$text\""
         }
@@ -348,11 +243,11 @@
       "title": "odoo-dev-server (10.88.0.2 — през WireGuard)",
       "datasource": {
         "type": "loki",
-        "uid": "${ds}"
+        "uid": "P8E80F9AEF21F6940"
       },
       "gridPos": {
         "x": 12,
-        "y": 32,
+        "y": 14,
         "w": 12,
         "h": 14
       },
@@ -361,7 +256,7 @@
           "refId": "A",
           "datasource": {
             "type": "loki",
-            "uid": "${ds}"
+            "uid": "P8E80F9AEF21F6940"
           },
           "expr": "{host=\"odoo-dev-server\", app=~\"$app\"} |~ \"(?i)$text\""
         }
@@ -379,11 +274,11 @@
       "title": "Грешки — всички машини",
       "datasource": {
         "type": "loki",
-        "uid": "${ds}"
+        "uid": "P8E80F9AEF21F6940"
       },
       "gridPos": {
         "x": 0,
-        "y": 46,
+        "y": 28,
         "w": 24,
         "h": 10
       },
@@ -392,7 +287,7 @@
           "refId": "A",
           "datasource": {
             "type": "loki",
-            "uid": "${ds}"
+            "uid": "P8E80F9AEF21F6940"
           },
           "expr": "{host=~\"$host\", app=~\"$app\"} |~ \"(?i)error|fail|critical|denied|traceback\""
         }

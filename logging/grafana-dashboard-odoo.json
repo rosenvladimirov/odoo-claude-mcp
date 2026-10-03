@@ -1,0 +1,328 @@
+{
+  "uid": "odoo-instances",
+  "title": "Odoo — инстанции",
+  "tags": [
+    "odoo",
+    "logs",
+    "loki"
+  ],
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "schemaVersion": 39,
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "label": "Инстанция",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "P8E80F9AEF21F6940"
+        },
+        "query": {
+          "label": "app",
+          "stream": "{app=~\".*odoo.*|try-shop\"}",
+          "type": 1,
+          "refId": "i"
+        },
+        "definition": "label_values({app=~\".*odoo.*|try-shop\"}, app)",
+        "regex": ".*odoo.*|try-shop",
+        "includeAll": true,
+        "allValue": ".*odoo.*|try-shop",
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 2
+      },
+      {
+        "name": "db",
+        "label": "База",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        }
+      },
+      {
+        "name": "level",
+        "label": "Ниво",
+        "type": "custom",
+        "query": "ERROR|CRITICAL,WARNING,INFO,ERROR|CRITICAL|WARNING",
+        "multi": false,
+        "current": {
+          "text": "ERROR|CRITICAL",
+          "value": "ERROR|CRITICAL"
+        }
+      },
+      {
+        "name": "text",
+        "label": "Търси текст",
+        "type": "textbox",
+        "query": "",
+        "current": {
+          "text": "",
+          "value": ""
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Грешки (ERROR/CRITICAL) по инстанция",
+      "datasource": {
+        "type": "loki",
+        "uid": "P8E80F9AEF21F6940"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "P8E80F9AEF21F6940"
+          },
+          "expr": "sum by (app) (count_over_time({app=~\"$instance\"} | regexp \"^\\\\S+ \\\\S+ \\\\d+ (?P<odoo_level>[A-Z]+) (?P<db>\\\\S+) (?P<logger>[^:]+):\" | db=~\"$db\" | odoo_level=~\"ERROR|CRITICAL\" [5m]))",
+          "legendFormat": "{{app}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 70,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "sum"
+          ]
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Предупреждения (WARNING) по инстанция",
+      "datasource": {
+        "type": "loki",
+        "uid": "P8E80F9AEF21F6940"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "P8E80F9AEF21F6940"
+          },
+          "expr": "sum by (app) (count_over_time({app=~\"$instance\"} | regexp \"^\\\\S+ \\\\S+ \\\\d+ (?P<odoo_level>[A-Z]+) (?P<db>\\\\S+) (?P<logger>[^:]+):\" | db=~\"$db\" | odoo_level=\"WARNING\" [5m]))",
+          "legendFormat": "{{app}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 70,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "sum"
+          ]
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Най-честите източници на грешки (инстанция · база · logger) за периода",
+      "datasource": {
+        "type": "loki",
+        "uid": "P8E80F9AEF21F6940"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "P8E80F9AEF21F6940"
+          },
+          "expr": "topk(25, sum by (app, db, logger) (count_over_time({app=~\"$instance\"} | regexp \"^\\\\S+ \\\\S+ \\\\d+ (?P<odoo_level>[A-Z]+) (?P<db>\\\\S+) (?P<logger>[^:]+):\" | db=~\"$db\" | odoo_level=~\"ERROR|CRITICAL\" [$__range])))",
+          "queryType": "instant",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        }
+      ],
+      "options": {
+        "sortBy": [
+          {
+            "displayName": "Last *",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Обем на логовете по инстанция",
+      "datasource": {
+        "type": "loki",
+        "uid": "P8E80F9AEF21F6940"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "P8E80F9AEF21F6940"
+          },
+          "expr": "sum by (app) (count_over_time({app=~\"$instance\"}[5m]))",
+          "legendFormat": "{{app}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 70,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "sum"
+          ]
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "logs",
+      "title": "Редове по избраното ниво ($level) и търсене",
+      "datasource": {
+        "type": "loki",
+        "uid": "P8E80F9AEF21F6940"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 24,
+        "h": 14
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "P8E80F9AEF21F6940"
+          },
+          "expr": "{app=~\"$instance\"} | regexp \"^\\\\S+ \\\\S+ \\\\d+ (?P<odoo_level>[A-Z]+) (?P<db>\\\\S+) (?P<logger>[^:]+):\" | db=~\"$db\" | odoo_level=~\"$level\" |~ \"(?i)$text\""
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false
+      }
+    },
+    {
+      "id": 6,
+      "type": "logs",
+      "title": "Всичко от избраната инстанция (с tracebacks)",
+      "datasource": {
+        "type": "loki",
+        "uid": "P8E80F9AEF21F6940"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 24,
+        "h": 14
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "P8E80F9AEF21F6940"
+          },
+          "expr": "{app=~\"$instance\"} |~ \"(?i)$text\""
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false
+      }
+    }
+  ]
+}
