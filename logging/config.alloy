@@ -1,5 +1,6 @@
 // Alloy — слушател за syslog на 127.0.0.1:601 (RFC 5424 по TCP) на тази машина.
-// Стековете пращат през драйвера syslog на Docker с tag "{{.Name}}" → етикет container.
+// Пращат: стековете през драйвера syslog на Docker (tag "{{.Name}}") и rsyslog на хоста.
+// Етикетът app = името на програмата (sshd, kernel…) или на контейнера.
 // HOST и LOKI_URL идват от средата.
 
 loki.source.syslog "docker" {
@@ -8,7 +9,7 @@ loki.source.syslog "docker" {
     protocol               = "tcp"
     syslog_format          = "rfc5424"
     use_incoming_timestamp = true
-    labels                 = { host = sys.env("HOST"), source = "docker" }
+    labels                 = { host = sys.env("HOST"), source = "syslog" }
   }
   relabel_rules = loki.relabel.syslog.rules
   forward_to    = [loki.write.central.receiver]
@@ -18,7 +19,11 @@ loki.relabel "syslog" {
   forward_to = []
   rule {
     source_labels = ["__syslog_message_app_name"]
-    target_label  = "container"
+    target_label  = "app"
+  }
+  rule {
+    source_labels = ["__syslog_message_facility"]
+    target_label  = "facility"
   }
   rule {
     source_labels = ["__syslog_message_severity"]
