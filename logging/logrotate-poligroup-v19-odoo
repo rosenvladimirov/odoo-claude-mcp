@@ -1,0 +1,14 @@
+# Логът на живата Odoo на Полигруп — 03.10.2026. copytruncate: Odoo пише в същия файл без рестарт,
+# rsyslog (imfile) усеща изрязването. Папката е на потребителя от контейнера → su.
+/opt/poligroup-v19/log/odoo-server.log {
+    su dhcpcd messagebus
+    daily
+    maxsize 200M
+    rotate 14
+    compress
+    delaycompress
+    copytruncate
+    missingok
+    notifempty
+    dateext
+}
