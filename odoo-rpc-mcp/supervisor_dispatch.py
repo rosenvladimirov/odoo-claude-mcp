@@ -1,21 +1,21 @@
 """Изпълнителят на Клаудчо — външните стъпки на услугите от поръчките (ADR telegram-consult-bot/0009).
 
-Odoo (модулът klaudcho_service) държи машината на стъпките. Тук се правят само външните:
+Odoo (модулът odoo_supervisor) държи машината на стъпките. Тук се правят само външните:
 
 * ``telegram`` — групата от акаунта на оператора (единственият Telethon клиент на odoo-rpc,
   eager publisher-а — втори клиент на същия телефон отнема ключа, 21.07.2026), ботът — администратор;
 * ``container`` — стек в Portainer от ``klaudcho_stack.template.yml``, чака контейнерът да върви;
 * ``teardown`` — спира стека. Томът с дневника на агента остава.
 
-Взима задачите с ``klaudcho_provision_pending`` и връща резултата с ``klaudcho_provision_report``.
-Буди се от ``POST /klaudcho/wake`` (Odoo след commit; само подкана, без данни) и на всеки
-KLAUDCHO_PROV_POLL секунди за всеки случай. Не е websocket към Docker — ADR mcp-supervisor-remote/0001.
+Взима задачите с ``supervisor_pending`` и връща резултата с ``supervisor_report``.
+Буди се от ``POST /supervisor/wake`` (Odoo след commit; само подкана, без данни) и на всеки
+SUPERVISOR_POLL секунди за всеки случай. Не е websocket към Docker — ADR mcp-supervisor-remote/0001.
 
 Идемпотентност: всеки външен резултат се записва в локален дневник ПРЕДИ отчета. Ако
 отчетът се загуби, следващият цикъл го праща пак, без да прави втора група или стек.
 
 По подразбиране е DRY RUN (като provisioning_engine): нищо истинско не се създава,
-докато KLAUDCHO_PROV_LIVE не е "1".
+докато SUPERVISOR_LIVE не е "1".
 """
 from __future__ import annotations
 
@@ -30,12 +30,12 @@ import threading
 import time
 from pathlib import Path
 
-logger = logging.getLogger("klaudcho_provisioner")
+logger = logging.getLogger("supervisor_dispatch")
 
 TEMPLATE_FILE = Path(__file__).parent / "klaudcho_stack.template.yml"
-MODEL = "klaudcho.service"
+MODEL = "supervisor.service"
 # AGENT_ODOO_API_KEY е ключът на БОТА на агентите (влиза в контейнера) — различен от
-# KLAUDCHO_PROV_ODOO_API_KEY, с който самият изпълнител говори с Odoo
+# SUPERVISOR_ODOO_API_KEY, с който самият изпълнител говори с Odoo
 ENV_KEYS = (
     "IMAGE", "NETWORK", "KNOWLEDGE_DIR", "AGENT_ODOO_API_KEY", "ANTHROPIC_API_KEY",
 )
@@ -104,7 +104,7 @@ class Provisioner:
         self.odoo = odoo                  # .execute_kw(model, method, args, kwargs)
         self.tg = tg                      # callable → TelegramServiceManager или None
         self.portainer = portainer        # обект с create_stack / delete_stack / container_running
-        self.journal = journal or Journal("/data/klaudcho_provision.jsonl")
+        self.journal = journal or Journal("/data/supervisor_jobs.jsonl")
         self.env = env or {}
         self.live = live
         self.sleep = clock
@@ -114,10 +114,10 @@ class Provisioner:
 
     # -- Odoo -----------------------------------------------------------
     def _pending(self) -> list:
-        return self.odoo.execute_kw(MODEL, "klaudcho_provision_pending", [], {"steps": list(self.steps)}) or []
+        return self.odoo.execute_kw(MODEL, "supervisor_pending", [], {"steps": list(self.steps)}) or []
 
     def _report(self, job: dict, ok: bool, data=None, error=None):
-        return self.odoo.execute_kw(MODEL, "klaudcho_provision_report", [[job["service_id"]], job["step"], ok],
+        return self.odoo.execute_kw(MODEL, "supervisor_report", [[job["service_id"]], job["step"], ok],
                                     {"data": data or {}, "error": error})
 
     # -- цикълът --------------------------------------------------------
@@ -128,7 +128,8 @@ class Provisioner:
     def _run_once(self) -> list:
         results = []
         for job in self._pending():
-            key = f"{job['service_id']}:{job['step']}"
+            # С поръчката: номерата на услугите почват отначало при нова инсталация на модула
+            key = f"{job.get('order', '')}:{job['service_id']}:{job['step']}"
             done = self.journal.get(key)
             try:
                 if done and done.get("ok"):
@@ -139,7 +140,7 @@ class Provisioner:
                 state = self._report(job, True, data)
                 results.append({"key": key, "ok": True, "state": state})
             except Exception as e:  # noqa: BLE001 — грешката отива в Odoo, не убива цикъла
-                logger.warning("klaudcho provision %s failed: %s", key, e)
+                logger.warning("supervisor job %s failed: %s", key, e)
                 try:
                     state = self._report(job, False, error=f"{type(e).__name__}: {e}"[:500])
                 except Exception as e2:  # noqa: BLE001
@@ -276,28 +277,28 @@ class XmlRpcOdoo:
 
 
 def _env_steps(default=ALL_STEPS):
-    raw = os.environ.get("KLAUDCHO_PROV_STEPS", "")
+    raw = os.environ.get("SUPERVISOR_STEPS", "")
     steps = tuple(s.strip() for s in raw.split(",") if s.strip()) or default
     bad = [s for s in steps if s not in ALL_STEPS]
     if bad:
-        raise ValueError(f"unknown KLAUDCHO_PROV_STEPS: {bad}")
+        raise ValueError(f"unknown SUPERVISOR_STEPS: {bad}")
     return steps
 
 
 def main() -> None:
-    """Самостоятелно: `python klaudcho_provisioner.py` — изпълнителят при Docker (container/teardown)."""
+    """Самостоятелно: `python supervisor_dispatch.py` — изпълнителят при Docker (container/teardown)."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     e = os.environ
-    odoo = XmlRpcOdoo(e["KLAUDCHO_PROV_ODOO_URL"], e["KLAUDCHO_PROV_ODOO_DB"],
-                      e["KLAUDCHO_PROV_ODOO_LOGIN"], e["KLAUDCHO_PROV_ODOO_API_KEY"])
-    env = {k: e.get(f"KLAUDCHO_PROV_{k}", "") for k in ENV_KEYS}
-    env["START_TIMEOUT"] = e.get("KLAUDCHO_PROV_START_TIMEOUT", "120")
+    odoo = XmlRpcOdoo(e["SUPERVISOR_ODOO_URL"], e["SUPERVISOR_ODOO_DB"],
+                      e["SUPERVISOR_ODOO_LOGIN"], e["SUPERVISOR_ODOO_API_KEY"])
+    env = {k: e.get(f"SUPERVISOR_{k}", "") for k in ENV_KEYS}
+    env["START_TIMEOUT"] = e.get("SUPERVISOR_START_TIMEOUT", "120")
     p = Provisioner(odoo, portainer=DockerRuntime(),
-                    journal=Journal(e.get("KLAUDCHO_PROV_JOURNAL", "/data/klaudcho_provision.jsonl")),
-                    env=env, live=e.get("KLAUDCHO_PROV_LIVE", "0") == "1",
+                    journal=Journal(e.get("SUPERVISOR_JOURNAL", "/data/supervisor_jobs.jsonl")),
+                    env=env, live=e.get("SUPERVISOR_LIVE", "0") == "1",
                     steps=_env_steps(("container", "teardown")))
-    poll = int(e.get("KLAUDCHO_PROV_POLL", "20"))
-    logger.info("klaudcho docker provisioner: steps=%s live=%s poll=%ss", p.steps, p.live, poll)
+    poll = int(e.get("SUPERVISOR_POLL", "20"))
+    logger.info("supervisor docker agent: steps=%s live=%s poll=%ss", p.steps, p.live, poll)
     while True:
         try:
             for r in p.run_once():
@@ -319,27 +320,27 @@ def wake() -> None:
 
 
 def build_from_env(odoo_connection_cls, tg_getter, engine) -> Provisioner | None:
-    """Изпълнителят от средата; без KLAUDCHO_PROV_ODOO_URL е изключен."""
+    """Изпълнителят от средата; без SUPERVISOR_ODOO_URL е изключен."""
     e = os.environ
-    url = e.get("KLAUDCHO_PROV_ODOO_URL", "").strip()
+    url = e.get("SUPERVISOR_ODOO_URL", "").strip()
     if not url:
         return None
-    odoo = odoo_connection_cls(alias="klaudcho-provisioner", url=url, db=e.get("KLAUDCHO_PROV_ODOO_DB", ""),
-                               username=e.get("KLAUDCHO_PROV_ODOO_LOGIN", ""),
-                               api_key=e.get("KLAUDCHO_PROV_ODOO_API_KEY", ""))
+    odoo = odoo_connection_cls(alias="supervisor-dispatch", url=url, db=e.get("SUPERVISOR_ODOO_DB", ""),
+                               username=e.get("SUPERVISOR_ODOO_LOGIN", ""),
+                               api_key=e.get("SUPERVISOR_ODOO_API_KEY", ""))
     portainer = Portainer(engine, e.get("MCP_PORTAINER_URL", ""), e.get("MCP_PORTAINER_API_KEY", ""),
                           e.get("MCP_PORTAINER_ENDPOINT_ID", "2"))
-    env = {k: e.get(f"KLAUDCHO_PROV_{k}", "") for k in ENV_KEYS}
-    env["START_TIMEOUT"] = e.get("KLAUDCHO_PROV_START_TIMEOUT", "120")
+    env = {k: e.get(f"SUPERVISOR_{k}", "") for k in ENV_KEYS}
+    env["START_TIMEOUT"] = e.get("SUPERVISOR_START_TIMEOUT", "120")
     return Provisioner(odoo, tg=tg_getter, portainer=portainer,
-                       journal=Journal(e.get("KLAUDCHO_PROV_JOURNAL", "/data/klaudcho_provision.jsonl")),
-                       env=env, live=e.get("KLAUDCHO_PROV_LIVE", "0") == "1", steps=_env_steps())
+                       journal=Journal(e.get("SUPERVISOR_JOURNAL", "/data/supervisor_jobs.jsonl")),
+                       env=env, live=e.get("SUPERVISOR_LIVE", "0") == "1", steps=_env_steps())
 
 
 def start(provisioner: Provisioner, poll: int | None = None) -> None:
     global _instance
     _instance = provisioner
-    poll = poll or int(os.environ.get("KLAUDCHO_PROV_POLL", "300"))
+    poll = poll or int(os.environ.get("SUPERVISOR_POLL", "300"))
 
     def loop():
         time.sleep(15)            # Telegram клиентът се вдига 8 s след старта
@@ -348,15 +349,15 @@ def start(provisioner: Provisioner, poll: int | None = None) -> None:
             try:
                 provisioner.run_once()
             except Exception as e:  # noqa: BLE001 — Odoo може да е паднал; пак след малко
-                logger.warning("klaudcho provisioner cycle failed: %s", e)
+                logger.warning("supervisor dispatch cycle failed: %s", e)
             _wake.wait(poll)
 
-    threading.Thread(target=loop, name="klaudcho-provisioner", daemon=True).start()
-    logger.info("klaudcho provisioner started (live=%s, poll=%ss)", provisioner.live, poll)
+    threading.Thread(target=loop, name="supervisor-dispatch", daemon=True).start()
+    logger.info("supervisor dispatch started (live=%s, poll=%ss)", provisioner.live, poll)
 
 
 async def wake_asgi(scope, receive, send) -> None:
-    """POST /klaudcho/wake — подкана от Odoo. Тайната: KLAUDCHO_PROV_WAKE_TOKEN (X-Klaudcho-Wake)."""
+    """POST /supervisor/wake — подкана от Odoo. Тайната: SUPERVISOR_WAKE_TOKEN (X-Supervisor-Wake)."""
     async def reply(status: int, obj: dict):
         await send({"type": "http.response.start", "status": status,
                     "headers": [(b"content-type", b"application/json")]})
@@ -364,36 +365,36 @@ async def wake_asgi(scope, receive, send) -> None:
 
     if scope.get("method") != "POST":
         return await reply(405, {"error": "method_not_allowed"})
-    secret = os.environ.get("KLAUDCHO_PROV_WAKE_TOKEN", "")
+    secret = os.environ.get("SUPERVISOR_WAKE_TOKEN", "")
     if not secret or _instance is None:
         return await reply(503, {"error": "provisioner_disabled"})
     # По байтове: compare_digest не сравнява низове с не-ASCII знаци (иначе 500, не 401)
     hdrs = {k.lower(): v for k, v in scope.get("headers", [])}
-    if not hmac.compare_digest(hdrs.get(b"x-klaudcho-wake", b""), secret.encode()):
+    if not hmac.compare_digest(hdrs.get(b"x-supervisor-wake", b""), secret.encode()):
         return await reply(401, {"error": "unauthorized"})
     wake()
     return await reply(200, {"ok": True})
 
 
 # -- админ инструментът (по образеца на health_monitor) -------------------
-ADMIN_TOOL_NAMES = {"klaudcho_provision_status"}
+ADMIN_TOOL_NAMES = {"supervisor_job_status"}
 
 
 def get_admin_tools() -> list:
     from mcp.types import Tool
     return [Tool(
-        name="klaudcho_provision_status",
-        description="ADMIN: Klaudcho provisioner — state (live/dry-run), the last cycle, "
+        name="supervisor_job_status",
+        description="ADMIN: Supervisor dispatch — state (live/dry-run), the last cycle, "
                     "and optionally run one cycle now (run=true).",
         inputSchema={"type": "object", "properties": {"run": {"type": "boolean", "default": False}}},
     )]
 
 
 def handle(name: str, arguments: dict | None) -> dict:
-    if name != "klaudcho_provision_status":
+    if name != "supervisor_job_status":
         return {"error": f"unknown tool {name}"}
     if _instance is None:
-        return {"enabled": False, "hint": "set KLAUDCHO_PROV_ODOO_URL/DB/LOGIN/API_KEY"}
+        return {"enabled": False, "hint": "set SUPERVISOR_ODOO_URL/DB/LOGIN/API_KEY"}
     if (arguments or {}).get("run"):
         _instance.run_once()
     return {"enabled": True, "live": _instance.live, "last_run": _instance.last_run}

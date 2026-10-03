@@ -41,11 +41,11 @@ def test_principals_parse_and_unknown_mode_is_read():
 def test_both_modes_read_and_use_their_own_methods(mode):
     assert allowed("odoo_search_read", {"model": "res.partner"}, mode)          # res.* се чете
     assert allowed("odoo_execute", {"model": "res.partner", "method": "read"}, mode)
-    for m in ("klaudcho_push", "klaudcho_inbox_pull", "klaudcho_inbox_ack", "klaudcho_post", "klaudcho_notify"):
-        assert allowed("odoo_execute", {"model": "klaudcho.agent", "method": m}, mode), m
-    # В режим read собственият метод минава само на klaudcho.agent (в full всеки бизнес метод е позволен)
+    for m in ("ai_agent_push", "ai_agent_inbox_pull", "ai_agent_inbox_ack", "ai_agent_post", "ai_agent_notify"):
+        assert allowed("odoo_execute", {"model": "ai.agent", "method": m}, mode), m
+    # В режим read собственият метод минава само на ai.agent (в full всеки бизнес метод е позволен)
     if mode == "read":
-        assert not allowed("odoo_execute", {"model": "sale.order", "method": "klaudcho_push"}, mode)
+        assert not allowed("odoo_execute", {"model": "sale.order", "method": "ai_agent_push"}, mode)
 
 
 @pytest.mark.parametrize("mode", ["read", "full"])
@@ -132,14 +132,14 @@ def test_server_denies_agent_before_control_tools(tool, args, monkeypatch):
 
 def test_server_lets_the_bot_reach_its_own_method(monkeypatch):
     # Отвъд проверката викът отива към Odoo (тук няма връзка) — важното е, че НЕ е отказан от сигурността
-    out = _call("odoo_execute", {"model": "klaudcho.agent", "method": "klaudcho_push", "args": [[1], []]},
+    out = _call("odoo_execute", {"model": "ai.agent", "method": "ai_agent_push", "args": [[1], []]},
                 "kc-bot", monkeypatch)
     assert out.get("error") != "denied", out
 
 
 def test_server_user_role_still_blocks_the_same_method_for_non_agents(monkeypatch):
     # Обикновен потребител без профил на агент: ролевата проверка спира непознатия метод
-    out = _call("odoo_execute", {"model": "klaudcho.agent", "method": "klaudcho_push", "args": [[1], []]},
+    out = _call("odoo_execute", {"model": "ai.agent", "method": "ai_agent_push", "args": [[1], []]},
                 "lyubomir", monkeypatch)
     assert out.get("error") == "denied" and "readonly_allowlist" in out["reason"], out
 

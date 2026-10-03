@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.15] — 2026-10-03 — Supervisor dispatch (renamed from the Klaudcho provisioner)
+
+### Changed
+- `klaudcho_provisioner.py` → `supervisor_dispatch.py`; Odoo model `supervisor.service`,
+  methods `supervisor_pending` / `supervisor_report`; wake `POST /supervisor/wake`
+  (`X-Supervisor-Wake`, `SUPERVISOR_WAKE_TOKEN`); env `KLAUDCHO_PROV_*` → `SUPERVISOR_*`;
+  admin tool `supervisor_job_status`; the Docker runner image `odoo-supervisor-agent`.
+- Agent principals: own methods are now `ai.agent` / `ai_agent_*` (the Odoo modules
+  `ai_agent_console` / `ai_agent_discuss`).
+- The job journal key carries the order (`<order>:<service>:<step>`) and lives in a new file —
+  service ids restart after a module reinstall and must not reuse an old Telegram group.
+
+### Fixed
+- `/supervisor/wake` compares the secret as bytes: a non-ASCII header gave 500 instead of 401.
+
 ## [3.3.14] — 2026-10-03 — Klaudcho provisioner
 
 ### Added — services from sale orders start by themselves (ADR telegram-consult-bot/0009)

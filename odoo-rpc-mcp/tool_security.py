@@ -83,7 +83,7 @@ DEFAULT_USER_BLOCKED_TOOLS: set[str] = {
     "health_scan",
     "stack_health",
     # Клаудчо: изпълнителят на услугите (вижда тайните на новите контейнери)
-    "klaudcho_provision_status",
+    "supervisor_job_status",
     # v3 tenant migration
     "migrate_assess",
     "migrate_history",
@@ -437,7 +437,7 @@ def filter_tools_for_role(tools: list, role: str | None = None,
 #
 #   MCP_AGENT_PRINCIPALS="klaudcho-bot:read,client-acme:full"
 #
-# read — само четене + собствените методи на агента в Odoo (klaudcho.agent);
+# read — само четене + собствените методи на агента в Odoo (ai.agent);
 # full — и запис/бизнес методи (платеният режим с ключа на клиента).
 
 AGENT_MODES: tuple = ("read", "full")
@@ -455,11 +455,11 @@ AGENT_WRITE_TOOLS: set = {
 # Сесията на агента: при unified auth odoo-rpc закача принципала, но не активира връзка
 # към Odoo — агентът активира СОБСТВЕНАТА си запазена връзка (сървърът пуска само неговите)
 AGENT_SESSION_TOOLS: set = {"user_connection_activate"}
-# Транспортът на агента (шина, Discuss) — методи на модула klaudcho_console/_discuss
+# Транспортът на агента (шина, Discuss) — методи на модула ai_agent_console/_discuss
 AGENT_OWN_METHODS: set = {
-    ("klaudcho.agent", m) for m in (
-        "klaudcho_push", "klaudcho_inbox_pull", "klaudcho_inbox_ack",
-        "klaudcho_post", "klaudcho_notify",
+    ("ai.agent", m) for m in (
+        "ai_agent_push", "ai_agent_inbox_pull", "ai_agent_inbox_ack",
+        "ai_agent_post", "ai_agent_notify",
     )
 }
 # Модели, които агентът чете, но не пише: партньори/потребители/фирми и

@@ -58,7 +58,7 @@ import supervisor_deploy
 import client_onboard
 import backup_manager
 import health_monitor
-import klaudcho_provisioner
+import supervisor_dispatch
 import session_handoff
 import tenant_migrate
 import tg_listen_helper
@@ -6236,7 +6236,7 @@ async def list_tools() -> list[Tool]:
     base.extend(backup_manager.get_admin_tools())
     base.extend(health_monitor.get_admin_tools())
     base.extend(tenant_migrate.get_admin_tools())
-    base.extend(klaudcho_provisioner.get_admin_tools())
+    base.extend(supervisor_dispatch.get_admin_tools())
     # Агент (Клаудчо): само белият му списък — без елевация, сесии, инфраструктура
     _agent_mode = tool_security.get_agent_mode(_principal)
     if _agent_mode:
@@ -6320,8 +6320,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 _admin_group = health_monitor
             elif name in tenant_migrate.ADMIN_TOOL_NAMES:
                 _admin_group = tenant_migrate
-            elif name in klaudcho_provisioner.ADMIN_TOOL_NAMES:
-                _admin_group = klaudcho_provisioner
+            elif name in supervisor_dispatch.ADMIN_TOOL_NAMES:
+                _admin_group = supervisor_dispatch
             if _admin_group is not None:
                 _prov_denied = None
                 if not sc.principal:
@@ -11796,9 +11796,9 @@ def create_app():
             return
 
         # ── Клаудчо: подкана от Odoo към изпълнителя (ADR telegram-consult-bot/0009) ──
-        # Само събужда цикъла — без данни; задачите се взимат от Odoo. Тайна: KLAUDCHO_PROV_WAKE_TOKEN.
-        if scope["type"] == "http" and path == "/klaudcho/wake":
-            await klaudcho_provisioner.wake_asgi(scope, receive, send)
+        # Само събужда цикъла — без данни; задачите се взимат от Odoo. Тайна: SUPERVISOR_WAKE_TOKEN.
+        if scope["type"] == "http" and path == "/supervisor/wake":
+            await supervisor_dispatch.wake_asgi(scope, receive, send)
             return
 
         # ── Optional auth debug (OFF by default; secrets always redacted) ──
@@ -13134,10 +13134,10 @@ if __name__ == "__main__":
     # Ползва САМО eager publisher-а за Telegram — втори клиент на същия телефон отнема ключа.
     try:
         import provisioning_engine as _prov_engine
-        def _klaudcho_tg():
-            # Клиентът на KLAUDCHO_PROV_TG_PRINCIPAL (не първия в списъка — eager са няколко).
+        def _supervisor_tg():
+            # Клиентът на SUPERVISOR_TG_PRINCIPAL (не първия в списъка — eager са няколко).
             # for_user връща кеширания мениджър на eager publisher-а: без второ влизане.
-            principal = os.environ.get("KLAUDCHO_PROV_TG_PRINCIPAL", "rosen")
+            principal = os.environ.get("SUPERVISOR_TG_PRINCIPAL", "rosen")
             phone = _eager_tg_phones.get(principal)
             if not phone or telegram_registry is None:
                 return None
@@ -13149,11 +13149,11 @@ if __name__ == "__main__":
                 config_file=os.path.join(base, "telegram_config.json"),
             )
 
-        _kp = klaudcho_provisioner.build_from_env(OdooConnection, _klaudcho_tg, _prov_engine)
+        _kp = supervisor_dispatch.build_from_env(OdooConnection, _supervisor_tg, _prov_engine)
         if _kp is not None:
-            klaudcho_provisioner.start(_kp)
+            supervisor_dispatch.start(_kp)
     except Exception as e:  # noqa: BLE001
-        logger.warning("klaudcho provisioner not started: %s", e)
+        logger.warning("supervisor dispatch not started: %s", e)
 
     # Initialise Prometheus metrics scaffold (2.x baseline; full integration
     # is 3.x — scraping config not included here).

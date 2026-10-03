@@ -1,8 +1,8 @@
-"""Тестове на изпълнителя на Клаудчо (klaudcho_provisioner.py, ADR telegram-consult-bot/0009).
+"""Тестове на изпълнителя на Клаудчо (supervisor_dispatch.py, ADR telegram-consult-bot/0009).
 
 Без истински Odoo, Telegram и Portainer: фалшивите пазят какво им е поискано.
 
-    pytest tests/test_klaudcho_provisioner.py -v
+    pytest tests/test_supervisor_dispatch.py -v
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import klaudcho_provisioner as kp  # noqa: E402
+import supervisor_dispatch as kp  # noqa: E402
 
 ENV = {"IMAGE": "klaudcho-agent:0.8.3", "NETWORK": "terraros-v19_terraros-v19-net",
        "KNOWLEDGE_DIR": "/opt/claude-knowledge/out", "AGENT_ODOO_API_KEY": "bot-key", "ANTHROPIC_API_KEY": "sk-ant-x",
@@ -39,11 +39,11 @@ class FakeOdoo:
         self.lose_reports = lose_reports
 
     def execute_kw(self, model, method, args, kwargs):
-        assert model == "klaudcho.service"
-        if method == "klaudcho_provision_pending":
+        assert model == "supervisor.service"
+        if method == "supervisor_pending":
             self.asked_steps = kwargs.get("steps")
             return [j for j in self.jobs if j["step"] in kwargs.get("steps", [j["step"]])]
-        assert method == "klaudcho_provision_report"
+        assert method == "supervisor_report"
         if self.lose_reports:
             self.lose_reports -= 1
             raise ConnectionError("lost after commit")
@@ -165,7 +165,7 @@ def test_teardown_deletes_the_stack(tmp_path):
 def test_wake_needs_the_secret(monkeypatch, tmp_path):
     p, *_ = make(tmp_path, [])
     monkeypatch.setattr(kp, "_instance", p)
-    monkeypatch.setenv("KLAUDCHO_PROV_WAKE_TOKEN", "s3cret")
+    monkeypatch.setenv("SUPERVISOR_WAKE_TOKEN", "s3cret")
     kp._wake.clear()
 
     def call(token):
@@ -177,7 +177,7 @@ def test_wake_needs_the_secret(monkeypatch, tmp_path):
         async def send(msg):
             sent.append(msg)
 
-        scope = {"method": "POST", "headers": [(b"x-klaudcho-wake", token.encode())]}
+        scope = {"method": "POST", "headers": [(b"x-supervisor-wake", token.encode())]}
         asyncio.run(kp.wake_asgi(scope, receive, send))
         return sent[0]["status"]
 
@@ -240,11 +240,11 @@ def test_dollar_is_unsafe_in_values():
 
 
 def test_the_agent_gets_the_bot_key_not_the_provisioner_key(monkeypatch):
-    monkeypatch.setenv("KLAUDCHO_PROV_ODOO_URL", "https://odoo.example")
-    monkeypatch.setenv("KLAUDCHO_PROV_ODOO_API_KEY", "provisioner-key")
-    monkeypatch.setenv("KLAUDCHO_PROV_AGENT_ODOO_API_KEY", "bot-key")
+    monkeypatch.setenv("SUPERVISOR_ODOO_URL", "https://odoo.example")
+    monkeypatch.setenv("SUPERVISOR_ODOO_API_KEY", "provisioner-key")
+    monkeypatch.setenv("SUPERVISOR_AGENT_ODOO_API_KEY", "bot-key")
     for k in ("IMAGE", "NETWORK", "KNOWLEDGE_DIR"):
-        monkeypatch.setenv(f"KLAUDCHO_PROV_{k}", ENV[k])
+        monkeypatch.setenv(f"SUPERVISOR_{k}", ENV[k])
 
     class Conn:
         def __init__(self, **kw):
@@ -254,3 +254,12 @@ def test_the_agent_gets_the_bot_key_not_the_provisioner_key(monkeypatch):
     assert p.odoo.kw["api_key"] == "provisioner-key"
     compose = kp.render_stack(container_job(), p.env)
     assert "KLAUDCHO_ODOO_API_KEY: bot-key" in compose and "provisioner-key" not in compose
+
+
+def test_a_reinstall_that_reuses_the_service_id_does_not_reuse_the_old_group(tmp_path):
+    # След нова инсталация на модула номерата почват от 1: ключът носи поръчката
+    p, odoo, tg, _ = make(tmp_path, [dict(tg_job(sid=1), order="S00003")])
+    p.run_once()
+    odoo.jobs = [dict(tg_job(sid=1), order="S00004", title="S00004 — Друг")]
+    p.run_once()
+    assert [c[0] for c in tg.calls] == ["S00002 — Клиент ООД", "S00004 — Друг"]
