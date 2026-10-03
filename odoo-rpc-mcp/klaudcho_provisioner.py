@@ -367,8 +367,9 @@ async def wake_asgi(scope, receive, send) -> None:
     secret = os.environ.get("KLAUDCHO_PROV_WAKE_TOKEN", "")
     if not secret or _instance is None:
         return await reply(503, {"error": "provisioner_disabled"})
-    hdrs = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
-    if not hmac.compare_digest(hdrs.get("x-klaudcho-wake", ""), secret):
+    # По байтове: compare_digest не сравнява низове с не-ASCII знаци (иначе 500, не 401)
+    hdrs = {k.lower(): v for k, v in scope.get("headers", [])}
+    if not hmac.compare_digest(hdrs.get(b"x-klaudcho-wake", b""), secret.encode()):
         return await reply(401, {"error": "unauthorized"})
     wake()
     return await reply(200, {"ok": True})

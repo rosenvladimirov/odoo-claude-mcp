@@ -182,6 +182,7 @@ def test_wake_needs_the_secret(monkeypatch, tmp_path):
         return sent[0]["status"]
 
     assert call("wrong") == 401 and not kp._wake.is_set()
+    assert call("грешна") == 401 and not kp._wake.is_set()        # не-ASCII заглавка: 401, не 500
     assert call("s3cret") == 200 and kp._wake.is_set()
 
 
