@@ -1,0 +1,47 @@
+# Логването: Loki (централно, на poligroup) + Alloy (слушател на 127.0.0.1:601 на всяка машина).
+# На машина без Loki: docker compose up -d alloy, с LOKI_URL към централния.
+# Самите те НЕ пишат през syslog — иначе логът на лога се затваря в кръг.
+x-own-logs: &own-logs
+  driver: json-file
+  options: {max-size: "20m", max-file: "3"}
+
+services:
+  loki:
+    image: ${LOKI_IMAGE}
+    container_name: loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki.yaml", "-config.expand-env=true"]
+    env_file: .env
+    volumes:
+      - ./loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "127.0.0.1:3100:3100"
+    networks: [monitoring]
+    mem_limit: 768m
+    logging: *own-logs
+    profiles: ["central"]
+
+  alloy:
+    image: ${ALLOY_IMAGE}
+    container_name: alloy
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      HOST: ${HOST}
+      LOKI_URL: ${LOKI_URL}
+    command: ["run", "--server.http.listen-addr=127.0.0.1:12345", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
+    volumes:
+      - ./config.alloy:/etc/alloy/config.alloy:ro
+      - alloy-data:/var/lib/alloy/data
+    mem_limit: 256m
+    logging: *own-logs
+
+networks:
+  monitoring:
+    name: ${MONITORING_NETWORK:-odoo-claude-mcp_backend}
+    external: true
+
+volumes:
+  loki-data:
+  alloy-data:
