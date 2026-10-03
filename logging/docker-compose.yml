@@ -17,6 +17,8 @@ services:
       - loki-data:/loki
     ports:
       - "127.0.0.1:3100:3100"
+      # Частната мрежа (WireGuard на хоста): другите машини пращат тук — никога на публичния адрес
+      - "${LOKI_PRIVATE_BIND:-127.0.0.1:3101}:3100"
     networks: [monitoring]
     mem_limit: 768m
     logging: *own-logs
