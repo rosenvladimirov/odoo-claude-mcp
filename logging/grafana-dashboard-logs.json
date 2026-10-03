@@ -1,6 +1,6 @@
 {
   "uid": "logs-hosts-vpn",
-  "title": "Логове — машини и VPN",
+  "title": "Логове — Odoo, машини и VPN",
   "tags": [
     "logs",
     "loki",
@@ -83,6 +83,103 @@
   },
   "panels": [
     {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Odoo — ERROR/CRITICAL по инстанция (5 мин)",
+      "datasource": {
+        "type": "loki",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${ds}"
+          },
+          "legendFormat": "{{app}}",
+          "expr": "sum by (app) (count_over_time({app=~\".*odoo.*|try-shop\"} | regexp \"^\\\\S+ \\\\S+ \\\\d+ (?P<odoo_level>[A-Z]+) (?P<db>\\\\S+) (?P<logger>[^:]+):\" | odoo_level=~\"ERROR|CRITICAL\" [5m]))"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 70
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "logs",
+      "title": "Odoo — грешки (всички инстанции)",
+      "datasource": {
+        "type": "loki",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${ds}"
+          },
+          "expr": "{app=~\".*odoo.*|try-shop\"} | regexp \"^\\\\S+ \\\\S+ \\\\d+ (?P<odoo_level>[A-Z]+) (?P<db>\\\\S+) (?P<logger>[^:]+):\" | odoo_level=~\"ERROR|CRITICAL\""
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true
+      }
+    },
+    {
+      "id": 12,
+      "type": "logs",
+      "title": "Odoo — избраната програма/контейнер ($app), с търсене",
+      "datasource": {
+        "type": "loki",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${ds}"
+          },
+          "expr": "{host=~\"$host\", app=~\"$app\"} |~ \"(?i)$text\""
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true
+      }
+    },
+    {
       "id": 1,
       "type": "timeseries",
       "title": "Логове по машина (на минута) — odoo-dev-server идва през WireGuard 10.88.0.2 → 10.88.0.1",
@@ -92,7 +189,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 0,
+        "y": 18,
         "w": 12,
         "h": 8
       },
@@ -136,7 +233,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 0,
+        "y": 18,
         "w": 12,
         "h": 8
       },
@@ -180,7 +277,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 8,
+        "y": 26,
         "w": 24,
         "h": 6
       },
@@ -224,7 +321,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 14,
+        "y": 32,
         "w": 12,
         "h": 14
       },
@@ -255,7 +352,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 14,
+        "y": 32,
         "w": 12,
         "h": 14
       },
@@ -286,7 +383,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 28,
+        "y": 46,
         "w": 24,
         "h": 10
       },
