@@ -13134,8 +13134,22 @@ if __name__ == "__main__":
     # Ползва САМО eager publisher-а за Telegram — втори клиент на същия телефон отнема ключа.
     try:
         import provisioning_engine as _prov_engine
-        _kp = klaudcho_provisioner.build_from_env(
-            OdooConnection, lambda: _eager_tg_refs[0] if _eager_tg_refs else None, _prov_engine)
+        def _klaudcho_tg():
+            # Клиентът на KLAUDCHO_PROV_TG_PRINCIPAL (не първия в списъка — eager са няколко).
+            # for_user връща кеширания мениджър на eager publisher-а: без второ влизане.
+            principal = os.environ.get("KLAUDCHO_PROV_TG_PRINCIPAL", "rosen")
+            phone = _eager_tg_phones.get(principal)
+            if not phone or telegram_registry is None:
+                return None
+            tag = _sanitize_name(phone)
+            base = _user_dir(principal, create=True)
+            return telegram_registry.for_user(
+                f"{principal}:{tag}",
+                session_path=os.path.join(base, f"telegram_{tag}"),
+                config_file=os.path.join(base, "telegram_config.json"),
+            )
+
+        _kp = klaudcho_provisioner.build_from_env(OdooConnection, _klaudcho_tg, _prov_engine)
         if _kp is not None:
             klaudcho_provisioner.start(_kp)
     except Exception as e:  # noqa: BLE001
