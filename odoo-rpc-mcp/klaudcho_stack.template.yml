@@ -1,0 +1,37 @@
+# Клаудчо — стек за един агент, пускан автоматично от поръчката (ADR telegram-consult-bot/0009).
+# klaudcho_provisioner.py замества полетата (долар + скоби) и го дава на Portainer. Без публикувани портове:
+# Odoo вика агента по името на контейнера в общата мрежа, порт 8765.
+services:
+  ${SLUG}:
+    image: ${IMAGE}
+    container_name: ${SLUG}
+    restart: unless-stopped
+    environment:
+      KLAUDCHO_CONFIG: /data/agent.toml
+      KLAUDCHO_AGENT_TOML_B64: ${AGENT_TOML_B64}
+      KLAUDCHO_CONTROL_TOKEN: ${CONTROL_TOKEN}
+      KLAUDCHO_READ_TOKEN: ${READ_TOKEN}
+      KLAUDCHO_ODOO_API_KEY: ${ODOO_API_KEY}
+      KLAUDCHO_ODOO_BOT_API_KEY: ${ODOO_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    volumes:
+      - ${SLUG}-data:/data
+      - ${KNOWLEDGE_DIR}:/opt/claude-knowledge/out:ro
+    networks:
+      - odoo
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    mem_limit: 512m
+    cpus: 0.5
+
+volumes:
+  ${SLUG}-data:
+
+networks:
+  odoo:
+    name: ${NETWORK}
+    external: true

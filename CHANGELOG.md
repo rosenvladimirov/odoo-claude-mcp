@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.14] — 2026-10-03 — Klaudcho provisioner
+
+### Added — services from sale orders start by themselves (ADR telegram-consult-bot/0009)
+- `klaudcho_provisioner.py`: a background thread runs the external steps of the Odoo model
+  `klaudcho.service` — the Telegram group (only through the eager publisher: a second
+  Telethon client on the same phone revokes its key), the agent stack in Portainer from
+  `klaudcho_stack.template.yml` (waits until the container runs) and its teardown.
+- Takes jobs with `klaudcho_provision_pending`, reports with `klaudcho_provision_report`.
+  Every external result is journaled before the report, so a lost report never makes a
+  second group or stack.
+- `POST /klaudcho/wake` (secret `KLAUDCHO_PROV_WAKE_TOKEN`): Odoo only wakes the cycle,
+  no data; plus a poll every `KLAUDCHO_PROV_POLL` seconds. No websocket to Docker
+  (ADR mcp-supervisor-remote/0001).
+- DRY RUN by default; real groups and stacks only with `KLAUDCHO_PROV_LIVE=1`.
+- Admin tool `klaudcho_provision_status` (admin principal only, hidden from USER role).
+
 ## [3.3.13] — 2026-10-02 — Agents activate their own connection
 
 ### Fixed — agent sessions had no Odoo connection

@@ -58,6 +58,7 @@ import supervisor_deploy
 import client_onboard
 import backup_manager
 import health_monitor
+import klaudcho_provisioner
 import session_handoff
 import tenant_migrate
 import tg_listen_helper
@@ -6235,6 +6236,7 @@ async def list_tools() -> list[Tool]:
     base.extend(backup_manager.get_admin_tools())
     base.extend(health_monitor.get_admin_tools())
     base.extend(tenant_migrate.get_admin_tools())
+    base.extend(klaudcho_provisioner.get_admin_tools())
     # Агент (Клаудчо): само белият му списък — без елевация, сесии, инфраструктура
     _agent_mode = tool_security.get_agent_mode(_principal)
     if _agent_mode:
@@ -6318,6 +6320,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 _admin_group = health_monitor
             elif name in tenant_migrate.ADMIN_TOOL_NAMES:
                 _admin_group = tenant_migrate
+            elif name in klaudcho_provisioner.ADMIN_TOOL_NAMES:
+                _admin_group = klaudcho_provisioner
             if _admin_group is not None:
                 _prov_denied = None
                 if not sc.principal:
@@ -11791,6 +11795,12 @@ def create_app():
             await _telegram_send_asgi(scope, receive, send)
             return
 
+        # ── Клаудчо: подкана от Odoo към изпълнителя (ADR telegram-consult-bot/0009) ──
+        # Само събужда цикъла — без данни; задачите се взимат от Odoo. Тайна: KLAUDCHO_PROV_WAKE_TOKEN.
+        if scope["type"] == "http" and path == "/klaudcho/wake":
+            await klaudcho_provisioner.wake_asgi(scope, receive, send)
+            return
+
         # ── Optional auth debug (OFF by default; secrets always redacted) ──
         # SECURITY: never log Authorization / X-Odoo-* / Cookie / X-Api-Token —
         # the Bearer value IS a live Odoo api_key. Gated behind MCP_DEBUG_HEADERS=1
@@ -13119,6 +13129,17 @@ if __name__ == "__main__":
         except Exception as e:  # noqa: BLE001
             logger.warning("telegram eager-init thread error: %s", e)
     threading.Thread(target=_eager_tg, daemon=True).start()
+
+    # Клаудчо: изпълнителят на услугите от поръчките (ADR telegram-consult-bot/0009).
+    # Ползва САМО eager publisher-а за Telegram — втори клиент на същия телефон отнема ключа.
+    try:
+        import provisioning_engine as _prov_engine
+        _kp = klaudcho_provisioner.build_from_env(
+            OdooConnection, lambda: _eager_tg_refs[0] if _eager_tg_refs else None, _prov_engine)
+        if _kp is not None:
+            klaudcho_provisioner.start(_kp)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("klaudcho provisioner not started: %s", e)
 
     # Initialise Prometheus metrics scaffold (2.x baseline; full integration
     # is 3.x — scraping config not included here).

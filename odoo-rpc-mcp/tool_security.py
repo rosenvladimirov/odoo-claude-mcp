@@ -82,6 +82,8 @@ DEFAULT_USER_BLOCKED_TOOLS: set[str] = {
     # v3 health monitor
     "health_scan",
     "stack_health",
+    # Клаудчо: изпълнителят на услугите (вижда тайните на новите контейнери)
+    "klaudcho_provision_status",
     # v3 tenant migration
     "migrate_assess",
     "migrate_history",
