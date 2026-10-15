@@ -1037,7 +1037,7 @@ async def _handle_login_page(req: Request):
             <form id="mcpForm">
               <div class="mb-3">
                 <label class="form-label small fw-semibold">Потребителско име (Odoo login)</label>
-                <input name="login" type="email" class="form-control" required autocomplete="username">
+                <input name="login" type="text" class="form-control" required autocomplete="username" autocapitalize="none" spellcheck="false">
               </div>
               <div class="mb-3">
                 <label class="form-label small fw-semibold">MCP парола</label>
@@ -1063,7 +1063,7 @@ async def _handle_login_page(req: Request):
                 </div>
                 <div class="col-6">
                   <label class="form-label small fw-semibold">Login</label>
-                  <input name="login" type="email" class="form-control" required>
+                  <input name="login" type="text" class="form-control" required autocapitalize="none" spellcheck="false">
                 </div>
               </div>
               <div class="mb-3">
