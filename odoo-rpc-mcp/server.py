@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.3.13"
+__version__ = "3.3.14"
 
 import asyncio
 import hmac
@@ -12837,7 +12837,8 @@ def create_app():
                               "content-type": "application/json"}
                     try:
                         with _hx.Client(timeout=120) as _hc:
-                            _resp2 = _hc.post(_url2, json={"model": _model, "max_tokens": 2000,
+                            _resp2 = _hc.post(_url2, json={"model": _model,
+                                "max_tokens": _vis.max_tokens_for(_pages),
                                 "system": _sys, "messages": _msgs}, headers=_hdrs2)
                         _dur2 = int((_tm.monotonic() - _t0) * 1000)
                         if _resp2.status_code == 200:
@@ -12859,8 +12860,10 @@ def create_app():
                                 "data": _ext2, "field_confidence": _fc2, "cost_eur_millicents": 0})
                             await _r(scope, receive, send)
                             return
-                    except Exception:
-                        pass  # fall through to normal extraction
+                    except Exception as _exc2:
+                        # не тихо: защо бързият път не мина (напр. отрязан JSON)
+                        logger.warning("extract-raw: fast path failed (%s pages, %s): %s",
+                                       _pages, _model, _exc2)
                 _result = ai_vision_service.extract_invoice(
                     file_bytes=_file_bytes, mimetype=_mimetype, api_key=_api_key, base_url=_base_url,
                 )

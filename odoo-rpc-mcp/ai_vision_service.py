@@ -88,6 +88,19 @@ def choose_model(
     return "claude-sonnet-4-6"  # cap non-enterprise at sonnet
 
 
+def max_tokens_for(pages: int) -> int:
+    """Таванът на отговора според страниците.
+
+    Хилти, 8 страници (Теолино, 19.10.2026): при 2000 токена JSON-ът с
+    редовете се отрязваше по средата → „Invalid JSON“ → 502. 2000 за първата
+    страница + 1500 за всяка следваща, най-много 16 000.
+
+    >>> max_tokens_for(1), max_tokens_for(8), max_tokens_for(50)
+    (2000, 12500, 16000)
+    """
+    return min(16000, 2000 + 1500 * max(0, int(pages or 1) - 1))
+
+
 def count_pdf_pages(pdf_bytes: bytes) -> int:
     """Return the true PDF page count; fall back to a byte heuristic.
 
@@ -639,7 +652,7 @@ def extract_invoice(
     prompt_version: str = DEFAULT_PROMPT_VERSION,
     eur_usd: float = DEFAULT_EUR_USD,
     timeout: float = 60.0,
-    max_tokens: int = 2000,
+    max_tokens: int | None = None,
     model_override: str | None = None,
     few_shot_examples: list[dict] | None = None,
     partner_account_hints: list[dict] | None = None,
@@ -657,6 +670,7 @@ def extract_invoice(
     t0 = time.monotonic()
     pages = count_pdf_pages(file_bytes) if mimetype == "application/pdf" else 1
     size_bytes = len(file_bytes)
+    max_tokens = max_tokens or max_tokens_for(pages)
 
     model = model_override or choose_model(
         pages=pages,
@@ -731,7 +745,11 @@ def extract_invoice(
                 cost_eur_millicents=usd_millicents_to_eur_millicents(
                     compute_cost_usd_millicents(model, usage), eur_usd
                 ),
-                error_message=f"Invalid JSON from model: {e}. Head: {raw_text[:200]}",
+                error_message=(
+                    f"Model output cut at max_tokens={max_tokens} ({pages} pages) — "
+                    f"the invoice is too long for one pass"
+                    if data.get("stop_reason") == "max_tokens"
+                    else f"Invalid JSON from model: {e}. Head: {raw_text[:200]}"),
                 raw_response=data,
                 prompt_version=prompt_version,
             )
