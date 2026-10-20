@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.3.17"
+__version__ = "3.3.18"
 
 import asyncio
 import hmac
@@ -12811,6 +12811,20 @@ def create_app():
                     return
                 _file_bytes = _b64x.b64decode(_file_b64)
                 _company_vat = (_body.get("company_vat") or "").strip()
+
+                def _log_raw(**kw):
+                    # Разходът на пътя на Odoo (extract-raw) — в ai_usage_log
+                    # като при другия път; Odoo праща базата и фактурата.
+                    try:
+                        ai_usage_log.log_extraction(
+                            tenant_code=_tenant_code,
+                            odoo_url=(_body.get("odoo_url") or "")[:200],
+                            odoo_db=(_body.get("odoo_db") or "")[:100],
+                            move_id=_body.get("move_id") or None,
+                            attachment_id=_body.get("attachment_id") or None,
+                            source="odoo_extract_raw", **kw)
+                    except Exception as _lexc:  # noqa: BLE001 — дневникът не спира разчитането
+                        logger.warning("extract-raw: usage log failed: %s", _lexc)
                 if _company_vat:
                     import ai_vision_service as _vis, httpx as _hx, time as _tm, json as _js2, base64 as _b64h
                     _t0 = _tm.monotonic()
@@ -12855,6 +12869,16 @@ def create_app():
                                     _raw2 = _raw2[_ji:]
                             _ext2 = _js2.loads(_raw2)
                             _fc2 = _ext2.pop("_confidence", {})
+                            _u2 = _d2.get("usage", {}) or {}
+                            _usd2 = _vis.compute_cost_usd_millicents(_model, _u2)
+                            _log_raw(model=_model, state="success",
+                                     input_tokens=_u2.get("input_tokens", 0),
+                                     output_tokens=_u2.get("output_tokens", 0),
+                                     cache_read_tokens=_u2.get("cache_read_input_tokens", 0),
+                                     cache_creation_tokens=_u2.get("cache_creation_input_tokens", 0),
+                                     cost_millicents=_vis.usd_millicents_to_eur_millicents(_usd2, _vis.DEFAULT_EUR_USD),
+                                     cost_usd_millicents=_usd2, pages=_pages, duration_ms=_dur2,
+                                     prompt_version=_vis.DEFAULT_PROMPT_VERSION + "+seller_hint")
                             _r = _JSONResp({"state": "success", "model": _model, "pages": _pages,
                                 "duration_ms": _dur2, "prompt_version": _vis.DEFAULT_PROMPT_VERSION + "+seller_hint",
                                 "data": _ext2, "field_confidence": _fc2, "cost_eur_millicents": 0})
@@ -12874,6 +12898,7 @@ def create_app():
                     if _own_d and _ext_d and _ext_d == _own_d:
                         _result.extracted_data["partner_vat"] = None
                         _result.extracted_data["partner_name"] = None
+                _log_raw(**_result.to_log_kwargs())
                 if _result.state == "error":
                     _r = _JSONResp({"error": _result.error_message or "extraction failed"}, status_code=502)
                 else:
