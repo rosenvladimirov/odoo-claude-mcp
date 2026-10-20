@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.3.16"
+__version__ = "3.3.17"
 
 import asyncio
 import hmac
@@ -12856,7 +12856,7 @@ def create_app():
                             _ext2 = _js2.loads(_raw2)
                             _fc2 = _ext2.pop("_confidence", {})
                             _r = _JSONResp({"state": "success", "model": _model, "pages": _pages,
-                                "duration_ms": _dur2, "prompt_version": "v4+seller_hint",
+                                "duration_ms": _dur2, "prompt_version": _vis.DEFAULT_PROMPT_VERSION + "+seller_hint",
                                 "data": _ext2, "field_confidence": _fc2, "cost_eur_millicents": 0})
                             await _r(scope, receive, send)
                             return

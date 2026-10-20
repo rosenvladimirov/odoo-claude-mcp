@@ -156,8 +156,15 @@ class TestCheckArithmetic:
 # ── Prompt version wiring ────────────────────────────────────
 
 class TestPromptVersionWiring:
-    def test_default_is_v4(self):
-        assert ai_vision_service.DEFAULT_PROMPT_VERSION == "v4"
+    def test_default_is_v5(self):
+        assert ai_vision_service.DEFAULT_PROMPT_VERSION == "v5"
+
+    def test_v5_asks_payment_method_and_handwriting(self):
+        """Теолино №186 т.22: гориво с карта на колонката ≠ горивна карта."""
+        sys_v5 = ai_vision_service._PROMPT_VERSIONS["v5"]
+        assert '"payment_method"' in sys_v5 and "fuel_card" in sys_v5
+        assert '"handwritten_notes"' in sys_v5
+        assert '"payment_method"' not in ai_vision_service._PROMPT_VERSIONS["v4"]
 
     def test_v1_still_resolvable(self):
         sys_v1 = ai_vision_service._PROMPT_VERSIONS["v1"]
