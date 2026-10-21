@@ -34,6 +34,7 @@ COPY --chmod=644 supervisor_dispatch.py .
 COPY --chmod=644 klaudcho_stack.template.yml .
 COPY --chmod=644 ai_usage_log.py .
 COPY --chmod=644 ai_vision_service.py .
+COPY --chmod=644 doc_quality.py .
 COPY --chmod=644 ai_invoice_engine.py .
 COPY --chmod=644 admin_ui.py .
 COPY --chmod=644 admin_backup.py .
