@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.19] — 2026-10-21 — Invoice model by document quality
+
+### Changed
+- `/api/ai/extract-raw` and `extract_invoice` choose the model by the document
+  (`doc_quality.classify_document`, no new dependencies): a PDF with a text layer →
+  `AI_MODEL_DIGITAL` (claude-haiku-5-5); a scan or photo → `AI_MODEL_SCAN`
+  (claude-sonnet-5-5); a poor scan (short side < 1000 px, < 150 dpi, or < 0.06 bytes/px)
+  → `AI_MODEL_POOR_SCAN` (claude-opus-5-5). A model sent by the caller still wins.
+  Checked on 8 scanned bills of one company: Haiku 4.5 read 1/8 right (it took the buyer
+  for the seller), Haiku 5.5 5/8 (invented a document on one scan), Sonnet 5.5 6/8.
+- Prices of the 5.5 models (claude.com/pricing, 21.10.2026).
+- The response carries `doc_class`.
+
+### Fixed
+- The fast path of `/api/ai/extract-raw` returned `cost_eur_millicents: 0` although it
+  logged the real cost; and it did not drop the seller when it was our own VAT number,
+  as the fallback path does.
+
 ## [3.3.15] — 2026-10-03 — Supervisor dispatch (renamed from the Klaudcho provisioner)
 
 ### Changed

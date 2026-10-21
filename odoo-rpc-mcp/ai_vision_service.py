@@ -18,6 +18,7 @@ import base64
 import io
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -48,6 +49,20 @@ PRICING_USD_PER_M_TOKENS: dict[str, dict[str, float]] = {
     "claude-opus-4-7": {
         "input": 15.00, "output": 75.00,
         "cache_read": 1.50, "cache_creation": 18.75,
+    },
+    # claude.com/pricing (21.10.2026). Haiku 5.5: цената е за подкани до 100K токена —
+    # фактурите са далеч под това.
+    "claude-haiku-5-5": {
+        "input": 0.10, "output": 0.50,
+        "cache_read": 0.01, "cache_creation": 0.125,
+    },
+    "claude-sonnet-5-5": {
+        "input": 2.00, "output": 10.00,
+        "cache_read": 0.10, "cache_creation": 2.50,
+    },
+    "claude-opus-5-5": {
+        "input": 4.00, "output": 20.00,
+        "cache_read": 0.20, "cache_creation": 5.00,
     },
 }
 
@@ -86,6 +101,34 @@ def choose_model(
         return "claude-opus-4-7"
 
     return "claude-sonnet-4-6"  # cap non-enterprise at sonnet
+
+
+# Моделът според документа (doc_quality.classify_document). Сверка 21.10.2026 на 8 сканирани
+# фактури: Haiku 4.5 — 1/8 изцяло вярно (взема купувача за продавач), Haiku 5.5 — 5/8 (на един
+# скан си измисли документ), Sonnet 5.5 — 6/8 и 2 почти. Чистият PDF носи текста — стига Haiku.
+MODEL_DIGITAL = os.environ.get("AI_MODEL_DIGITAL", "claude-haiku-5-5")
+MODEL_SCAN = os.environ.get("AI_MODEL_SCAN", "claude-sonnet-5-5")
+MODEL_POOR_SCAN = os.environ.get("AI_MODEL_POOR_SCAN", "claude-opus-5-5")
+
+
+def choose_model_for_document(
+    file_bytes: bytes,
+    mimetype: str,
+    *,
+    pages: int,
+    routing_enabled: bool = True,
+) -> tuple[str, dict]:
+    """(модел, клас на документа): чист PDF → евтин; скан/снимка → по-силен; лош скан → най-силният."""
+    from doc_quality import classify_document
+
+    doc = classify_document(file_bytes, mimetype)
+    if not routing_enabled:
+        return MODEL_SCAN, doc
+    if doc.get("quality") == "poor":
+        return MODEL_POOR_SCAN, doc
+    if doc.get("kind") == "digital":
+        return (MODEL_DIGITAL if pages <= 10 else MODEL_SCAN), doc
+    return MODEL_SCAN, doc
 
 
 def max_tokens_for(pages: int) -> int:
@@ -775,12 +818,9 @@ def extract_invoice(
     size_bytes = len(file_bytes)
     max_tokens = max_tokens or max_tokens_for(pages)
 
-    model = model_override or choose_model(
-        pages=pages,
-        size_bytes=size_bytes,
-        tenant_tier=tenant_tier,
-        routing_enabled=routing_enabled,
-    )
+    routed, doc_class = choose_model_for_document(
+        file_bytes, mimetype, pages=pages, routing_enabled=routing_enabled)
+    model = model_override or routed
 
     file_b64 = base64.b64encode(file_bytes).decode("ascii")
     system, messages = build_messages(

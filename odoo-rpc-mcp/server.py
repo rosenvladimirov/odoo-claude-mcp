@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.3.18"
+__version__ = "3.3.19"
 
 import asyncio
 import hmac
@@ -12829,7 +12829,9 @@ def create_app():
                     import ai_vision_service as _vis, httpx as _hx, time as _tm, json as _js2, base64 as _b64h
                     _t0 = _tm.monotonic()
                     _pages = _vis.count_pdf_pages(_file_bytes) if _mimetype == "application/pdf" else 1
-                    _model = _vis.choose_model(pages=_pages, size_bytes=len(_file_bytes))
+                    # Моделът според документа: чист PDF / скан / лош скан (doc_quality)
+                    _model, _doc_class = _vis.choose_model_for_document(
+                        _file_bytes, _mimetype, pages=_pages)
                     # Model override from the caller (Odoo: company.ai_invoice_model_id
                     # → Settings → MCP Server → AI Invoice Model). Empty = auto-route.
                     _model_ovr = (_body.get("model") or "").strip()
@@ -12869,6 +12871,12 @@ def create_app():
                                     _raw2 = _raw2[_ji:]
                             _ext2 = _js2.loads(_raw2)
                             _fc2 = _ext2.pop("_confidence", {})
+                            # продавачът не може да е нашата фирма (както в резервния път по-долу)
+                            _own2 = _company_vat.upper().removeprefix("BG")
+                            _got2 = (_ext2.get("partner_vat") or "").strip().upper().removeprefix("BG")
+                            if _own2 and _got2 and _got2 == _own2:
+                                _ext2["partner_vat"] = None
+                                _ext2["partner_name"] = None
                             _u2 = _d2.get("usage", {}) or {}
                             _usd2 = _vis.compute_cost_usd_millicents(_model, _u2)
                             _log_raw(model=_model, state="success",
@@ -12881,7 +12889,8 @@ def create_app():
                                      prompt_version=_vis.DEFAULT_PROMPT_VERSION + "+seller_hint")
                             _r = _JSONResp({"state": "success", "model": _model, "pages": _pages,
                                 "duration_ms": _dur2, "prompt_version": _vis.DEFAULT_PROMPT_VERSION + "+seller_hint",
-                                "data": _ext2, "field_confidence": _fc2, "cost_eur_millicents": 0})
+                                "data": _ext2, "field_confidence": _fc2, "doc_class": _doc_class,
+                                "cost_eur_millicents": _vis.usd_millicents_to_eur_millicents(_usd2, _vis.DEFAULT_EUR_USD)})
                             await _r(scope, receive, send)
                             return
                     except Exception as _exc2:
