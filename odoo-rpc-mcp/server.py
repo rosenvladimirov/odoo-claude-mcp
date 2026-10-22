@@ -13,7 +13,7 @@ Supports:
 
 Transport: Streamable HTTP (recommended) or SSE/HTTP fallback
 """
-__version__ = "3.3.19"
+__version__ = "3.3.20"
 
 import asyncio
 import hmac
@@ -6150,6 +6150,10 @@ TOOLS = [
     Tool(
         name="odoo_timesheet_timer",
         description=(
+            "Work timers. With the o-experts module oexperts_work_timer installed (also Community): several "
+            "timers may run at once (AI and the phone each on their tasks, nothing is interrupted), the real "
+            "minutes are logged and the o-experts app shows them; start needs no confirm, pass ref (e.g. your "
+            "session) and stop/cancel by timer_id or task_id. Otherwise: "
             "Drive Odoo's native timesheet timer (Enterprise timesheet_grid, Odoo 17-19) — the same "
             "timer shown in the Odoo web and mobile app. action='start' starts a timer on a new "
             "timesheet line for task_id (or project_id); action='status' lists your running/paused "
@@ -6177,6 +6181,14 @@ TOOLS = [
                 "timesheet_id": {
                     "type": "integer",
                     "description": "stop/cancel: account.analytic.line ID carrying the timer (from status).",
+                },
+                "timer_id": {
+                    "type": "integer",
+                    "description": "o-experts work timer: stop/cancel this running work (id from status).",
+                },
+                "ref": {
+                    "type": "string",
+                    "description": "o-experts work timer: who started it, e.g. the AI session; shown in the app.",
                 },
                 "description": {
                     "type": "string",

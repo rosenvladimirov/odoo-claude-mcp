@@ -11,6 +11,10 @@
     `_call_void` приема само тази грешка и след нея сверяваме състоянието.
 
 Ползва се от tool `odoo_timesheet_timer` в server.py.
+
+Има ли базата модула `oexperts_work_timer` (`oexperts.work.timer`, ADR o-experts-push/0002), инструментът
+ползва него: работи и в Community, позволява няколко едновременни хронометъра (AI и телефонът по свои
+задачи, без да се прекъсват), отчита реалните минути и се вижда в приложението o-experts.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ LINE = "account.analytic.line"
 TASK = "project.task"
 TIMER = "timer.timer"
 TASK_WIZARD = "project.task.create.timesheet"
+WORK = "oexperts.work.timer"
 
 ACTIONS = ("start", "status", "stop", "cancel")
 
@@ -368,11 +373,90 @@ def cancel(
     return {"cancelled": _public(target), "removed_empty_line": removed_line}
 
 
+# ─────────────── oexperts.work.timer (o-experts, Community) ───────────────
+
+
+def work_available(conn) -> bool:
+    """Модулът oexperts_work_timer е инсталиран в базата."""
+    try:
+        return bool(conn.execute_kw("ir.model", "search_count", [[["model", "=", WORK]]], {}))
+    except Exception:  # noqa: BLE001 — без права/модел ⇒ старият път
+        return False
+
+
+def _work_list(conn) -> list[dict]:
+    timers = conn.execute_kw(WORK, "timer_list", [], {}) or []
+    for timer in timers:
+        timer["elapsed_minutes"] = max(0, int(timer.get("elapsed_seconds") or 0) // 60)
+    return timers
+
+
+def _work_pick(timers: list[dict], timer_id: int | None, task_id: int | None) -> dict:
+    if timer_id:
+        found = [t for t in timers if t["id"] == timer_id]
+        if not found:
+            raise TimerError(f"No running work {timer_id} of yours.")
+        return found[0]
+    if task_id:
+        found = [t for t in timers if t.get("task_id") == task_id]
+        # няколко по една задача (AI и телефонът) ⇒ предимство за пуснатия от AI
+        ai = [t for t in found if t.get("source") == "ai"]
+        if len(found) == 1 or len(ai) == 1:
+            return (ai or found)[0]
+        if not found:
+            raise TimerError(f"No work of yours runs on task {task_id}.")
+        raise TimerError(f"Several timers on task {task_id}; pass timer_id (action='status').")
+    if len(timers) == 1:
+        return timers[0]
+    if not timers:
+        raise TimerError("You have no work running.")
+    raise TimerError("Several timers run; pass timer_id or task_id (action='status').")
+
+
+def _work_run(conn, action: str, args: dict) -> dict:
+    if action == "status":
+        timers = _work_list(conn)
+        return {"backend": WORK, "timers": timers, "running_count": len(timers)}
+    if action == "start":
+        if not args.get("task_id") and not args.get("project_id"):
+            raise TimerError("Pass task_id or project_id.")
+        started = conn.execute_kw(WORK, "timer_start", [], {
+            "task_id": args.get("task_id") or False,
+            "project_id": args.get("project_id") or False,
+            "name": args.get("description") or "",
+            "source": "ai",
+            "ref": args.get("ref") or False,
+        })
+        # няколко едновременно — нищо не се прекъсва
+        return {"backend": WORK, "started": started, "interrupted": []}
+    target = _work_pick(_work_list(conn), args.get("timer_id"), args.get("task_id"))
+    if action == "stop":
+        minutes = max(1, target["elapsed_minutes"])
+        description = args.get("description")
+        if not args.get("confirm"):
+            return {
+                "proposal": {"timer": target, "minutes_to_log": minutes, "hours_to_log": round(minutes / 60, 4),
+                             "description": description if description is not None else target.get("name", "")},
+                "message": "Nothing written. Repeat with confirm=true to log the real minutes.",
+            }
+        kwargs = {"name": description} if description else {}
+        logged = conn.execute_kw(WORK, "timer_stop", [[target["id"]]], kwargs)
+        return {"backend": WORK, "logged": (logged or [{}])[0]}
+    # cancel
+    if not args.get("confirm"):
+        return {"proposal": {"discard": target},
+                "message": "Nothing deleted. Repeat with confirm=true to drop this work without logging time."}
+    conn.execute_kw(WORK, "unlink", [[target["id"]]], {})
+    return {"backend": WORK, "cancelled": target}
+
+
 def run(conn, action: str, args: dict) -> dict:
     """Входна точка за tool-а. Връща dict; TimerError → {"error": ...}."""
     if action not in ACTIONS:
         return {"error": f"action must be one of {', '.join(ACTIONS)}"}
     try:
+        if work_available(conn):
+            return _work_run(conn, action, args)
         uid = conn.authenticate()
         if action == "status":
             return status(conn, uid)

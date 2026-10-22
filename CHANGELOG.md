@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.20] — 2026-10-22 — Work timers of o-experts in odoo_timesheet_timer
+
+### Added
+- `odoo_timesheet_timer` uses `oexperts.work.timer` (module `oexperts_work_timer`) when the database has
+  it: it works on Community, several timers run at once (AI and the phone each on their tasks, nothing
+  is interrupted), start needs no confirm and is marked as AI with an optional `ref` (the session), stop
+  proposes the real minutes and logs with `confirm=true`, stop/cancel pick by `timer_id` or `task_id`.
+  The o-experts app shows the same running work. Without the module: Enterprise `timer.timer` as before.
+
 ## [3.3.19] — 2026-10-21 — Invoice model by document quality
 
 ### Changed

@@ -314,3 +314,79 @@ def test_parse_dt_accepts_xmlrpc_formats():
     assert tt._parse_dt("20260929T10:00:00") == datetime(2026, 9, 29, 10, 0)
     assert tt._parse_dt("2026-09-29 10:00:00.123") == datetime(2026, 9, 29, 10, 0)
     assert tt._parse_dt(False) is None
+
+
+# ─────────────── oexperts.work.timer (Community, няколко едновременно) ───────────────
+
+
+class FakeWork:
+    """Odoo с модула oexperts_work_timer: хронометрите са редове, няколко едновременно."""
+
+    def __init__(self):
+        self.timers = {}
+        self.next_id = 1
+        self.calls = []
+
+    def authenticate(self):
+        return 5
+
+    def execute_kw(self, model, method, args, kwargs):
+        self.calls.append((model, method, args, kwargs))
+        if model == "ir.model" and method == "search_count":
+            return 1
+        assert model == tt.WORK, model
+        if method == "timer_list":
+            return [dict(t) for t in self.timers.values()]
+        if method == "timer_start":
+            tid = self.next_id
+            self.next_id += 1
+            self.timers[tid] = {"id": tid, "task_id": kwargs["task_id"], "project_id": kwargs["project_id"] or 1,
+                                "name": kwargs["name"], "source": kwargs["source"], "ref": kwargs["ref"] or "",
+                                "elapsed_seconds": 47 * 60 + 30}
+            return dict(self.timers[tid])
+        if method == "timer_stop":
+            (ids,) = args
+            done = [{"timer_id": i, "line_id": 100 + i, "minutes": self.timers[i]["elapsed_seconds"] // 60} for i in ids]
+            for i in ids:
+                del self.timers[i]
+            return done
+        if method == "unlink":
+            for i in args[0]:
+                del self.timers[i]
+            return True
+        raise AssertionError(method)
+
+
+def test_work_timers_run_side_by_side():
+    odoo = FakeWork()
+    first = tt.run(odoo, "start", {"task_id": 7, "description": "MCP", "ref": "session-1"})
+    second = tt.run(odoo, "start", {"task_id": 8})
+    assert first["interrupted"] == [] and second["interrupted"] == []
+    status = tt.run(odoo, "status", {})
+    assert status["running_count"] == 2 and status["backend"] == tt.WORK
+    assert {t["source"] for t in status["timers"]} == {"ai"}
+    assert odoo.calls[1][3]["ref"] == "session-1"
+
+
+def test_work_stop_proposes_real_minutes_then_logs():
+    odoo = FakeWork()
+    tt.run(odoo, "start", {"task_id": 7})
+    tt.run(odoo, "start", {"task_id": 8})
+    proposal = tt.run(odoo, "stop", {"task_id": 7})
+    assert proposal["proposal"]["minutes_to_log"] == 47 and len(odoo.timers) == 2
+    logged = tt.run(odoo, "stop", {"task_id": 7, "confirm": True, "description": "done"})
+    assert logged["logged"]["minutes"] == 47
+    assert [c for c in odoo.calls if c[1] == "timer_stop"][0][3] == {"name": "done"}
+    assert list(odoo.timers) == [2]
+
+
+def test_work_needs_a_target_when_several_run():
+    odoo = FakeWork()
+    tt.run(odoo, "start", {"task_id": 7})
+    tt.run(odoo, "start", {"task_id": 8})
+    assert "Several timers" in tt.run(odoo, "stop", {})["error"]
+    assert tt.run(odoo, "cancel", {"timer_id": 2, "confirm": True})["cancelled"]["task_id"] == 8
+
+
+def test_work_start_needs_task_or_project():
+    assert "task_id or project_id" in tt.run(FakeWork(), "start", {})["error"]
