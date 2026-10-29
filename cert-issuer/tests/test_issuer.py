@@ -161,8 +161,15 @@ def test_http(env, monkeypatch):
         assert st == 200 and json.loads(body)["names"] == [WILD]
         assert iss.overview()["pulls"][-1]["address"] == "203.0.113.7"
         assert get("/")[0] == 403 and get("/v1/overview")[0] == 403
+        # без Access пред нас заглавката не значи нищо (може да се подправи)
+        assert get("/", {"Cf-Access-Authenticated-User-Email": "x@example.com"})[0] == 403
+        monkeypatch.setenv("ACCESS_ENABLED", "1")
         st, body = get("/", {"Cf-Access-Authenticated-User-Email": "rosen@example.com"})
         assert st == 200 and b"shop1/kasa1" in body
+        monkeypatch.delenv("ACCESS_ENABLED")
+        monkeypatch.setenv("OVERVIEW_TOKEN", "ov-tok")
+        assert get("/v1/overview", {"Authorization": "Bearer nope"})[0] == 403
+        assert get("/v1/overview", {"Authorization": "Bearer ov-tok"})[0] == 200
         assert get("/healthz") == (200, b'{"ok": true}')
     finally:
         srv.shutdown()

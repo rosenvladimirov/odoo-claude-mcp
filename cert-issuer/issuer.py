@@ -9,6 +9,7 @@
 
 Контрол: всяка машина е с тайна (`add-till`), всяко теглене се записва (машина,
 кога, адрес, сериен номер на сертификата) — `GET /` и `python issuer.py pulls`.
+Прегледът `GET /` иска Cloudflare Access (ACCESS_ENABLED=1) или OVERVIEW_TOKEN.
 `remove-till` спира машината.
 
     GET  /v1/cert     Authorization: Bearer <тайната на машината>
@@ -291,10 +292,16 @@ def make_handler(issuer: Issuer):
             if self.path == "/healthz":
                 return self._json(200, {"ok": True})
             if self.path in ("/", "/v1/overview"):
-                # Прегледът е за човек, пуснат от Cloudflare Access; без него — нищо.
-                who = self.headers.get("Cf-Access-Authenticated-User-Email")
-                if not who and os.environ.get("OVERVIEW_WITHOUT_ACCESS") != "1":
-                    return self._json(403, {"detail": "overview only through Cloudflare Access"})
+                # Прегледът: човек, пуснат от Cloudflare Access (само ако пред нас
+                # наистина има Access — иначе заглавката може да се подправи), или
+                # ключът за преглед.
+                via_access = (os.environ.get("ACCESS_ENABLED") == "1"
+                              and self.headers.get("Cf-Access-Authenticated-User-Email"))
+                tok = os.environ.get("OVERVIEW_TOKEN", "")
+                auth = self.headers.get("Authorization", "")
+                via_token = bool(tok) and hmac.compare_digest(auth, "Bearer " + tok)
+                if not (via_access or via_token):
+                    return self._json(403, {"detail": "overview: Cloudflare Access or the overview token"})
                 if self.path == "/":
                     return self._send(200, issuer.overview_html().encode(), "text/html; charset=utf-8")
                 return self._json(200, issuer.overview())
