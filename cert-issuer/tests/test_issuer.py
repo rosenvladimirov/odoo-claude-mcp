@@ -59,7 +59,7 @@ class Clock:
 @pytest.fixture
 def env(tmp_path):
     acme, clock = FakeACME(), Clock()
-    iss = m.Issuer(tmp_path, acme, now=clock)
+    iss = m.Issuer(tmp_path, acme, now=clock, extra_zones=("example-shell.space",))
     s1 = iss.add_till("shop1/kasa1")
     s2 = iss.add_till("shop2/kasa1")
     return iss, acme, clock, s1, s2
@@ -199,3 +199,54 @@ def test_a_second_till_of_the_same_client_does_not_reissue(env):
     iss.ensure()
     iss.add_till("shop1/kasa2")
     assert not iss.needs_issue() and iss.ensure() is False and len(acme.calls) == 1
+
+
+def _wait(cond):
+    for _ in range(100):
+        if cond():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_extra_names_go_only_to_their_machine(env):
+    iss, acme, _, s1, s2 = env
+    iss.ensure()
+    iss.set_extra("shop1/kasa1", ["shop1.example-shell.space", "shop1-v19.example-shell.space"])
+    iss.for_till(s1)
+    assert _wait(lambda: iss.extra_of("shop1/kasa1") is not None)
+    st, body = iss.for_till(s1)
+    assert st == 200 and sorted(body["extra"]["names"]) == ["shop1-v19.example-shell.space", "shop1.example-shell.space"]
+    assert body["extra"]["key"] != body["key"]                 # отделен ключ
+    assert "extra" not in iss.for_till(s2)[1]                  # другата машина не го получава
+    assert not any("example-shell" in n for n in iss.current()["names"])  # общият не ги носи
+
+
+def test_extra_names_only_in_allowed_zones(env):
+    iss, *_ = env
+    for bad in (["evil.example.com"], ["x.shop1.erpnet.mcpworks.net"], ["a b.example-shell.space"]):
+        with pytest.raises(ValueError):
+            iss.set_extra("shop1/kasa1", bad)
+    with pytest.raises(ValueError):
+        iss.set_extra("nobody/kasa1", ["a.example-shell.space"])
+
+
+def test_rotating_the_secret_keeps_the_extra_names(env):
+    iss, *_ = env
+    iss.set_extra("shop1/kasa1", ["shop1.example-shell.space"])
+    new = iss.add_till("shop1/kasa1")
+    assert iss.overview()["machines"]["shop1/kasa1"]["extra"] == ["shop1.example-shell.space"]
+    assert iss.for_till(new)[0] in (200, 503)
+
+
+def test_extra_is_renewed_on_its_own(env):
+    iss, acme, clock, s1, _ = env
+    iss.ensure()
+    iss.set_extra("shop1/kasa1", ["shop1.example-shell.space"])
+    iss.ensure_all()
+    n = len(acme.calls)
+    iss.ensure_all()
+    assert len(acme.calls) == n                                # нищо за подновяване
+    clock.t += 61 * 86400
+    iss.ensure_all()
+    assert ["shop1.example-shell.space"] in acme.calls[n:] and len(acme.calls) == n + 2

@@ -22,6 +22,8 @@
     python issuer.py add-till <клиент>/<каса>        # печата тайната веднъж
     python issuer.py rotate-till <клиент>/<каса>
     python issuer.py remove-till <клиент>/<каса>
+    python issuer.py set-extra <клиент>/<каса> <име> …  # публични имена само за тази машина
+                                                     # (отделен сертификат; зоните — EXTRA_ZONES)
     python issuer.py ensure                          # издай/поднови сега, без сървър
     python issuer.py pulls                           # кой кога е теглил
 
@@ -74,7 +76,8 @@ class Issuer:
 
     def __init__(self, data_dir: Path, acme: Callable[[list[str]], tuple[bytes, bytes]],
                  base: str = "erpnet.mcpworks.net",
-                 now: Callable[[], float] = time.time):
+                 now: Callable[[], float] = time.time,
+                 extra_zones: tuple[str, ...] = ()):
         self.data = Path(data_dir)
         self.data.mkdir(parents=True, exist_ok=True)
         self.certs = self.data / "certs"
@@ -84,7 +87,9 @@ class Issuer:
         self.base = base.lower().strip(".")
         self.now = now
         self._lock = threading.Lock()
-        self._issuing = False
+        self._issuing: set[str] = set()
+        # Зони, в които машина може да има допълнителни (публични) имена — само тук има DNS.
+        self.extra_zones = tuple(z.lower().strip(".") for z in extra_zones if z.strip())
 
     # ─── регистърът на машините ───────────────────────────────────────
 
@@ -121,9 +126,29 @@ class Issuer:
         secret = secrets.token_urlsafe(32)
         with self._lock:
             reg = self._load()
-            reg["tills"][till] = {"secret_sha256": _sha256(secret), "created": int(self.now())}
+            t = reg["tills"].get(till, {})
+            t.update({"secret_sha256": _sha256(secret), "created": t.get("created", int(self.now()))})
+            reg["tills"][till] = t          # смяна на тайната пази допълнителните имена
             self._save(reg)
         return secret
+
+    def set_extra(self, till: str, names: list[str]) -> list[str]:
+        """Допълнителни публични имена САМО за тази машина (отделен сертификат, само за нея)."""
+        clean = []
+        for n in names:
+            n = n.lower().strip(".")
+            label_ok = all(lbl and lbl.replace("-", "").isalnum() for lbl in n.removeprefix("*.").split("."))
+            zone_ok = any(n.endswith("." + z) for z in self.extra_zones)
+            if not label_ok or not zone_ok or n.endswith("." + self.base):
+                raise ValueError(f"{n}: not allowed (zones: {', '.join(self.extra_zones) or 'none'})")
+            clean.append(n)
+        with self._lock:
+            reg = self._load()
+            if till not in reg["tills"]:
+                raise ValueError(f"{till}: unknown machine")
+            reg["tills"][till]["extra"] = sorted(set(clean))
+            self._save(reg)
+        return sorted(set(clean))
 
     def remove_till(self, till: str) -> bool:
         with self._lock:
@@ -142,13 +167,69 @@ class Issuer:
 
     # ─── сертификатът ─────────────────────────────────────────────────
 
+    def _paths(self, key: str) -> tuple[Path, Path]:
+        stem = "wildcard" if key == "main" else "extra__" + key.split(":", 1)[1].replace("/", "__")
+        return self.certs / f"{stem}.crt", self.certs / f"{stem}.key"
+
     @property
     def _crt(self) -> Path:
-        return self.certs / "wildcard.crt"
+        return self._paths("main")[0]
 
     @property
     def _key(self) -> Path:
-        return self.certs / "wildcard.key"
+        return self._paths("main")[1]
+
+    def _wanted(self, key: str) -> list[str]:
+        if key == "main":
+            return self.wanted_names()
+        t = self._load()["tills"].get(key.split(":", 1)[1], {})
+        return list(t.get("extra", []))
+
+    def _read(self, key: str) -> Optional[dict]:
+        crt, keyf = self._paths(key)
+        if not (crt.exists() and keyf.exists()):
+            return None
+        leaf = x509.load_pem_x509_certificate(crt.read_bytes())
+        names = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value \
+            .get_values_for_type(x509.DNSName)
+        return {"names": names, "chain": crt.read_text(), "key": keyf.read_text(),
+                "notAfter": int(leaf.not_valid_after_utc.timestamp()), "serial": format(leaf.serial_number, "x")}
+
+    def _needs(self, key: str) -> bool:
+        wanted = self._wanted(key)
+        if not wanted:
+            return False
+        cur = self._read(key)
+        return (cur is None or cur["notAfter"] - self.now() <= RENEW_DAYS * 86400
+                or not set(wanted) <= set(cur["names"]))
+
+    def _ensure_key(self, key: str) -> bool:
+        with self._lock:
+            if key in self._issuing or not self._needs(key):
+                return False
+            self._issuing.add(key)
+        try:
+            wanted = self._wanted(key)
+            chain, pkey = self.acme(wanted)
+            leaf = x509.load_pem_x509_certificate(chain)
+            got = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value \
+                .get_values_for_type(x509.DNSName)
+            if not set(wanted) <= set(got):
+                raise RuntimeError(f"ACME returned a certificate for {got}, not {wanted}")
+            crt, keyf = self._paths(key)
+            for p, data in ((keyf, pkey), (crt, chain)):
+                tmp = p.with_suffix(".tmp")
+                tmp.write_bytes(data)
+                os.chmod(tmp, 0o600)
+                tmp.replace(p)
+            log.info("issued %s (%s) until %s", ",".join(got), key, leaf.not_valid_after_utc.date())
+            return True
+        finally:
+            with self._lock:
+                self._issuing.discard(key)
+
+    def extra_of(self, till: str) -> Optional[dict]:
+        return self._read("extra:" + till)
 
     def wanted_names(self) -> list[str]:
         """`*.<база>` + `*.<клиент>.<база>` за всеки клиент с записана машина."""
@@ -156,52 +237,29 @@ class Issuer:
         return [f"*.{self.base}"] + [f"*.{c}.{self.base}" for c in clients]
 
     def current(self) -> Optional[dict]:
-        if not (self._crt.exists() and self._key.exists()):
-            return None
-        leaf = x509.load_pem_x509_certificate(self._crt.read_bytes())
-        names = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value \
-            .get_values_for_type(x509.DNSName)
-        return {"names": names, "chain": self._crt.read_text(), "key": self._key.read_text(),
-                "notAfter": int(leaf.not_valid_after_utc.timestamp()), "serial": format(leaf.serial_number, "x")}
+        return self._read("main")
 
     def needs_issue(self) -> bool:
-        cur = self.current()
-        return (cur is None or cur["notAfter"] - self.now() <= RENEW_DAYS * 86400
-                or not set(self.wanted_names()) <= set(cur["names"]))
+        return self._needs("main")
 
     def ensure(self) -> bool:
-        """Издава/подновява, ако трябва. True — издаден нов."""
-        with self._lock:
-            if self._issuing or not self.needs_issue():
-                return False
-            self._issuing = True
-        try:
-            wanted = self.wanted_names()
-            chain, key = self.acme(wanted)
-            leaf = x509.load_pem_x509_certificate(chain)
-            got = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value \
-                .get_values_for_type(x509.DNSName)
-            if not set(wanted) <= set(got):
-                raise RuntimeError(f"ACME returned a certificate for {got}, not {wanted}")
-            for p, data in ((self._key, key), (self._crt, chain)):
-                tmp = p.with_suffix(".tmp")
-                tmp.write_bytes(data)
-                os.chmod(tmp, 0o600)
-                tmp.replace(p)
-            log.info("issued %s until %s", ",".join(got), leaf.not_valid_after_utc.date())
-            return True
-        finally:
-            with self._lock:
-                self._issuing = False
+        """Общият: издава/подновява, ако трябва. True — издаден нов."""
+        return self._ensure_key("main")
+
+    def ensure_all(self) -> None:
+        """Общият и допълнителните на всички машини; един провал не спира другите."""
+        keys = ["main"] + ["extra:" + t for t, v in self._load()["tills"].items() if v.get("extra")]
+        for k in keys:
+            try:
+                self._ensure_key(k)
+            except Exception:  # noqa: BLE001
+                log.exception("ensure %s failed", k)
 
     def _ensure_in_background(self) -> None:
         threading.Thread(target=self._ensure_logged, daemon=True).start()
 
     def _ensure_logged(self) -> None:
-        try:
-            self.ensure()
-        except Exception:  # noqa: BLE001
-            log.exception("ensure failed")
+        self.ensure_all()
 
     # ─── тегленето ────────────────────────────────────────────────────
 
@@ -218,6 +276,11 @@ class Issuer:
             # старият (ако има) остава в сила за другите машини.
             self._ensure_in_background()
             return 503, {"detail": "certificate is being issued, try again in a minute"}
+        extra = None
+        if self._wanted("extra:" + till):
+            extra = self.extra_of(till)
+            if extra is None or self._needs("extra:" + till):
+                self._ensure_in_background()
         if self.needs_issue():
             self._ensure_in_background()
         with self._lock:
@@ -229,7 +292,10 @@ class Issuer:
                 reg["pulls"].append({"till": till, "at": int(self.now()), "address": address, "serial": cur["serial"]})
                 reg["pulls"] = reg["pulls"][-MAX_PULLS_KEPT:]
                 self._save(reg)
-        return 200, cur
+        body = dict(cur)
+        if extra is not None:
+            body["extra"] = extra          # само на тази машина
+        return 200, body
 
     def overview(self) -> dict:
         reg, cur = self._load(), self.current()
@@ -237,7 +303,9 @@ class Issuer:
             "names": self.wanted_names(),
             "certificate": None if cur is None else {"serial": cur["serial"], "notAfter": cur["notAfter"],
                                                      "names": cur["names"]},
-            "machines": {k: {x: v.get(x) for x in ("created", "last_pull", "last_serial", "last_address")}
+            "machines": {k: {**{x: v.get(x) for x in ("created", "last_pull", "last_serial", "last_address")},
+                             "extra": v.get("extra", []),
+                             "extra_notAfter": (self.extra_of(k) or {}).get("notAfter")}
                          for k, v in sorted(reg["tills"].items())},
             "pulls": reg["pulls"][-50:],
         }
@@ -333,7 +401,8 @@ def make_handler(issuer: Issuer):
 def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     data = Path(os.environ.get("CERT_ISSUER_DATA", "/data"))
-    issuer = Issuer(data, lego_acme, os.environ.get("CERT_BASE", "erpnet.mcpworks.net"))
+    issuer = Issuer(data, lego_acme, os.environ.get("CERT_BASE", "erpnet.mcpworks.net"),
+                    extra_zones=tuple(os.environ.get("EXTRA_ZONES", "").split(",")))
     cmd = argv[0] if argv else "serve"
     if cmd == "serve":
         every = int(os.environ.get("CHECK_EVERY_S", "21600"))
@@ -356,6 +425,11 @@ def main(argv: list[str]) -> int:
         return 0
     if cmd in ("add-till", "rotate-till") and len(argv) == 2:
         print(issuer.add_till(argv[1]))
+        return 0
+    if cmd == "set-extra" and len(argv) >= 2:
+        print(json.dumps(issuer.set_extra(argv[1], argv[2:])))
+        issuer._ensure_in_background()
+        time.sleep(1)
         return 0
     if cmd == "remove-till" and len(argv) == 2:
         return 0 if issuer.remove_till(argv[1]) else 1
