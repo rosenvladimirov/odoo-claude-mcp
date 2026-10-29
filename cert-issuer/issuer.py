@@ -1,11 +1,12 @@
 """Сертификатният сървър за касите (ADR erpnet-kasi-fleet/0005).
 
-Модел (Росен, 29.10.2026): ЕДИН wildcard сертификат за всички — `*.erpnet.mcpworks.net`
-от Let's Encrypt (DNS-01, без запис с адрес). В публичните дневници (CT) се вижда само
-той — без имена на клиенти, устройства или IP. Сървърът сам се грижи да го има
-(издава и подновява под RENEW_DAYS дни); машините (проксито на касата) винаги го
-ДЪРПАТ оттук през тунела на mcpworks.net и го слагат пред устройствата си
-(`bluecash-shop1.erpnet.mcpworks.net` → BlueCash в LAN). Токенът за DNS е само тук.
+Модел (Росен, 29.10.2026): ЕДИН сертификат за всички машини, от Let's Encrypt (DNS-01,
+без запис с адрес). Носи `*.erpnet.mcpworks.net` и по едно `*.<клиент>.erpnet.mcpworks.net`
+за всеки клиент с записана машина — `*` покрива само едно ниво (RFC 6125), а машините
+са на две: `kasa.shop1.erpnet.mcpworks.net`. Сървърът сам се грижи да го има: издава,
+подновява под RENEW_DAYS дни и преиздава, щом се появи нов клиент. Машините (проксито
+на касата) винаги го ДЪРПАТ оттук и го слагат пред устройствата си. Токенът за DNS е
+само тук.
 
 Контрол: всяка машина е с тайна (`add-till`), всяко теглене се записва (машина,
 кога, адрес, сериен номер на сертификата) — `GET /` и `python issuer.py pulls`.
@@ -24,7 +25,7 @@
     python issuer.py ensure                          # издай/поднови сега, без сървър
     python issuer.py pulls                           # кой кога е теглил
 
-Env: CERT_ISSUER_DATA (/data), CERT_DOMAIN (*.erpnet.mcpworks.net), CLOUDFLARE_DNS_API_TOKEN, ACME_EMAIL,
+Env: CERT_ISSUER_DATA (/data), CERT_BASE (erpnet.mcpworks.net), CLOUDFLARE_DNS_API_TOKEN, ACME_EMAIL,
 ACME_SERVER (по подразбиране staging — production се пуска изрично),
 PORT (8095), CHECK_EVERY_S (21600).
 """
@@ -68,11 +69,11 @@ def _ts(t: float) -> str:
 class Issuer:
     """Регистърът на машините, сертификатът, грижата за него и отчетът кой го е теглил.
 
-    `acme(domain) -> (chain_pem, key_pem)` издава; в тестовете е подменен.
+    `acme([имена]) -> (chain_pem, key_pem)` издава; в тестовете е подменен.
     """
 
-    def __init__(self, data_dir: Path, acme: Callable[[str], tuple[bytes, bytes]],
-                 domain: str = "*.erpnet.mcpworks.net",
+    def __init__(self, data_dir: Path, acme: Callable[[list[str]], tuple[bytes, bytes]],
+                 base: str = "erpnet.mcpworks.net",
                  now: Callable[[], float] = time.time):
         self.data = Path(data_dir)
         self.data.mkdir(parents=True, exist_ok=True)
@@ -80,7 +81,7 @@ class Issuer:
         self.certs.mkdir(exist_ok=True)
         os.chmod(self.certs, 0o700)
         self.acme = acme
-        self.domain = domain.lower()
+        self.base = base.lower().strip(".")
         self.now = now
         self._lock = threading.Lock()
         self._issuing = False
@@ -149,16 +150,24 @@ class Issuer:
     def _key(self) -> Path:
         return self.certs / "wildcard.key"
 
+    def wanted_names(self) -> list[str]:
+        """`*.<база>` + `*.<клиент>.<база>` за всеки клиент с записана машина."""
+        clients = sorted({t.split("/")[0] for t in self._load()["tills"]})
+        return [f"*.{self.base}"] + [f"*.{c}.{self.base}" for c in clients]
+
     def current(self) -> Optional[dict]:
         if not (self._crt.exists() and self._key.exists()):
             return None
         leaf = x509.load_pem_x509_certificate(self._crt.read_bytes())
-        return {"names": [self.domain], "chain": self._crt.read_text(), "key": self._key.read_text(),
+        names = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value \
+            .get_values_for_type(x509.DNSName)
+        return {"names": names, "chain": self._crt.read_text(), "key": self._key.read_text(),
                 "notAfter": int(leaf.not_valid_after_utc.timestamp()), "serial": format(leaf.serial_number, "x")}
 
     def needs_issue(self) -> bool:
         cur = self.current()
-        return cur is None or cur["notAfter"] - self.now() <= RENEW_DAYS * 86400
+        return (cur is None or cur["notAfter"] - self.now() <= RENEW_DAYS * 86400
+                or not set(self.wanted_names()) <= set(cur["names"]))
 
     def ensure(self) -> bool:
         """Издава/подновява, ако трябва. True — издаден нов."""
@@ -167,18 +176,19 @@ class Issuer:
                 return False
             self._issuing = True
         try:
-            chain, key = self.acme(self.domain)
+            wanted = self.wanted_names()
+            chain, key = self.acme(wanted)
             leaf = x509.load_pem_x509_certificate(chain)
             got = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value \
                 .get_values_for_type(x509.DNSName)
-            if self.domain not in got:
-                raise RuntimeError(f"ACME returned a certificate for {got}, not {self.domain}")
+            if not set(wanted) <= set(got):
+                raise RuntimeError(f"ACME returned a certificate for {got}, not {wanted}")
             for p, data in ((self._key, key), (self._crt, chain)):
                 tmp = p.with_suffix(".tmp")
                 tmp.write_bytes(data)
                 os.chmod(tmp, 0o600)
                 tmp.replace(p)
-            log.info("issued %s until %s", self.domain, leaf.not_valid_after_utc.date())
+            log.info("issued %s until %s", ",".join(got), leaf.not_valid_after_utc.date())
             return True
         finally:
             with self._lock:
@@ -202,7 +212,10 @@ class Issuer:
         if not till:
             return 401, {"detail": "unknown machine"}
         cur = self.current()
-        if cur is None:
+        client = till.split("/")[0]
+        if cur is None or f"*.{client}.{self.base}" not in cur["names"]:
+            # Сертификат няма или още не носи името на този клиент — издава се;
+            # старият (ако има) остава в сила за другите машини.
             self._ensure_in_background()
             return 503, {"detail": "certificate is being issued, try again in a minute"}
         if self.needs_issue():
@@ -221,8 +234,9 @@ class Issuer:
     def overview(self) -> dict:
         reg, cur = self._load(), self.current()
         return {
-            "domain": self.domain,
-            "certificate": None if cur is None else {"serial": cur["serial"], "notAfter": cur["notAfter"]},
+            "names": self.wanted_names(),
+            "certificate": None if cur is None else {"serial": cur["serial"], "notAfter": cur["notAfter"],
+                                                     "names": cur["names"]},
             "machines": {k: {x: v.get(x) for x in ("created", "last_pull", "last_serial", "last_address")}
                          for k, v in sorted(reg["tills"].items())},
             "pulls": reg["pulls"][-50:],
@@ -237,8 +251,8 @@ class Issuer:
             f"<td>{html.escape(v.get('last_address') or '')}</td>"
             f"<td>{'current' if cert and v.get('last_serial') == cert['serial'] else html.escape(v.get('last_serial') or '—')}</td></tr>"
             for k, v in o["machines"].items())
-        head = (f"{html.escape(o['domain'])} — serial {cert['serial']}, until {_ts(cert['notAfter'])}"
-                if cert else f"{html.escape(o['domain'])} — not issued yet")
+        head = (f"{html.escape(', '.join(cert['names']))} — serial {cert['serial']}, until {_ts(cert['notAfter'])}"
+                if cert else "not issued yet")
         return ("<!doctype html><meta charset=utf-8><title>cert-issuer</title>"
                 "<style>body{font:14px system-ui;margin:24px}td,th{padding:4px 10px;border-bottom:1px solid #ddd;text-align:left}</style>"
                 f"<h2>{head}</h2><table><tr><th>machine</th><th>added</th><th>last pull</th><th>from</th><th>has</th></tr>{rows}</table>")
@@ -246,7 +260,7 @@ class Issuer:
 
 # ─── ACME през lego ────────────────────────────────────────────────────
 
-def lego_acme(domain: str) -> tuple[bytes, bytes]:
+def lego_acme(domains: list[str]) -> tuple[bytes, bytes]:
     """`lego` с Cloudflare DNS-01; ключът EC P-256 се прави тук, на сървъра."""
     for var in ("CLOUDFLARE_DNS_API_TOKEN", "ACME_EMAIL"):
         if not os.environ.get(var):
@@ -255,12 +269,12 @@ def lego_acme(domain: str) -> tuple[bytes, bytes]:
     cmd = ["lego", "--accept-tos", "--email", os.environ["ACME_EMAIL"],
            "--server", os.environ.get("ACME_SERVER", LE_STAGING),
            "--dns", "cloudflare", "--dns.resolvers", "1.1.1.1:53", "--key-type", "ec256",
-           "--domains", domain, "--path", str(data), "run"]
+           *[a for d in domains for a in ("--domains", d)], "--path", str(data), "run"]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if r.returncode != 0:
         tail = " ".join((r.stderr.strip().splitlines() or ["?"])[-1].split())[-700:]
         raise RuntimeError("ACME failed: " + tail)
-    base = data / "certificates" / domain.replace("*", "_")
+    base = data / "certificates" / domains[0].replace("*", "_")  # lego кръщава по първото име
     return Path(f"{base}.crt").read_bytes(), Path(f"{base}.key").read_bytes()
 
 
@@ -319,7 +333,7 @@ def make_handler(issuer: Issuer):
 def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     data = Path(os.environ.get("CERT_ISSUER_DATA", "/data"))
-    issuer = Issuer(data, lego_acme, os.environ.get("CERT_DOMAIN", "*.erpnet.mcpworks.net"))
+    issuer = Issuer(data, lego_acme, os.environ.get("CERT_BASE", "erpnet.mcpworks.net"))
     cmd = argv[0] if argv else "serve"
     if cmd == "serve":
         every = int(os.environ.get("CHECK_EVERY_S", "21600"))
@@ -332,7 +346,7 @@ def main(argv: list[str]) -> int:
         threading.Thread(target=keeper, daemon=True, name="keeper").start()
         port = int(os.environ.get("PORT", "8095"))
         srv = ThreadingHTTPServer(("0.0.0.0", port), make_handler(issuer))
-        log.info("listening on :%d, %s, ACME %s", port, issuer.domain, os.environ.get("ACME_SERVER", LE_STAGING))
+        log.info("listening on :%d, %s, ACME %s", port, ",".join(issuer.wanted_names()), os.environ.get("ACME_SERVER", LE_STAGING))
         srv.serve_forever()
         return 0
     if cmd == "ensure":

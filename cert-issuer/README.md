@@ -2,12 +2,12 @@
 
 Решение: ADR erpnet-kasi-fleet/0005 (`claude.ai/specs/erpnet-kasi-fleet/adr/`), Росен 29.10.2026.
 
-Един сертификат за всички: **`*.erpnet.mcpworks.net`** от Let's Encrypt (DNS-01, без
-запис с адрес). В публичните дневници (Certificate Transparency) се вижда само той —
-без имена на клиенти, устройства или IP. Сървърът сам го издава и подновява (под 30
+Един сертификат за всички машини, от Let's Encrypt (DNS-01, без запис с адрес):
+**`*.erpnet.mcpworks.net`** + по едно **`*.<клиент>.erpnet.mcpworks.net`** за всеки клиент с
+записана машина — `*` покрива само едно ниво (RFC 6125), а машините са на две
+(`kasa.<клиент>.erpnet.mcpworks.net`). Нов клиент ⇒ сървърът сам преиздава с името му. Сървърът сам го издава и подновява (под 30
 дни); машините (проксито на касата) винаги го **дърпат** оттук през тунела на
-mcpworks.net и го слагат пред устройствата си (`bluecash-shop1.erpnet.mcpworks.net`
-→ BlueCash в LAN). Токенът за DNS е само тук.
+mcpworks.net и го слагат пред устройствата си (`kasa.shop1.erpnet.mcpworks.net`). Токенът за DNS е само тук.
 
 ```
 cert-issuer ──lego DNS-01──▶ Let's Encrypt

@@ -301,7 +301,7 @@ services:
       - CLOUDFLARE_DNS_API_TOKEN=${CERT_ISSUER_CF_DNS_TOKEN:-}
       - ACME_EMAIL=${CERT_ISSUER_ACME_EMAIL:-}
       - ACME_SERVER=${CERT_ISSUER_ACME_SERVER:-https://acme-staging-v02.api.letsencrypt.org/directory}
-      - CERT_DOMAIN=*.erpnet.mcpworks.net
+      - CERT_BASE=erpnet.mcpworks.net
     volumes:
       - cert-issuer-data:/data
     labels:

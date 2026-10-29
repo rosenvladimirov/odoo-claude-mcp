@@ -1,4 +1,4 @@
-"""cert-issuer: един `*.erpnet.mcpworks.net`, сървърът го държи, машините го дърпат, всяко теглене се записва.
+"""cert-issuer: един сертификат (`*.erpnet…` + `*.<клиент>.erpnet…`), сървърът го държи, машините го дърпат.
 
 Let's Encrypt е подменен с местен CA (`FakeACME`)."""
 
@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import issuer as m  # noqa: E402
 
 WILD = "*.erpnet.mcpworks.net"
+NAMES = [WILD, "*.shop1.erpnet.mcpworks.net", "*.shop2.erpnet.mcpworks.net"]
 
 
 class FakeACME:
@@ -31,16 +32,16 @@ class FakeACME:
         self.wrong_name = None
         self.ca = ec.generate_private_key(ec.SECP256R1())
 
-    def __call__(self, domain):
-        self.calls.append(domain)
+    def __call__(self, domains):
+        self.calls.append(list(domains))
         key = ec.generate_private_key(ec.SECP256R1())
         now = datetime.now(timezone.utc)
         cert = (x509.CertificateBuilder()
-                .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, domain)]))
+                .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, domains[0])]))
                 .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "fake")]))
                 .public_key(key.public_key()).serial_number(x509.random_serial_number())
                 .not_valid_before(now).not_valid_after(now + timedelta(days=self.days))
-                .add_extension(x509.SubjectAlternativeName([x509.DNSName(self.wrong_name or domain)]), False)
+                .add_extension(x509.SubjectAlternativeName([x509.DNSName(self.wrong_name or d) for d in domains]), False)
                 .sign(self.ca, hashes.SHA256()))
         return (cert.public_bytes(serialization.Encoding.PEM),
                 key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
@@ -74,9 +75,9 @@ def test_one_certificate_for_every_machine(env, tmp_path):
     iss, acme, _, s1, s2 = env
     assert iss.ensure() is True
     a, b = iss.for_till(s1, "1.2.3.4"), iss.for_till(s2, "5.6.7.8")
-    assert a[0] == b[0] == 200 and a[1] == b[1] and acme.calls == [WILD]
+    assert a[0] == b[0] == 200 and a[1] == b[1] and acme.calls == [NAMES]
     leaf = x509.load_pem_x509_certificate(a[1]["chain"].encode())
-    assert leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName) == [WILD]
+    assert leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName) == NAMES
     assert a[1]["key"].startswith("-----BEGIN PRIVATE KEY-----")
     assert oct((tmp_path / "certs" / "wildcard.key").stat().st_mode)[-3:] == "600"
 
@@ -113,7 +114,7 @@ def test_no_certificate_yet_is_503_and_starts_issuing(env):
         if iss.current():
             break
         time.sleep(0.02)
-    assert acme.calls == [WILD] and iss.for_till(s1)[0] == 200
+    assert acme.calls == [NAMES] and iss.for_till(s1)[0] == 200
 
 
 def test_renewed_only_when_30_days_or_less_are_left(env):
@@ -123,7 +124,7 @@ def test_renewed_only_when_30_days_or_less_are_left(env):
     clock.t += 59 * 86400
     assert iss.ensure() is False
     clock.t += 86400 + 1
-    assert iss.ensure() is True and acme.calls == [WILD, WILD]
+    assert iss.ensure() is True and acme.calls == [NAMES, NAMES]
 
 
 def test_a_certificate_for_another_name_is_not_stored(env):
@@ -158,7 +159,7 @@ def test_http(env, monkeypatch):
         assert get("/v1/cert")[0] == 401
         assert get("/v1/cert", {"Authorization": "Bearer nope"})[0] == 401
         st, body = get("/v1/cert", {"Authorization": "Bearer " + s1, "CF-Connecting-IP": "203.0.113.7"})
-        assert st == 200 and json.loads(body)["names"] == [WILD]
+        assert st == 200 and json.loads(body)["names"] == NAMES
         assert iss.overview()["pulls"][-1]["address"] == "203.0.113.7"
         assert get("/")[0] == 403 and get("/v1/overview")[0] == 403
         # без Access пред нас заглавката не значи нищо (може да се подправи)
@@ -173,3 +174,28 @@ def test_http(env, monkeypatch):
         assert get("/healthz") == (200, b'{"ok": true}')
     finally:
         srv.shutdown()
+
+
+def test_a_new_client_is_added_to_the_one_certificate(env):
+    iss, acme, _, s1, _ = env
+    iss.ensure()
+    old = iss.current()
+    s3 = iss.add_till("shop3/kasa1")
+    assert iss.wanted_names() == NAMES + ["*.shop3.erpnet.mcpworks.net"] and iss.needs_issue()
+    # машината на стар клиент си тегли стария, докато новият се издава
+    assert iss.for_till(s1)[1]["serial"] == old["serial"]
+    st, _ = iss.for_till(s3)                 # новият клиент още го няма в сертификата
+    assert st == 503
+    for _ in range(100):
+        if iss.current()["serial"] != old["serial"]:
+            break
+        time.sleep(0.02)
+    st, body = iss.for_till(s3)
+    assert st == 200 and "*.shop3.erpnet.mcpworks.net" in body["names"] and WILD in body["names"]
+
+
+def test_a_second_till_of_the_same_client_does_not_reissue(env):
+    iss, acme, *_ = env
+    iss.ensure()
+    iss.add_till("shop1/kasa2")
+    assert not iss.needs_issue() and iss.ensure() is False and len(acme.calls) == 1
