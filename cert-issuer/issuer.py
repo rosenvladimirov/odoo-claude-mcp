@@ -419,7 +419,8 @@ def main(argv: list[str]) -> int:
         srv.serve_forever()
         return 0
     if cmd == "ensure":
-        return 0 if issuer.ensure() or not issuer.needs_issue() else 1
+        issuer.ensure_all()          # общият и допълнителните; в този процес, не на заден план
+        return 0
     if cmd == "pulls":
         print(json.dumps(issuer.overview(), indent=2))
         return 0
@@ -428,8 +429,8 @@ def main(argv: list[str]) -> int:
         return 0
     if cmd == "set-extra" and len(argv) >= 2:
         print(json.dumps(issuer.set_extra(argv[1], argv[2:])))
-        issuer._ensure_in_background()
-        time.sleep(1)
+        # Издаването: от сървъра (keeper) или `issuer.py ensure` — фонов поток тук би
+        # умрял заедно с командата.
         return 0
     if cmd == "remove-till" and len(argv) == 2:
         return 0 if issuer.remove_till(argv[1]) else 1
