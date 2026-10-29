@@ -284,7 +284,32 @@ services:
     labels:
       - "com.blconsulting.service=centrifugo"
 
+  # ─── cert-issuer (сертификатът на машините — ADR erpnet-kasi-fleet/0005) ─
+  # Един Let's Encrypt `*.erpnet.mcpworks.net` (DNS-01, без запис с адрес); сървърът
+  # го подновява, машините го дърпат през тунела на mcpworks.net, всяко теглене се
+  # записва. Само тук живее токенът за DNS. Без порт навън. ACME_SERVER е staging,
+  # докато изрично не се смени на production.
+  cert-issuer:
+    build:
+      context: ./cert-issuer
+      dockerfile: Dockerfile
+    container_name: cert-issuer
+    restart: unless-stopped
+    networks:
+      - cloudflare-net
+    environment:
+      - CLOUDFLARE_DNS_API_TOKEN=${CERT_ISSUER_CF_DNS_TOKEN:-}
+      - ACME_EMAIL=${CERT_ISSUER_ACME_EMAIL:-}
+      - ACME_SERVER=${CERT_ISSUER_ACME_SERVER:-https://acme-staging-v02.api.letsencrypt.org/directory}
+      - CERT_DOMAIN=*.erpnet.mcpworks.net
+    volumes:
+      - cert-issuer-data:/data
+    labels:
+      - "com.blconsulting.service=cert-issuer"
+
 volumes:
+  cert-issuer-data:
+    driver: local
   mcp-repos:
     driver: local
   mcp-backups:
