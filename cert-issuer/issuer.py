@@ -18,6 +18,16 @@
     GET  /            кои машини кога са теглили (зад Access на тунела)
     GET  /healthz
 
+    Admin API (ADR erpnet-kasi-fleet/0012, за услугата till-enroller) — само зад Cloudflare
+    Access със service token: заглавката Cf-Access-Jwt-Assertion се проверява тук (подпис
+    срещу ключовете на екипа, aud, iss, срок, common_name = разрешен service token).
+    Без нея → 401. Ключът на касата е cf_hostname (`<каса>.<клиент>.<CERT_BASE>`).
+
+    POST   /v1/admin/tills              {"till": "<cf_hostname>"} → {"till", "secret"} (тайната веднъж)
+    DELETE /v1/admin/tills/<cf_hostname>                          → {"till", "removed"}
+    POST   /v1/admin/tills/<cf_hostname>/san                       → {"till", "extra"}
+                                         добавя `<каса>.<клиент>.<LAN_ZONE>` (ADR-0013)
+
     python issuer.py serve
     python issuer.py add-till <клиент>/<каса>        # печата тайната веднъж
     python issuer.py rotate-till <клиент>/<каса>
@@ -29,17 +39,21 @@
 
 Env: CERT_ISSUER_DATA (/data), CERT_BASE (erpnet.mcpworks.net), CLOUDFLARE_DNS_API_TOKEN, ACME_EMAIL,
 ACME_SERVER (по подразбиране staging — production се пуска изрично),
-PORT (8095), CHECK_EVERY_S (21600).
+PORT (8095), CHECK_EVERY_S (21600), LAN_ZONE (lan.mcpworks.net),
+ACCESS_TEAM_DOMAIN (<екип>.cloudflareaccess.com), ACCESS_ADMIN_AUD (AUD на приложението в Access),
+ACCESS_ADMIN_CLIENT_IDS (Client ID-тата на разрешените service token-и, със запетая).
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import html
 import json
 import logging
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -51,6 +65,9 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 log = logging.getLogger("cert-issuer")
 
@@ -58,6 +75,9 @@ LE_STAGING = "https://acme-staging-v02.api.letsencrypt.org/directory"
 LE_PRODUCTION = "https://acme-v02.api.letsencrypt.org/directory"
 RENEW_DAYS = 30
 MAX_PULLS_KEPT = 2000
+MAX_ADMIN_BODY = 4096
+# Slug по договора v1 (CONTRACT_v1.md, `till` и `erpnet_slug`).
+SLUG_RE = re.compile(r"^[a-z0-9-]{1,30}$")
 
 
 def _sha256(s: str) -> str:
@@ -66,6 +86,99 @@ def _sha256(s: str) -> str:
 
 def _ts(t: float) -> str:
     return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _b64u_dec(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+class AccessVerifier:
+    """Проверка на Cf-Access-Jwt-Assertion за admin API (ADR erpnet-kasi-fleet/0012).
+
+    Заглавката сама по себе си не значи нищо: всеки в мрежата на контейнера може да я
+    сложи. Затова тук се проверява подписът (RS256) срещу ключовете на екипа
+    (`https://<екип>/cdn-cgi/access/certs`), `aud`, `iss`, срокът и че токенът е на
+    разрешен service token (`common_name` = Client ID). Без настройка — всичко е отказ.
+    `fetch_keys() -> {"keys": [...]}` в тестовете е подменен.
+    """
+
+    KEYS_TTL = 3600
+    LEEWAY = 60
+
+    def __init__(self, team_domain: str, aud: str, client_ids: tuple[str, ...],
+                 fetch_keys: Optional[Callable[[], dict]] = None,
+                 now: Callable[[], float] = time.time):
+        self.team = team_domain.strip().removeprefix("https://").strip("/")
+        self.aud = aud.strip()
+        self.client_ids = tuple(c.strip() for c in client_ids if c.strip())
+        self.fetch_keys = fetch_keys or self._fetch_keys
+        self.now = now
+        self._keys: dict[str, rsa.RSAPublicKey] = {}
+        self._keys_at = 0.0
+        self._lock = threading.Lock()
+
+    @classmethod
+    def from_env(cls) -> "AccessVerifier":
+        return cls(os.environ.get("ACCESS_TEAM_DOMAIN", ""), os.environ.get("ACCESS_ADMIN_AUD", ""),
+                   tuple(os.environ.get("ACCESS_ADMIN_CLIENT_IDS", "").split(",")))
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.team and self.aud and self.client_ids)
+
+    def _fetch_keys(self) -> dict:
+        import urllib.request
+        with urllib.request.urlopen(f"https://{self.team}/cdn-cgi/access/certs", timeout=10) as r:
+            return json.load(r)
+
+    def _key(self, kid: str) -> Optional[rsa.RSAPublicKey]:
+        with self._lock:
+            fresh = self.now() - self._keys_at < self.KEYS_TTL
+            if kid in self._keys and fresh:
+                return self._keys[kid]
+            # Непознат kid (ротация на ключовете) — ново теглене, но не по-често от 1/мин.
+            if fresh and self.now() - self._keys_at < 60:
+                return self._keys.get(kid)
+            try:
+                jwks = self.fetch_keys()
+            except Exception:  # noqa: BLE001
+                log.warning("access: cannot fetch the team keys")
+                return self._keys.get(kid)
+            keys = {}
+            for k in jwks.get("keys", []):
+                if k.get("kty") == "RSA" and k.get("kid"):
+                    keys[k["kid"]] = rsa.RSAPublicNumbers(
+                        int.from_bytes(_b64u_dec(k["e"]), "big"),
+                        int.from_bytes(_b64u_dec(k["n"]), "big")).public_key()
+            self._keys, self._keys_at = keys, self.now()
+            return keys.get(kid)
+
+    def verify(self, token: str) -> Optional[dict]:
+        """Съдържанието на токена, ако е валиден и от разрешен service token; иначе None."""
+        if not (self.configured and token):
+            return None
+        try:
+            h64, p64, s64 = token.split(".")
+            header = json.loads(_b64u_dec(h64))
+            claims = json.loads(_b64u_dec(p64))
+            if header.get("alg") != "RS256":
+                return None
+            key = self._key(str(header.get("kid", "")))
+            if key is None:
+                return None
+            key.verify(_b64u_dec(s64), f"{h64}.{p64}".encode(), padding.PKCS1v15(), hashes.SHA256())
+        except (ValueError, TypeError, InvalidSignature, json.JSONDecodeError):
+            return None
+        aud = claims.get("aud")
+        auds = aud if isinstance(aud, list) else [aud]
+        now = self.now()
+        if (self.aud not in auds
+                or claims.get("iss") != f"https://{self.team}"
+                or not isinstance(claims.get("exp"), (int, float)) or claims["exp"] + self.LEEWAY < now
+                or claims.get("nbf", 0) - self.LEEWAY > now
+                or not any(hmac.compare_digest(str(claims.get("common_name", "")), c) for c in self.client_ids)):
+            return None
+        return claims
 
 
 class Issuer:
@@ -77,7 +190,8 @@ class Issuer:
     def __init__(self, data_dir: Path, acme: Callable[[list[str]], tuple[bytes, bytes]],
                  base: str = "erpnet.mcpworks.net",
                  now: Callable[[], float] = time.time,
-                 extra_zones: tuple[str, ...] = ()):
+                 extra_zones: tuple[str, ...] = (),
+                 lan_zone: str = "lan.mcpworks.net"):
         self.data = Path(data_dir)
         self.data.mkdir(parents=True, exist_ok=True)
         self.certs = self.data / "certs"
@@ -90,6 +204,8 @@ class Issuer:
         self._issuing: set[str] = set()
         # Зони, в които машина може да има допълнителни (публични) имена — само тук има DNS.
         self.extra_zones = tuple(z.lower().strip(".") for z in extra_zones if z.strip())
+        # Поддървото за LAN имената на касите (ADR-0013): `<каса>.<клиент>.<lan_zone>`.
+        self.lan_zone = lan_zone.lower().strip(".")
 
     # ─── регистърът на машините ───────────────────────────────────────
 
@@ -120,9 +236,45 @@ class Issuer:
             raise ValueError("till must be '<client>/<kasa>' in lower case, letters/digits/dash")
         return till
 
-    def add_till(self, till: str) -> str:
+    def check_host(self, host: str) -> str:
+        """Ключът на каса от admin API: cf_hostname `<каса>.<клиент>.<база>` (ADR-0012)."""
+        host = (host or "").strip()
+        labels = host.removesuffix("." + self.base).split(".") if host.endswith("." + self.base) else []
+        if len(labels) != 2 or not all(SLUG_RE.match(lbl) for lbl in labels):
+            raise ValueError(f"till must be '<kasa>.<client>.{self.base}' (slugs ^[a-z0-9-]{{1,30}}$)")
+        return host
+
+    def _client_of(self, till: str) -> str:
+        """Клиентът на машината: `<клиент>/<каса>` (ръчно, add-till) или cf_hostname (admin API)."""
+        if "/" in till:
+            return till.split("/")[0]
+        return till.removesuffix("." + self.base).split(".")[1]
+
+    def add_host(self, host: str) -> str:
+        """Admin API: касата по cf_hostname; тайната се показва веднъж, пази се само sha256."""
+        return self.add_till(self.check_host(host), checked=True)
+
+    def add_lan_name(self, host: str) -> list[str]:
+        """Допълнителното име `<каса>.<клиент>.<lan_zone>` в сертификата на тази машина (ADR-0013).
+
+        Името се извежда от cf_hostname, не се приема отвън — затова не минава през EXTRA_ZONES.
+        """
+        host = self.check_host(host)
+        till, client = host.removesuffix("." + self.base).split(".")
+        name = f"{till}.{client}.{self.lan_zone}"
+        with self._lock:
+            reg = self._load()
+            if host not in reg["tills"]:
+                raise KeyError(host)
+            extra = sorted(set(reg["tills"][host].get("extra", [])) | {name})
+            reg["tills"][host]["extra"] = extra
+            self._save(reg)
+        return extra
+
+    def add_till(self, till: str, checked: bool = False) -> str:
         """Нова (или сменена) тайна на машината; показва се веднъж."""
-        self._check_name(till)
+        if not checked:
+            self._check_name(till)
         secret = secrets.token_urlsafe(32)
         with self._lock:
             reg = self._load()
@@ -155,6 +307,9 @@ class Issuer:
             reg = self._load()
             gone = reg["tills"].pop(till, None) is not None
             self._save(reg)
+            # Отделният сертификат на машината (допълнителните имена) не остава на диска.
+            for p in self._paths("extra:" + till):
+                p.unlink(missing_ok=True)
         return gone
 
     def _till_by_secret(self, reg: dict, secret: str) -> Optional[str]:
@@ -233,7 +388,7 @@ class Issuer:
 
     def wanted_names(self) -> list[str]:
         """`*.<база>` + `*.<клиент>.<база>` за всеки клиент с записана машина."""
-        clients = sorted({t.split("/")[0] for t in self._load()["tills"]})
+        clients = sorted({self._client_of(t) for t in self._load()["tills"]})
         return [f"*.{self.base}"] + [f"*.{c}.{self.base}" for c in clients]
 
     def current(self) -> Optional[dict]:
@@ -270,7 +425,7 @@ class Issuer:
         if not till:
             return 401, {"detail": "unknown machine"}
         cur = self.current()
-        client = till.split("/")[0]
+        client = self._client_of(till)
         if cur is None or f"*.{client}.{self.base}" not in cur["names"]:
             # Сертификат няма или още не носи името на този клиент — издава се;
             # старият (ако има) остава в сила за другите машини.
@@ -348,7 +503,9 @@ def lego_acme(domains: list[str]) -> tuple[bytes, bytes]:
 
 # ─── HTTP ──────────────────────────────────────────────────────────────
 
-def make_handler(issuer: Issuer):
+def make_handler(issuer: Issuer, access: Optional[AccessVerifier] = None):
+    access = access or AccessVerifier.from_env()
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "cert-issuer/2"
 
@@ -395,6 +552,67 @@ def make_handler(issuer: Issuer):
             status, body = issuer.for_till(auth[7:].strip(), self._address())
             return self._json(status, body)
 
+        # ─── admin API (till-enroller, ADR-0012) ─────────────────────────
+
+        def _admin(self) -> Optional[str]:
+            """Пътят след /v1/admin/tills, ако заявката е от разрешен service token; иначе отговаря сама."""
+            if not (self.path == "/v1/admin/tills" or self.path.startswith("/v1/admin/tills/")):
+                self._json(404, {"detail": "Not Found"})
+                return None
+            claims = access.verify(self.headers.get("Cf-Access-Jwt-Assertion", ""))
+            if claims is None:
+                self._json(401, {"detail": "admin: Cloudflare Access service token required"})
+                return None
+            log.info("admin %s %s by %s", self.command, self.path, claims.get("common_name"))
+            return self.path[len("/v1/admin/tills"):]
+
+        def _body(self) -> Optional[dict]:
+            n = int(self.headers.get("Content-Length") or 0)
+            if n > MAX_ADMIN_BODY:
+                self._json(413, {"detail": "body too large"})
+                return None
+            try:
+                body = json.loads(self.rfile.read(n) or b"{}")
+            except ValueError:
+                body = None
+            if not isinstance(body, dict):
+                self._json(400, {"detail": "JSON object expected"})
+                return None
+            return body
+
+        def do_POST(self):  # noqa: N802
+            rest = self._admin()
+            if rest is None:
+                return None
+            body = self._body()
+            if body is None:
+                return None
+            try:
+                if rest == "":
+                    host = issuer.check_host(str(body.get("till", "")))
+                    return self._json(201, {"till": host, "secret": issuer.add_host(host)})
+                if rest.endswith("/san") and rest.count("/") == 2:
+                    host = rest[1:-len("/san")]
+                    return self._json(200, {"till": host, "extra": issuer.add_lan_name(host)})
+            except ValueError as e:
+                return self._json(400, {"detail": str(e)})
+            except KeyError:
+                return self._json(404, {"detail": "unknown machine"})
+            return self._json(404, {"detail": "Not Found"})
+
+        def do_DELETE(self):  # noqa: N802
+            rest = self._admin()
+            if rest is None:
+                return None
+            if not rest.startswith("/") or rest.count("/") != 1:
+                return self._json(404, {"detail": "Not Found"})
+            try:
+                host = issuer.check_host(rest[1:])
+            except ValueError as e:
+                return self._json(400, {"detail": str(e)})
+            # Идемпотентно: retire и rollback-ът на till-enroller може да го повторят.
+            return self._json(200, {"till": host, "removed": issuer.remove_till(host)})
+
     return Handler
 
 
@@ -402,7 +620,8 @@ def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     data = Path(os.environ.get("CERT_ISSUER_DATA", "/data"))
     issuer = Issuer(data, lego_acme, os.environ.get("CERT_BASE", "erpnet.mcpworks.net"),
-                    extra_zones=tuple(os.environ.get("EXTRA_ZONES", "").split(",")))
+                    extra_zones=tuple(os.environ.get("EXTRA_ZONES", "").split(",")),
+                    lan_zone=os.environ.get("LAN_ZONE", "lan.mcpworks.net"))
     cmd = argv[0] if argv else "serve"
     if cmd == "serve":
         every = int(os.environ.get("CHECK_EVERY_S", "21600"))
@@ -414,8 +633,10 @@ def main(argv: list[str]) -> int:
 
         threading.Thread(target=keeper, daemon=True, name="keeper").start()
         port = int(os.environ.get("PORT", "8095"))
-        srv = ThreadingHTTPServer(("0.0.0.0", port), make_handler(issuer))
-        log.info("listening on :%d, %s, ACME %s", port, ",".join(issuer.wanted_names()), os.environ.get("ACME_SERVER", LE_STAGING))
+        access = AccessVerifier.from_env()
+        srv = ThreadingHTTPServer(("0.0.0.0", port), make_handler(issuer, access))
+        log.info("listening on :%d, %s, ACME %s, admin API %s", port, ",".join(issuer.wanted_names()),
+                 os.environ.get("ACME_SERVER", LE_STAGING), "on" if access.configured else "off (no Access settings)")
         srv.serve_forever()
         return 0
     if cmd == "ensure":

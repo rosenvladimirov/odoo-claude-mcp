@@ -39,6 +39,32 @@ docker exec cert-issuer python /app/issuer.py remove-till shop1/kasa1
 docker exec cert-issuer python /app/issuer.py pulls
 ```
 
+## Admin API за till-enroller (ADR erpnet-kasi-fleet/0012, 0013)
+
+Услугата за записване (`till-enroller/`) добавя и маха касите сама, без `docker exec`.
+Ключът на касата е `cf_hostname` (`<каса>.<клиент>.erpnet.mcpworks.net`, slug-ове `^[a-z0-9-]{1,30}$`).
+
+```
+POST   /v1/admin/tills                  {"till": "<cf_hostname>"} → 201 {"till", "secret"}
+DELETE /v1/admin/tills/<cf_hostname>                               → 200 {"till", "removed"}  (идемпотентно)
+POST   /v1/admin/tills/<cf_hostname>/san                            → 200 {"till", "extra"}
+       добавя <каса>.<клиент>.lan.mcpworks.net в отделния сертификат на тази машина
+```
+
+Само зад Cloudflare Access със **service token**. Тук се проверява `Cf-Access-Jwt-Assertion`:
+подпис RS256 срещу ключовете на екипа (`https://<екип>/cdn-cgi/access/certs`), `aud`, `iss`, срок
+и `common_name` = Client ID на разрешен service token. Голите заглавки (`Cf-Access-Authenticated-User-Email`,
+`CF-Access-Client-Id`) не стигат — в мрежата на контейнера всеки може да ги сложи. Без настройка → 401.
+
+```
+CERT_ISSUER_ACCESS_TEAM_DOMAIN=<екип>.cloudflareaccess.com
+CERT_ISSUER_ACCESS_ADMIN_AUD=<AUD tag на приложението в Access>
+CERT_ISSUER_ACCESS_ADMIN_CLIENT_IDS=<Client ID на service token-а на till-enroller>
+```
+
+`add` пази само sha256 на тайната. `DELETE` спира машината веднага (certpull → 401) и трие отделния ѝ
+сертификат. ACME остава на staging, докато Росен изрично не реши production (гейт Г2).
+
 ## Тестове
 
 ```

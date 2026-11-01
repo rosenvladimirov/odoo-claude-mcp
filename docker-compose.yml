@@ -302,6 +302,12 @@ services:
       - ACME_EMAIL=${CERT_ISSUER_ACME_EMAIL:-}
       - ACME_SERVER=${CERT_ISSUER_ACME_SERVER:-https://acme-staging-v02.api.letsencrypt.org/directory}
       - CERT_BASE=erpnet.mcpworks.net
+      - LAN_ZONE=lan.mcpworks.net
+      # Admin API за till-enroller (ADR-0012): само JWT от Access на разрешен service token.
+      # Празно ⇒ admin API-то отказва всичко (401).
+      - ACCESS_TEAM_DOMAIN=${CERT_ISSUER_ACCESS_TEAM_DOMAIN:-}
+      - ACCESS_ADMIN_AUD=${CERT_ISSUER_ACCESS_ADMIN_AUD:-}
+      - ACCESS_ADMIN_CLIENT_IDS=${CERT_ISSUER_ACCESS_ADMIN_CLIENT_IDS:-}
     volumes:
       - cert-issuer-data:/data
     labels:
