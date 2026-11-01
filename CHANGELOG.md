@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `till-enroller/` — the till enrollment service (ADR erpnet-kasi-fleet/0012, contract v1): pulls the accepted
+  tills from the license server, creates tunnel, hostname route and cert-issuer till, reports, seals EFP1 v2 with
+  the till's `box_pub` and stores it; `lan` writes a DNS-only A record (only under `*.lan.mcpworks.net`, enforced
+  in code) and `retire` removes everything. Rollback on a failure in the middle, checked against the Cloudflare
+  lists; every action is reported to the license server. Secrets only from env, never in the log; `ENR_DRY_RUN=1`.
+- cert-issuer: admin API `POST/DELETE /v1/admin/tills` and `POST /v1/admin/tills/<host>/san`, only behind
+  Cloudflare Access with a service token (the `Cf-Access-Jwt-Assertion` is verified); ACME stays on staging.
+
 ## [3.3.20] — 2026-10-22 — Work timers of o-experts in odoo_timesheet_timer
 
 ### Added

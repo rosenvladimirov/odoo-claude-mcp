@@ -313,6 +313,36 @@ services:
     labels:
       - "com.blconsulting.service=cert-issuer"
 
+  # ─── till-enroller (услугата за записване на касите — ADR erpnet-kasi-fleet/0012) ─
+  # Държи CF токена (Tunnel Edit, hostname routes, DNS Edit на mcpworks.net; DNS пише само
+  # под *.lan.mcpworks.net — ограничението е в кода). Без порт и без маршрут навън: само
+  # изходящи към лицензионния сървър, Cloudflare API и cert-issuer (през Access).
+  till-enroller:
+    build:
+      context: ./till-enroller
+      dockerfile: Dockerfile
+    container_name: till-enroller
+    restart: unless-stopped
+    networks:
+      - cloudflare-net
+    environment:
+      - CF_API_TOKEN=${TILL_ENROLLER_CF_API_TOKEN:-}
+      - CF_ACCOUNT_ID=${TILL_ENROLLER_CF_ACCOUNT_ID:-}
+      - CF_ZONE_ID=${TILL_ENROLLER_CF_ZONE_ID:-}
+      - LS_URL=${TILL_ENROLLER_LS_URL:-}
+      - LS_API_KEY=${TILL_ENROLLER_LS_API_KEY:-}
+      - CI_URL=${TILL_ENROLLER_CI_URL:-}
+      - CI_PULL_URL=${TILL_ENROLLER_CI_PULL_URL:-}
+      - CI_ACCESS_CLIENT_ID=${TILL_ENROLLER_CI_ACCESS_CLIENT_ID:-}
+      - CI_ACCESS_CLIENT_SECRET=${TILL_ENROLLER_CI_ACCESS_CLIENT_SECRET:-}
+      - ENR_SSH_PUBKEYS=${TILL_ENROLLER_SSH_PUBKEYS:-}
+      - ENR_INTERVAL_S=${TILL_ENROLLER_INTERVAL_S:-30}
+      # Сух режим (1): без CF повиквания, с фалшиви id-та — но LS и cert-issuer са истински,
+      # затова само срещу тестов лицензионен сървър. Без CF_* и без сух режим услугата не тръгва.
+      - ENR_DRY_RUN=${TILL_ENROLLER_DRY_RUN:-0}
+    labels:
+      - "com.blconsulting.service=till-enroller"
+
 volumes:
   cert-issuer-data:
     driver: local

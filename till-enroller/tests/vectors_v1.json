@@ -1,0 +1,35 @@
+{
+ "_note": "ТЕСТОВИ ключове — само за тестове на договор v1",
+ "grant_public_key_b64": "34Qwkytg5LZk58DTQoVS4bYzha2DsjkAZbiH975b79Q=",
+ "grant_private_key_b64": "2fl4leh9t9ZK5MzoNG5fjcS7zD5zQ9ArTZAOK2JPkPk=",
+ "grant": {
+  "payload": {
+   "v": 1,
+   "kind": "till",
+   "vat": "BG999999999",
+   "db_uuid": "0b3f7c1e-1111-4222-8333-944444444444",
+   "instance": "zzclient-prod",
+   "till": "kasa1",
+   "till_ref": "6f1d2c3b-aaaa-4bbb-8ccc-0123456789ab",
+   "cf_hostname": "kasa1.zzclient.erpnet.mcpworks.net",
+   "cf_tunnel_id": "11111111-2222-4333-8444-555555555555",
+   "fp": "2044f5fa1b26519f961cc24c94ff8d34a5961843c89033338dfe0674e5486bb5",
+   "nonce": "n0nce-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "exp": 1893456000
+  },
+  "sig": "ihvwd/DeoQj0GHUypgjfLw0XmXs400hXcqebLTKk2I+osxAra8uNVQ5cop9/KgsNLwWBegObxpY/ZtOatkw4Ag=="
+ },
+ "grant_canonical": "{\"cf_hostname\":\"kasa1.zzclient.erpnet.mcpworks.net\",\"cf_tunnel_id\":\"11111111-2222-4333-8444-555555555555\",\"db_uuid\":\"0b3f7c1e-1111-4222-8333-944444444444\",\"exp\":1893456000,\"fp\":\"2044f5fa1b26519f961cc24c94ff8d34a5961843c89033338dfe0674e5486bb5\",\"instance\":\"zzclient-prod\",\"kind\":\"till\",\"nonce\":\"n0nce-aaaaaaaaaaaaaaaaaaaaaaaaaa\",\"till\":\"kasa1\",\"till_ref\":\"6f1d2c3b-aaaa-4bbb-8ccc-0123456789ab\",\"v\":1,\"vat\":\"BG999999999\"}",
+ "grant_token": "eyJwYXlsb2FkIjp7ImNmX2hvc3RuYW1lIjoia2FzYTEuenpjbGllbnQuZXJwbmV0Lm1jcHdvcmtzLm5ldCIsImNmX3R1bm5lbF9pZCI6IjExMTExMTExLTIyMjItNDMzMy04NDQ0LTU1NTU1NTU1NTU1NSIsImRiX3V1aWQiOiIwYjNmN2MxZS0xMTExLTQyMjItODMzMy05NDQ0NDQ0NDQ0NDQiLCJleHAiOjE4OTM0NTYwMDAsImZwIjoiMjA0NGY1ZmExYjI2NTE5Zjk2MWNjMjRjOTRmZjhkMzRhNTk2MTg0M2M4OTAzMzMzOGRmZTA2NzRlNTQ4NmJiNSIsImluc3RhbmNlIjoienpjbGllbnQtcHJvZCIsImtpbmQiOiJ0aWxsIiwibm9uY2UiOiJuMG5jZS1hYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsInRpbGwiOiJrYXNhMSIsInRpbGxfcmVmIjoiNmYxZDJjM2ItYWFhYS00YmJiLThjY2MtMDEyMzQ1Njc4OWFiIiwidiI6MSwidmF0IjoiQkc5OTk5OTk5OTkifSwic2lnIjoiaWh2d2QvRGVvUWowR0hVeXBnamZMdzBYbVhzNDAwaFhjcWViTFRLazJJK29zeEFyYTh1TlZRNWNvcDkvS2dzTkx3V0JlZ09ieHBZL1p0T2F0a3c0QWc9PSJ9",
+ "box_private_key_b64u": "-F8hwKynVhC7vHqproNjuVcp4_hQ5bAH1lBRIIYPc0o",
+ "box_pub_b64u": "EeN9PcGrkedHD707Y48XQmDaNmHL1pYWScb44omAGTs",
+ "efp1_plain": "{\"c\":\"zzclient\",\"cors\":[\"https://zzclient.example.com\"],\"cu\":\"https://certs.mcpworks.net\",\"h\":\"kasa1.zzclient.erpnet.mcpworks.net\",\"k\":\"kasa1\",\"pt\":\"eyJwYXlsb2FkIjp7ImNmX2hvc3RuYW1lIjoia2FzYTEuenpjbGllbnQuZXJwbmV0Lm1jcHdvcmtzLm5ldCIsImNmX3R1bm5lbF9pZCI6IjExMTExMTExLTIyMjItNDMzMy04NDQ0LTU1NTU1NTU1NTU1NSIsImRiX3V1aWQiOiIwYjNmN2MxZS0xMTExLTQyMjItODMzMy05NDQ0NDQ0NDQ0NDQiLCJleHAiOjE4OTM0NTYwMDAsImZwIjoiMjA0NGY1ZmExYjI2NTE5Zjk2MWNjMjRjOTRmZjhkMzRhNTk2MTg0M2M4OTAzMzMzOGRmZTA2NzRlNTQ4NmJiNSIsImluc3RhbmNlIjoienpjbGllbnQtcHJvZCIsImtpbmQiOiJ0aWxsIiwibm9uY2UiOiJuMG5jZS1hYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsInRpbGwiOiJrYXNhMSIsInRpbGxfcmVmIjoiNmYxZDJjM2ItYWFhYS00YmJiLThjY2MtMDEyMzQ1Njc4OWFiIiwidiI6MSwidmF0IjoiQkc5OTk5OTk5OTkifSwic2lnIjoiaWh2d2QvRGVvUWowR0hVeXBnamZMdzBYbVhzNDAwaFhjcWViTFRLazJJK29zeEFyYTh1TlZRNWNvcDkvS2dzTkx3V0JlZ09ieHBZL1p0T2F0a3c0QWc9PSJ9\",\"reg\":\"https://zzclient.example.com\",\"ssh\":[],\"t\":\"11111111-2222-4333-8444-555555555555\",\"tok\":\"eyJ0ZXN0IjoidHVubmVsLXRva2VuIn0\",\"v\":2}",
+ "sealed_efp1": "UACStnqZBBDjGmuzLV433qg9UAjQkuwlfST51R-Uw3gsAQU-JmKKU5scLPKYuF0mc2mITv6gkWQMUyp-fHGUKk2avQQxMCUZSQqEOWsex6I8llhYOR76eib8XCq3CvgeiG3LiywntgePQD8eryEMn60Tf04dirlSVwF8x_sESm5-8r1b73ZPseSI7WVz_Bll7kh7fSSknE4rYATHmI3IbYEH1SGAW5uw-07iDiy-_1M-oCT8E-7MXMYtTUhhM1zCu9u9ZXKLRPNiDhQ0To-jHECwLTmW94i_Rurti1cAQ6gDj9pCVn8lfKjag6YcU78LuPsN3Iyst6ww42Uwgo4gF7-k9f2ak6t9wWRpcr73-5eCaCK-yUn9EUcV6AtKB1OkBtpghMbtFCwl6mkIGx7GEk4GDjx6arAyQdYK3K2k_zfrUe1bs3CWEMK57iDChGWUWOUXD8PMDXyMIomMVaOgBtgregnJdcpfMPwiSWJOcsKqM4ZYW4z4W87cM8vkQ7wX0fNoWQyT0HTVV4DYD-8kEkBe5mZdxwrIIw_9DoLYLP458leFVn5iB2APyuN_Q6NFaw_o7aMuIM0SiNZdjAWNhNsoREH-P7JUrVchGIJjHqQtLEAGlxbJX0Bf8PNCnnouQeAYG8-p-vQkz3U4mt24XM3odTzo1eDlpiJotDiz8psGTuaqFyM_XlYRJYl6bHoevttVqhLrO0vNf_XlcZS2AXM0B3vQgZx-FHIWovtZ3-gAOBGSj8jN_XfGhyBFKWc3z7KpMuJbwLdiSM3GCH4ZGGjcR-SjNewJIwWLxZuym9mpOHz4HaBtn1mEeE3t6Z0yWMXmG6HNzxhMmSnIQUhXaMCadBE8vADU5gaZiqybgS9_XGryWYQYocqxQ2gr1cQGMlolzFYaNkVtGitdWtOvZehq78j5b_MDxrTX3jt8xJE-7waGHACUN99jvYogd5MxqDloKGfbJ-h1bNgnZNDmCc3F_h7dgpdTkx7cUvA84PEbrD-t6EczMVwOzYYp2wfaWdy3zlLqJnaYtSgL5NTxwt1HxkIq9ij9yR5WRUSKGXt8dZ8r3tNy13dSJhlP6wceebmtt22cf0AgmjITw0H-EaWCSJ5f9ikzaCBRRTDLcjshXdHEgP_cWbLkych6HHonmGfGxWWMZe-8HxdRP68CnrxG-niRIi1zeI8XfjXxjYUBuW5-9SKOdeudMeCMjxg5a5od_GtCrM_LwRosH9thjAKa4Lmn0KDnN2j5hJF2PjRz0n2iH1b0sogkUeRoVee3Pw5a2QMGNHGlwauLeEZKqcUApLQe0PFvKsT7OVGmkwmNMarL-6_O0JnDaQFwPMQxaaSEBhl45DtiWGTwH58eYjyhZpabeF2bqPZBKuYj",
+ "box_sig_private_key_b64u": "-fKZUlTpEJJOIgo8DKB3R_1SdLwEQprKjQw0__nvbjU",
+ "box_sig_pub_b64u": "itE9rvOkXEwTP98b9EJ2BkLl7L0L_UF-lUvU0ZJlvC4",
+ "fetch_ts": 1893450000,
+ "fetch_canonical": "{\"till_ref\":\"6f1d2c3b-aaaa-4bbb-8ccc-0123456789ab\",\"ts\":1893450000}",
+ "fetch_sig_b64u": "lXUY0Eoa6v42NCAR51XacJ8tI84cXJUnOyVdZvg5Odja7E67oqxsXm_lN2_lJBP3NHCuQLUPU9DnO0_F4sa6DA",
+ "operator_password_plain": "1234",
+ "operator_password_sealed": "ynH0wJftd-YEu659EDMvyEIuuu5vCL4LKEHvyHUc1XyzDwH0p7G7frde_1XfCk1NRxnmZQ"
+}
