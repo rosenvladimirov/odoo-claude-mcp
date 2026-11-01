@@ -59,7 +59,8 @@ def test_create_full_cycle(world):
     assert list(world.ci.tills) == [HOST]
     assert world.ls.reports == [{"till_ref": item()["till_ref"], "cf_tunnel_id": t["id"], "cf_hostname": HOST}]
     efp1 = efp1_of(world)
-    assert set(efp1) == {"v", "c", "k", "h", "t", "tok", "reg", "pt", "cu", "ssh", "cors"}   # без d/fp/crt
+    assert set(efp1) == {"v", "c", "k", "h", "t", "tok", "reg", "pt", "cu", "crt", "ssh", "cors"}   # без d/fp
+    assert efp1["crt"] == "CI-TILL-SECRET-" + HOST         # тайната за certpull от cert-issuer (поправка 1.1)
     assert efp1["v"] == 2 and efp1["c"] == "zzclient" and efp1["k"] == "kasa1" and efp1["h"] == HOST
     assert efp1["t"] == t["id"] and base64.b64decode(efp1["tok"]).decode() == f"TUNNEL-TOKEN-SECRET-{t['id']}"
     assert efp1["reg"] == "https://zzclient.example.com" and efp1["cors"] == ["https://zzclient.example.com"]
@@ -297,10 +298,12 @@ def test_secrets_never_reach_the_log_or_the_notes(world, caplog, capsys):
     world.ls.queue = [item("lan", ref="ok-1", lan_ip="10.9.9.9"), item("retire", ref="ok-1")]
     world.enr.run_once()
     tok_b64 = efp1_of(world, "ok-1")["tok"]
+    crt = efp1_of(world, "ok-1")["crt"]
+    assert crt == "CI-TILL-SECRET-" + HOST        # crt е в разпечатания EFP1…
     text = caplog.text + capsys.readouterr().err + json.dumps(world.ls.done)
     assert len(caplog.records) >= 5, "логът е празен — тестът не мери нищо"
     for secret in (CF_TOKEN, LS_KEY, CI_SECRET, CI_ID, tok_b64, base64.b64decode(tok_b64).decode(),
-                   "CI-TILL-SECRET", world.ls.stored["ok-1"]):
+                   crt, "CI-TILL-SECRET", world.ls.stored["ok-1"]):      # …а в лога и бележките — не
         assert secret not in text
 
 
@@ -313,3 +316,27 @@ def test_the_redactor_catches_a_secret_logged_by_mistake(caplog):
     except RuntimeError:
         m.log.exception("boom")
     assert "leaky-token-ABCDEF" not in caplog.text and "oops ***" in caplog.text
+
+
+def test_crt_is_kept_nowhere_but_in_the_sealed_efp1(world):
+    world.ls.queue = [item()]
+    world.enr.run_once()
+    crt = efp1_of(world)["crt"]
+    sent_to_ls = json.dumps([r["body"] for r in world.ls.requests])
+    assert crt not in sent_to_ls and crt not in json.dumps(vars(world.enr), default=str)
+
+
+def test_a_crt_logged_by_mistake_is_scrubbed(world, caplog):
+    caplog.set_level(logging.INFO)
+    world.ls.queue = [item()]
+    world.enr.run_once()
+    crt = efp1_of(world)["crt"]
+    m.log.info("debug %s", crt)
+    assert crt not in caplog.text and "debug ***" in caplog.text
+
+
+def test_cert_issuer_without_a_secret_rolls_back(world, monkeypatch):
+    monkeypatch.setattr(m.CertIssuer, "_call", lambda self, method, path, body=None: {})
+    world.ls.queue = [item()]
+    world.enr.run_once()
+    assert world.cf.tunnels == {} and world.ls.done[0]["ok"] is False and "failed at cert-issuer" in world.ls.done[0]["note"]

@@ -152,11 +152,15 @@ def unseal(box_private: bytes, sealed: str) -> bytes:
 
 
 def build_efp1(client: str, till: str, host: str, tunnel_id: str, tunnel_token: str,
-               reg: str, grant_token: str, cert_url: str, ssh: list[str]) -> dict:
-    """EFP1 v2 по договора. `d`/`fp`/`crt` не се пращат: паролите идват по флота
-    (`password_sealed`), сертификатът се тегли от cert-issuer."""
-    return {"v": 2, "c": client, "k": till, "h": host, "t": tunnel_id, "tok": tunnel_token,
+               reg: str, grant_token: str, cert_url: str, ssh: list[str], crt: Optional[str] = None) -> dict:
+    """EFP1 v2 по договора (поправка 1.1). `crt` е тайната за certpull от cert-issuer — само тук,
+    в запечатания EFP1. `d`/`fp` не се пращат: паролите идват по флота (`password_sealed`).
+    Без `crt` (само векторите на договора v1) ключът липсва."""
+    efp1 = {"v": 2, "c": client, "k": till, "h": host, "t": tunnel_id, "tok": tunnel_token,
             "reg": reg, "pt": grant_token, "cu": cert_url, "ssh": list(ssh), "cors": [reg]}
+    if crt is not None:
+        efp1["crt"] = crt
+    return efp1
 
 
 # ─── имената ───────────────────────────────────────────────────────────
@@ -276,10 +280,13 @@ class CertIssuer:
         _, b = _http("CI", method, self.url + path, path, self._auth, body)
         return b if isinstance(b, dict) else {}
 
-    def add(self, host: str) -> None:
-        # Тайната за certpull се връща веднъж. По договора v2 EFP1 не носи `crt`, затова
-        # услугата не я пази и не я праща нататък (виж README, „Отворено“).
-        self._call("POST", "/v1/admin/tills", {"till": host})
+    def add(self, host: str) -> str:
+        """Тайната за certpull (показва се веднъж). Отива само в запечатания EFP1 (`crt`)."""
+        secret = self._call("POST", "/v1/admin/tills", {"till": host}).get("secret")
+        if not secret:
+            raise RuntimeError("cert-issuer add: no secret in the answer")
+        REDACT.add(secret)
+        return secret
 
     def remove(self, host: str) -> bool:
         return bool(self._call("DELETE", "/v1/admin/tills/" + host).get("removed"))
@@ -523,12 +530,13 @@ class Enroller:
             REDACT.add(tok)
             step = "cert-issuer"
             undo.append(("cert-issuer", lambda: self.ci.remove(host)))
-            self.ci.add(host)
+            crt = self.ci.add(host)
             step = "report"
             grant_token, reg = self.ls.report(ref, t["id"], host)
             REDACT.add(grant_token)
             step = "seal"
-            efp1 = build_efp1(client, till, host, t["id"], tok, reg, grant_token, self.cert_url, list(self.ssh_keys))
+            efp1 = build_efp1(client, till, host, t["id"], tok, reg, grant_token, self.cert_url,
+                              list(self.ssh_keys), crt=crt)
             sealed = seal(box_pub, canonical_json(efp1).encode())
             step = "store"
             self.ls.store(ref, sealed)

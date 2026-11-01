@@ -8,7 +8,7 @@
 
 | действие | какво прави | при провал |
 |---|---|---|
-| `create` | тунел `erpnet-<клиент>-<каса>` → маршрут `<каса>.<клиент>.erpnet.mcpworks.net` → токен на тунела → cert-issuer `POST /v1/admin/tills` → LS `report` (подписано разрешение, `reg`) → EFP1 v2, запечатан с `box_pub` → LS `store` → `done` | rollback в обратен ред, после метене по списъка в CF и сверка; `done{ok:false}` с бележка какво е останало |
+| `create` | тунел `erpnet-<клиент>-<каса>` → маршрут `<каса>.<клиент>.erpnet.mcpworks.net` → токен на тунела → cert-issuer `POST /v1/admin/tills` (тайната за certpull) → LS `report` (подписано разрешение, `reg`) → EFP1 v2 с `crt`, запечатан с `box_pub` → LS `store` → `done` | rollback в обратен ред, после метене по списъка в CF и сверка; `done{ok:false}` с бележка какво е останало |
 | `lan` | DNS-only `A <каса>.<клиент>.lan.mcpworks.net → lan_ip` (RFC1918) → SAN в cert-issuer → `done` | новият запис се трие, старият адрес се връща |
 | `retire` | маха маршрута, тунела, DNS записа и касата в cert-issuer, сверява с CF → `done` | `done{ok:false}` със списък на оставеното |
 
@@ -65,13 +65,15 @@ docker compose up -d till-enroller
 docker exec till-enroller python /app/enroller.py once     # един проход
 ```
 
+## Тайната за certpull (договор, поправка 1.1)
+
+cert-issuer връща тайната на касата при `POST /v1/admin/tills`. Услугата я слага като `crt` в EFP1
+преди запечатването и не я пази другаде: не е в паметта след прохода, не е в бележките към LS, не е
+в лога (`Redactor` я знае, ако някой я логне по грешка). Без тайна в отговора — rollback.
+`lan_ip` идва в записа от `pull` (поправка 1.1); без него `lan` → `done{ok:false}`.
+
 ## Отворено
 
-- **Тайната за certpull.** cert-issuer връща тайна на касата при `POST /v1/admin/tills`, но по
-  договора v1 EFP1 v2 не носи `crt`. Услугата не я пази и не я праща. Как касата се представя пред
-  cert-issuer без нея — решава се в договора (v2 на EFP1 или друг начин на удостоверяване).
-- **`lan_ip` в `pull`.** Договорът дава `{till_ref, client_slug, till, box_pub, action}`; за `lan` услугата
-  чете и `lan_ip` от същия запис. Без него `done{ok:false}`.
 - Маршрутите се четат с `per_page=1000` — над това трябва страниране.
 
 ## Тестове
