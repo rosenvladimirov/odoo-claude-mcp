@@ -1,0 +1,24 @@
+# till-watch — наблюдателят на касите (ADR erpnet-kasi-fleet/0017).
+# Тайните — в .env (0600): LS_URL, LS_API_KEY, WARP_ORG, WARP_CLIENT_ID, WARP_CLIENT_SECRET.
+# Без порт: само изходящи — LS и касите през WARP. WARP живее в мрежата на ТОЗИ
+# контейнер; на машината не пипа нито DNS, нито маршрути.
+services:
+  till-watch:
+    build: .
+    image: till-watch:local
+    container_name: till-watch
+    restart: unless-stopped
+    env_file: .env
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    volumes:
+      # регистрацията на устройството оцелява рестарт (иначе — ново устройство при всеки)
+      - warp-state:/var/lib/cloudflare-warp
+    labels:
+      - "com.blconsulting.service=till-watch"
+volumes:
+  warp-state:
