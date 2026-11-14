@@ -56,10 +56,23 @@ _OPENER = _no_redirect_opener()
 
 
 def check_till(host: str, port: int, timeout: float) -> dict:
-    """`/healthz` на една каса → `{ok, version?, devices?, error?}`. Никога не хвърля."""
+    """`/healthz` на една каса → `{ok, version?, devices?, error?}`. Никога не хвърля.
+
+    Първо `https://<име>/healthz` (каса с Traefik на 443 — Баръмски, Теолино),
+    после `http://<име>:<port>/healthz` (пакетите без Traefik). Грешката е и от двата.
+    """
     if not isinstance(host, str) or not host.endswith(ERPNET_SUFFIX) or "/" in host or ":" in host:
         return {"ok": False, "error": "bad_hostname"}
-    url = "http://%s:%d/healthz" % (host, port)
+    first = _check_url("https://%s/healthz" % host, timeout)
+    if first["ok"]:
+        return first
+    second = _check_url("http://%s:%d/healthz" % (host, port), timeout)
+    if second["ok"]:
+        return second
+    return {"ok": False, "error": ("https: %s; http: %s" % (first["error"], second["error"]))[:200]}
+
+
+def _check_url(url: str, timeout: float) -> dict:
     try:
         with _OPENER.open(urllib.request.Request(url, method="GET"), timeout=timeout) as resp:
             body = resp.read(HEALTHZ_MAX + 1)

@@ -52,12 +52,29 @@ def test_ok_gives_version_and_device_counts(till):
 
 
 def test_http_error_and_bad_body(till):
+    # фалшивата каса е само на http — https пада и грешката носи и двата пътя
     FakeTill.status = 401
-    assert watch.check_till(HOST, till, 3) == {"ok": False, "error": "http_401"}
+    r = watch.check_till(HOST, till, 3)
+    assert r["ok"] is False and r["error"].endswith("http: http_401")
     FakeTill.status, FakeTill.body = 200, b"<html>"
-    assert watch.check_till(HOST, till, 3) == {"ok": False, "error": "bad_json"}
+    assert watch.check_till(HOST, till, 3)["error"].endswith("http: bad_json")
     FakeTill.body = {"ok": False}
-    assert watch.check_till(HOST, till, 3) == {"ok": False, "error": "not_ok"}
+    assert watch.check_till(HOST, till, 3)["error"].endswith("http: not_ok")
+
+
+def test_https_first_then_http():
+    seen = []
+
+    def fake(url, timeout):
+        seen.append(url)
+        return {"ok": url.startswith("https"), "error": "x"} if url.startswith("https") else {"ok": True}
+    with mock.patch.object(watch, "_check_url", fake):
+        assert watch.check_till(HOST, 8001, 1)["ok"] is True
+    assert seen == ["https://%s/healthz" % HOST]
+    seen.clear()
+    with mock.patch.object(watch, "_check_url", lambda u, t: seen.append(u) or ({"ok": True} if u.startswith("http:") else {"ok": False, "error": "e"})):
+        assert watch.check_till(HOST, 8001, 1) == {"ok": True}
+    assert seen == ["https://%s/healthz" % HOST, "http://%s:8001/healthz" % HOST]
 
 
 def test_refused_is_an_error_not_an_exception():
