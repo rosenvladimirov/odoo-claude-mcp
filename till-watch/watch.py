@@ -40,6 +40,9 @@ ERPNET_SUFFIX = ".erpnet.mcpworks.net"
 REPORT_CHUNK = 500
 # Таван на отговора на /healthz — касата не може да ни напълни паметта
 HEALTHZ_MAX = 256 * 1024
+# Cloudflare пред лицензионния сървър спира подразбиращия се клиент на Python
+# (грешка 1010, измерено 14.11) — наблюдателят се представя със свое име
+USER_AGENT = "till-watch/1.0 (+ADR erpnet-kasi-fleet/0017)"
 
 
 # ─── една каса ─────────────────────────────────────────────────────────
@@ -74,7 +77,8 @@ def check_till(host: str, port: int, timeout: float) -> dict:
 
 def _check_url(url: str, timeout: float) -> dict:
     try:
-        with _OPENER.open(urllib.request.Request(url, method="GET"), timeout=timeout) as resp:
+        req = urllib.request.Request(url, method="GET", headers={"User-Agent": USER_AGENT})
+        with _OPENER.open(req, timeout=timeout) as resp:
             body = resp.read(HEALTHZ_MAX + 1)
     except urllib.error.HTTPError as exc:
         return {"ok": False, "error": "http_%d" % exc.code}
@@ -110,7 +114,8 @@ class LS:
     def post(self, path: str, body: dict) -> dict:
         req = urllib.request.Request(
             self.url + path, data=json.dumps(body).encode(), method="POST",
-            headers={"Content-Type": "application/json", "Authorization": "Bearer " + self._key})
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + self._key,
+                     "User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
             return json.loads(resp.read())
 

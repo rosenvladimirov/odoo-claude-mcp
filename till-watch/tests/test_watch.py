@@ -153,3 +153,39 @@ def test_report_is_chunked():
             return {"updated": len(body["checks"])}
     assert L("https://ls", "k").report([{"till_ref": str(i), "ok": True} for i in range(1201)]) == 1201
     assert sent == [500, 500, 201]
+
+
+def test_requests_carry_user_agent(till):
+    # Cloudflare пред LS спира подразбиращия се клиент на Python (1010) — и касата, и LS виждат името ни
+    seen = {}
+
+    class UA(FakeTill):
+        def do_GET(self):  # noqa: N802
+            seen["till"] = self.headers.get("User-Agent")
+            super().do_GET()
+    srv = HTTPServer(("127.0.0.1", 0), UA)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        watch.check_till(HOST, srv.server_address[1], 3)
+    finally:
+        srv.shutdown()
+    assert seen["till"] == watch.USER_AGENT
+
+    class LSHandler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            seen["ls"] = self.headers.get("User-Agent")
+            raw = b'{"tills": []}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *a):
+            pass
+    ls_srv = HTTPServer(("127.0.0.1", 0), LSHandler)
+    threading.Thread(target=ls_srv.serve_forever, daemon=True).start()
+    try:
+        assert watch.LS("http://127.0.0.1:%d" % ls_srv.server_address[1], "k").targets() == []
+    finally:
+        ls_srv.shutdown()
+    assert seen["ls"] == watch.USER_AGENT
